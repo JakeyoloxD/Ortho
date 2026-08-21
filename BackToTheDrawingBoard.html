@@ -776,24 +776,21 @@ function gridPitch(){
 }
 function resolveSnap(w){
   S.snapHit=null;
-  const tol=px(tolPx(11));
-  if(S.osnap){
-    let best=null, bestd=tol, bestk=0;
-    const rank={end:4,center:3,quad:2,mid:1};
-    for(const e of S.ents){
-      const L=S.layers[e.li]; if(!L||!L.on) continue;
-      const groups=[["end",entPoints(e)],["mid",entMids(e)],["center",entCenters(e)],["quad",entQuads(e)]];
-      for(const [kind,pts] of groups){
-        for(const p of pts){
-          const d=dist(p,w);
-          if(d<=tol && (d<bestd-1e-9 || (Math.abs(d-bestd)<1e-9 && rank[kind]>bestk))){
-            best={p,kind}; bestd=d; bestk=rank[kind];
-          }
-        }
-      }
+  if(S.osnap && !S.snapSuspend){
+    /* Moving the cursor away from where Tab was pressed abandons the cycle,
+       so the choice never survives into a pick you did not aim. */
+    if(S.snapAnchor && Math.hypot(S.mouse.sx-S.snapAnchor.sx, S.mouse.sy-S.snapAnchor.sy)>6)
+      snapCycleReset();
+    S.snapList=snapCandidates(w);
+    if(S.snapList.length){
+      if(S.snapCycle>=S.snapList.length) S.snapCycle=0;
+      const best=S.snapList[S.snapCycle];
+      S.snapHit={p:best.p, kind:best.kind, label:best.label,
+                 index:S.snapCycle, count:S.snapList.length};
+      return best.p;
     }
-    if(best){ S.snapHit=best; return best.p; }
-  }
+    S.snapCycle=0;
+  } else S.snapList=[];
   if(S.edgeAssist && S.refImage && S.refImage.visible){
     const ep=resolveImageEdgeSnap(w);
     if(ep){ S.snapHit={p:ep,kind:"edge"}; return ep; }
@@ -816,6 +813,7 @@ function cursorPoint(){
   if(MK_TOOLS[S.tool]) return raw;
   let p=resolveSnap(raw);
   const from=S.pending.length? S.pending[S.pending.length-1] : (S.base||null);
+  if(!S.snapHit) p=applyDimSnap(p,from);
   if(S.ortho && from && !S.snapHit) p=applyOrtho(p,from);
   return p;
 }
@@ -1037,6 +1035,10 @@ function measureAlongPick(i){
 }
 function setTool(t){
   if(S.touchUI) setTimeout(updateActionBar,0);
+  if(TOOLS[t] && TOOLS[t].experimental && !S.experimental){
+    echo("Experimental Features is off - turn it on in View \u203A Labs, or type LABS","warn");
+    return;
+  }
   const prev=S.tool; if(isMeasureTool(prev)&&prev!==t) clearMeasurement(false);
   S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; resetNudge();
   if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
@@ -1109,7 +1111,8 @@ function setPrompt(){
   if((S.tool==="pline"||S.tool==="spline")&&S.pending.length) txt="Next point or Enter to finish:";
   if(S.tool==="line"&&S.chain&&S.pending.length) txt="Next point or Enter to finish chain:";
   if((S.tool==="move"||S.tool==="copy")) txt = (S.base?"Destination":"Base point")+":";
-  if(S.tool==="measurebetween") txt=S.pending.length?(S.measureChain?"Select next reference or double-click to finish:":"Select second reference:"):"Select first reference:";
+  if(S.tool==="measurebetween") txt=(S.pending.length?(S.measureChain?"Select next reference or double-click to finish":"Select second reference"):"Select first reference")
+    +(S.snapHit?("  \u00B7  "+(S.snapHit.label||SNAP_NAME[S.snapHit.kind]||"")):"")+":";
   if(S.tool==="measurealong") txt="Select element:";
   document.getElementById("prompt").textContent=txt;
 }
@@ -1120,6 +1123,9 @@ function echo(m,cls){
 
 /* commit a picked point into the active tool */
 function feed(p){
+  if(S.snapOverride){ S.snapOverride=null; paintOptbar(); }
+  snapCycleReset();
+  if(XPICK[S.tool] && S.experimental){ XPICK[S.tool](p); return; }
   const T=TOOLS[S.tool];
   if(S.tool==="select"){ return; }
   if(S.tool==="measurebetween") return feedMeasureBetween(p);
@@ -1345,6 +1351,7 @@ function cancel(){
     S.measureEscArmed=true; echo("Esc again to exit Measure"); return;
   }
   S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
+  if(XFX.raf||XFX.marks.length) xfxStop();
   if(S.tool!=="select") setTool("select"); else { S.sel.clear(); draw(); updateProps(); }
   echo("");
 }
@@ -1818,6 +1825,7 @@ function draw(){
   drawSnapMarker();
   drawCross();
   mobilePaint();
+  xPaint();
 }
 function drawReferenceImage(){
   const R=S.refImage;
@@ -2147,13 +2155,32 @@ function drawBand(){
 function drawSnapMarker(){
   if(!S.snapHit) return;
   const {p,kind}=S.snapHit, sx=X(p.x), sy=Y(p.y), r=5;
-  ctx.strokeStyle=getCSS("--snap"); ctx.lineWidth=1.4; ctx.beginPath();
+  ctx.save();
+  ctx.strokeStyle=getCSS("--snap"); ctx.lineWidth=1.4; ctx.setLineDash([]);
+  ctx.beginPath();
   if(kind==="end") ctx.rect(sx-r,sy-r,r*2,r*2);
   else if(kind==="mid"){ctx.moveTo(sx-r,sy+r);ctx.lineTo(sx,sy-r);ctx.lineTo(sx+r,sy+r);ctx.closePath();}
   else if(kind==="center") ctx.arc(sx,sy,r,0,TAU);
-  else if(kind==="edge"){ctx.moveTo(sx-r,sy-r);ctx.lineTo(sx+r,sy+r);ctx.moveTo(sx+r,sy-r);ctx.lineTo(sx-r,sy+r);}
+  else if(kind==="int"||kind==="edge"){ctx.moveTo(sx-r,sy-r);ctx.lineTo(sx+r,sy+r);ctx.moveTo(sx+r,sy-r);ctx.lineTo(sx-r,sy+r);}
+  else if(kind==="near"){ctx.moveTo(sx-r,sy-r);ctx.lineTo(sx+r,sy-r);ctx.lineTo(sx-r,sy+r);ctx.lineTo(sx+r,sy+r);ctx.closePath();}
+  else if(kind==="perp"){ctx.moveTo(sx-r,sy-r);ctx.lineTo(sx-r,sy+r);ctx.lineTo(sx+r,sy+r);ctx.moveTo(sx-r,sy+r-3);ctx.lineTo(sx-r+3,sy+r-3);ctx.lineTo(sx-r+3,sy+r);}
+  else if(kind==="tan"){ctx.arc(sx,sy+2,r-1,0,TAU);ctx.moveTo(sx-r-1,sy-r+2);ctx.lineTo(sx+r+1,sy-r+2);}
+  else if(kind==="point"){ctx.moveTo(sx-r,sy);ctx.lineTo(sx+r,sy);ctx.moveTo(sx,sy-r);ctx.lineTo(sx,sy+r);ctx.arc(sx,sy,2,0,TAU);}
   else {ctx.moveTo(sx,sy-r-1);ctx.lineTo(sx+r+1,sy);ctx.lineTo(sx,sy+r+1);ctx.lineTo(sx-r-1,sy);ctx.closePath();}
   ctx.stroke();
+  const label=S.snapHit.label||SNAP_NAME[kind]||"";
+  if(label){
+    const more=S.snapHit.count>1 ? "  \u21e5" : "";
+    const txt=label+more;
+    ctx.font="10px "+getCSS("--ui");
+    ctx.textAlign="left"; ctx.textBaseline="middle";
+    const tw=ctx.measureText(txt).width+7;
+    ctx.globalAlpha=.9; ctx.fillStyle="rgba(25,28,33,.92)";
+    ctx.fillRect(sx+r+4, sy-8, tw, 15);
+    ctx.globalAlpha=1; ctx.fillStyle=getCSS("--snap");
+    ctx.fillText(txt, sx+r+8, sy);
+  }
+  ctx.restore();
 }
 function drawCross(){
   if(S.touchUI && !ptrs.size && !downAt) return;
@@ -2508,6 +2535,9 @@ Object.assign(ALIAS,{li:"line",p:"pline",rec:"rect",ci:"circle",dli:"dim",txt:"t
   sc:"scale",ar:"array",x:"explode",e:"erase"});
 function handleCommand(raw){
   const s=raw.toLowerCase();
+  /* Revit's snap overrides are only meaningful while a point is being asked
+     for, which is also what keeps SC available to the Scale tool otherwise. */
+  if(SNAP_CODE[s] && snapPickActive()){ snapSetOverride(SNAP_CODE[s]); return; }
   if(S.tool==="rotate" && S.pending.length===1 && /^-?[\d.]+$/.test(s)){
     const th=rad(parseFloat(s));
     snap();
@@ -2521,7 +2551,11 @@ function handleCommand(raw){
   if(ALIAS[s]==="erase") return eraseSel();
   if(ALIAS[s]) return setTool(ALIAS[s]);
   for(const [id,A] of Object.entries(ACTIONS)){
-    if(s===id.toLowerCase() || (A.alias&&s===A.alias.toLowerCase())) return A.run();
+    if(s===id.toLowerCase() || (A.alias&&s===A.alias.toLowerCase())){
+      if(XACTIONS.has(id) && !S.experimental)
+        return echo("Experimental Features is off - turn it on in View \u203A Labs, or type LABS","warn");
+      return A.run();
+    }
   }
   switch(s){
     case "erase": case "del": return eraseSel();
@@ -2532,6 +2566,12 @@ function handleCommand(raw){
     case "ortho": return toggle("ortho");
     case "mobile": case "touch": return setMobileUI(!S.touchUI);
     case "desktop": return setMobileUI(false);
+    case "ss": S.snapSuspend=!S.snapSuspend; S.snapOverride=null; snapCycleReset();
+      paintOptbar(); draw(); return echo(S.snapSuspend?"Snaps suspended":"Snaps on");
+    case "so": return snapSetOverride(null);
+    case "sr": S.osnap=!S.osnap; syncToggles(); draw(); return echo("Object snap "+(S.osnap?"on":"off"));
+    case "snaps": ribbonTab="View"; paintRibbon(); return echo("Snap settings are in View \u203A Snaps");
+    case "experimental": case "labs": xSetExperimental(!S.experimental); return;
     case "restore": return offerRestore();
     case "clearautosave": return clearAutosave();
     case "grid": case "gridshow": case "showgrid": return toggle("gridShow");
@@ -2556,7 +2596,7 @@ function handleCommand(raw){
 
 /* ============================================================ toggles */
 const TGID={ortho:"tg-ortho",gridShow:"tg-gridshow",gridSnap:"tg-snap",osnap:"tg-osnap",edgeAssist:"tg-edge",weld:"tg-weld"};
-const TGNAME={ortho:"Ortho",gridShow:"Grid",gridSnap:"Grid snap",osnap:"Object snap",edgeAssist:"Reference edge assist",weld:"Weld",punch:"Punch mode"};
+const TGNAME={ortho:"Ortho",gridShow:"Grid",gridSnap:"Grid snap",osnap:"Object snap",edgeAssist:"Reference edge assist",weld:"Weld",punch:"Punch mode",experimental:"Experimental Features"};
 function toggle(k){
   S[k]=!S[k];
   syncToggles();
@@ -4246,6 +4286,9 @@ function serializeDrawing(withImage){
     ents:S.ents, layers:S.layers, styles:S.styles, cur:S.cur, curStyle:S.curStyle,
     view:S.view, gridStep:S.gridStep, gridShow:S.gridShow, gridSnap:S.gridSnap,
     ortho:S.ortho, osnap:S.osnap, weld:S.weld, edgeAssist:S.edgeAssist, edgeThreshold:S.edgeThreshold,
+    snapOn:S.snapOn, snapSubdiv:S.snapSubdiv, dimSnap:S.dimSnap, dimSnapLen:S.dimSnapLen, dimSnapAng:S.dimSnapAng,
+    x:{weldR:S.x.weldR, ironTol:S.x.ironTol, repelPad:S.x.repelPad, wrapOffset:S.x.wrapOffset,
+       corridor:S.x.corridor, sonarRays:S.x.sonarRays, stampWord:S.x.stampWord},
     textHeight:S.textHeight, groupSeq:S.groupSeq,
     flow:S.flow, mk:S.mk, png:S.png,
     ref: refDoc(withImage!==false)
@@ -4262,6 +4305,12 @@ function applyDrawing(raw,label){
   if(d.view && isFinite(d.view.s) && d.view.s>0) S.view={cx:d.view.cx,cy:d.view.cy,s:d.view.s};
   for(const k of ["gridStep","gridShow","gridSnap","ortho","osnap","weld","edgeAssist","edgeThreshold","textHeight","groupSeq"])
     if(d[k]!==undefined) S[k]=d[k];
+  if(d.snapOn) for(const [k] of SNAP_KINDS) if(typeof d.snapOn[k]==="boolean") S.snapOn[k]=d.snapOn[k];
+  if(typeof d.snapSubdiv==="boolean") S.snapSubdiv=d.snapSubdiv;
+  if(d.x) Object.assign(S.x, sanX(d.x));
+  if(typeof d.dimSnap==="boolean") S.dimSnap=d.dimSnap;
+  if(d.dimSnapLen!=null) S.dimSnapLen=Math.max(0,Math.min(1e6,safeNum(d.dimSnapLen,0)));
+  if(d.dimSnapAng!=null) S.dimSnapAng=Math.max(0,Math.min(180,safeNum(d.dimSnapAng,0)));
   mergePlain(S.flow,d.flow); mergePlain(S.mk,d.mk); mergePlain(S.png,d.png);
   S.sel.clear(); S.undo.length=0; S.redo.length=0; S.op={}; S.pending=[]; S.base=null;
   flowInvalidateIndex();
@@ -4718,6 +4767,52 @@ function flowClearWaypoints(){
 }
 
 /* ============================================================ UI wiring */
+function snapWidget(){
+  const wrap=document.createElement("div"); wrap.className="rstack";
+  const grid=document.createElement("div");
+  grid.style.display="grid"; grid.style.gridTemplateColumns="repeat(3,auto)"; grid.style.gap="1px 8px";
+  for(const [k,name,code] of SNAP_KINDS){
+    const l=document.createElement("label");
+    l.style.display="flex"; l.style.alignItems="center"; l.style.gap="4px";
+    l.title=name+"  \u00B7  type "+code+" while picking to use it once";
+    const c=document.createElement("input"); c.type="checkbox"; c.checked=!!S.snapOn[k];
+    c.onchange=()=>{ S.snapOn[k]=c.checked; snapCycleReset(); draw(); };
+    const t=document.createElement("span"); t.className="oh"; t.textContent=name;
+    l.append(c,t); grid.append(l);
+  }
+  wrap.append(grid);
+  const row=document.createElement("div"); row.className="rrow"; row.style.gap="8px";
+  const sub=document.createElement("label");
+  sub.style.display="flex"; sub.style.alignItems="center"; sub.style.gap="4px";
+  sub.title="Keep offering the midpoint of the half you are hovering over";
+  const sc=document.createElement("input"); sc.type="checkbox"; sc.checked=!!S.snapSubdiv;
+  sc.onchange=()=>{ S.snapSubdiv=sc.checked; draw(); };
+  const st=document.createElement("span"); st.className="oh"; st.textContent="Halve repeatedly";
+  sub.append(sc,st);
+  const dim=document.createElement("label");
+  dim.style.display="flex"; dim.style.alignItems="center"; dim.style.gap="4px";
+  dim.title="Round the rubber band to fixed length and angle increments";
+  const dc=document.createElement("input"); dc.type="checkbox"; dc.checked=!!S.dimSnap;
+  dc.onchange=()=>{ S.dimSnap=dc.checked; paintRibbon(); draw(); };
+  const dt=document.createElement("span"); dt.className="oh"; dt.textContent="Increments";
+  dim.append(dc,dt);
+  row.append(sub,dim);
+  wrap.append(row);
+  if(S.dimSnap){
+    const r2=document.createElement("div"); r2.className="rrow"; r2.style.gap="4px";
+    const mk=(label,get,set)=>{
+      const l=document.createElement("label"); l.style.display="flex"; l.style.alignItems="center"; l.style.gap="3px";
+      const sp=document.createElement("span"); sp.className="oh"; sp.textContent=label;
+      const i=document.createElement("input"); i.type="number"; i.step="any"; i.value=get(); i.style.maxWidth="56px";
+      i.onchange=()=>{ const v=parseFloat(i.value); if(isFinite(v)) set(Math.max(0,v)); draw(); };
+      l.append(sp,i); return l;
+    };
+    r2.append(mk("mm",()=>S.dimSnapLen,v=>S.dimSnapLen=Math.min(1e6,v)),
+              mk("deg",()=>S.dimSnapAng,v=>S.dimSnapAng=Math.min(180,v)));
+    wrap.append(r2);
+  }
+  return wrap;
+}
 function pngWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
   const r1=document.createElement("div"); r1.className="rrow"; r1.style.gap="3px";
@@ -5349,6 +5444,28 @@ function sanStyles(a){
   }
   return out.length? out : [{name:"Continuous",w:0.25,pat:null}];
 }
+/* Booleans only, one per known snap kind - nothing else from the file gets
+   anywhere near the snap engine. */
+/* Numbers clamped to sane ranges, and the stamp wording can only ever be one
+   of ours - a file cannot put arbitrary text on a stamp layer. */
+function sanX(o){
+  const g=(k,dflt,lo,hi)=>{
+    const v=(o&&typeof o==="object")? safeNum(o[k],dflt) : dflt;
+    return Math.max(lo,Math.min(hi,v));
+  };
+  return {
+    weldR:g("weldR",9,0,400), ironTol:g("ironTol",1.4,0,400),
+    repelPad:g("repelPad",8,0,400), wrapOffset:g("wrapOffset",8,0,400),
+    corridor:g("corridor",60,4,4000), sonarRays:Math.round(g("sonarRays",24,4,72)),
+    stampWord: (o&&XSTAMPS.includes(o.stampWord))? o.stampWord : "VOID"
+  };
+}
+function sanSnapOn(o){
+  const out={};
+  for(const [k] of SNAP_KINDS)
+    out[k] = (o && typeof o==="object" && typeof o[k]==="boolean") ? o[k] : true;
+  return out;
+}
 function sanRef(r){
   if(!r || typeof r!=="object") return null;
   if(!okImageSrc(r.src)) return null;         // data: raster only, never a URL
@@ -5383,6 +5500,12 @@ function sanitizeDoc(d){
     textHeight:Math.abs(safeNum(d.textHeight,2.5,1e5))||2.5,
     groupSeq:Math.max(1,safeInt(d.groupSeq,1)),
     imageDropped:!!d.imageDropped,
+    snapOn:sanSnapOn(d.snapOn),
+    x:sanX(d.x),
+    snapSubdiv:d.snapSubdiv!==false,
+    dimSnap:!!d.dimSnap,
+    dimSnapLen:Math.max(0,Math.min(1e6,safeNum(d.dimSnapLen,0))),
+    dimSnapAng:Math.max(0,Math.min(180,safeNum(d.dimSnapAng,0))),
     ref:sanRef(d.ref)
   };
   if(d.view && typeof d.view==="object"){
@@ -5401,10 +5524,1312 @@ function sanitizeDoc(d){
   return out;
 }
 
+/* ============================================================ SNAPS v2
+   The Revit 2016 object snap set. What was here before covered endpoint,
+   midpoint, centre and quadrant, which is why measuring a wall to a circle had
+   nowhere to land except the centre: without Nearest, Perpendicular and
+   Tangent there is no point ON a curve to snap to.
+
+   Added: Intersection, Nearest, Perpendicular, Tangent, Points, and recursive
+   midpoints - halve a segment, then halve the half you are hovering over, as
+   deep as the zoom can usefully distinguish. Tab cycles the candidates under
+   the cursor; SE/SM/SN/SI/SC/SQ/SP/ST/SX override for one pick, SS suspends
+   snapping, SO clears an override, exactly as they do in Revit.
+
+   Every generator is bounded. Point snaps look at the nearest few entities,
+   intersections at fewer still, and subdivision stops when the candidates get
+   closer together than a finger. A drawing cannot be crafted to make snapping
+   quadratic.                                                                */
+
+const SNAP_KINDS=[
+  ["end",   "Endpoint",      "SE"],
+  ["int",   "Intersection",  "SI"],
+  ["mid",   "Midpoint",      "SM"],
+  ["center","Center",        "SC"],
+  ["quad",  "Quadrant",      "SQ"],
+  ["perp",  "Perpendicular", "SP"],
+  ["tan",   "Tangent",       "ST"],
+  ["point", "Point",         "SX"],
+  ["near",  "Nearest",       "SN"]
+];
+const SNAP_RANK={end:90,int:80,mid:70,center:60,quad:55,perp:50,tan:45,point:40,near:10};
+const SNAP_NAME={}; const SNAP_CODE={};
+for(const [k,name,code] of SNAP_KINDS){ SNAP_NAME[k]=name; SNAP_CODE[code.toLowerCase()]=k; }
+
+const SNAP_MAX_ENTS=40;        // entities considered for point snaps
+const SNAP_MAX_INT_ENTS=10;    // entities considered for intersections (pairs!)
+const SNAP_MAX_CAND=200;       // hard ceiling on candidates per resolve
+const SNAP_SUBDIV_PX=26;       // stop halving below this on-screen spacing
+const SNAP_SUBDIV_MAX=12;
+const ANNOT_TYPES=new Set(["text","mtext","node"]);
+
+S.snapOn={end:true,int:true,mid:true,center:true,quad:true,perp:true,tan:true,point:true,near:true};
+S.snapSubdiv=true;
+S.snapSuspend=false;
+S.snapOverride=null;
+S.snapCycle=0;
+S.snapList=[];
+S.snapAnchor=null;
+S.dimSnap=false;
+S.dimSnapLen=0;
+S.dimSnapAng=0;
+
+function snapEnabled(k){
+  if(S.snapSuspend) return false;
+  if(S.snapOverride) return S.snapOverride===k;
+  return !!S.snapOn[k];
+}
+function snapBase(){
+  if(S.pending.length) return S.pending[S.pending.length-1];
+  return S.base||null;
+}
+function projParam(p,a,b){
+  const ab=sub(b,a), dd=ab.x*ab.x+ab.y*ab.y;
+  if(dd<1e-18) return 0;
+  return ((p.x-a.x)*ab.x+(p.y-a.y)*ab.y)/dd;
+}
+function snapFrac(t,den){
+  let num=Math.round(t*den);
+  const g=(a,b)=>b?g(b,a%b):a;
+  const k=g(num,den)||1;
+  return (num/k)+"/"+(den/k);
+}
+/* Bounded spatial filter: only entities whose bounding box comes near the
+   cursor are considered at all. */
+function snapNearbyEnts(w,tol,cap){
+  const out=[];
+  for(let i=S.ents.length-1;i>=0;i--){
+    if(out.length>=cap) break;
+    const e=S.ents[i], L=S.layers[e.li];
+    if(!L||!L.on) continue;
+    const b=entBox(e);
+    if(!b||!isFinite(b.x0)||!isFinite(b.y1)) continue;
+    if(w.x<b.x0-tol||w.x>b.x1+tol||w.y<b.y0-tol||w.y>b.y1+tol) continue;
+    out.push(e);
+  }
+  return out;
+}
+/* Halve, then halve the half you are pointing at, and keep going until the
+   candidates would be closer together than you could aim at. */
+function snapSubdivisions(a,b,w){
+  const out=[];
+  const L=dist(a,b);
+  if(!(L>0)||!isFinite(L)) return out;
+  const tCur=Math.max(0,Math.min(1,projParam(w,a,b)));
+  let lo=0, hi=1;
+  for(let d=0; d<SNAP_SUBDIV_MAX; d++){
+    if(L*(hi-lo)*S.view.s < SNAP_SUBDIV_PX*2) break;
+    const mt=(lo+hi)/2;
+    const p=add(a,mul(sub(b,a),mt));
+    out.push({p, label: d===0 ? "Midpoint" : "Midpoint "+snapFrac(mt,Math.pow(2,d+1))});
+    if(!S.snapSubdiv) break;
+    if(tCur<mt) hi=mt; else lo=mt;
+  }
+  return out;
+}
+function snapSegmentsOf(e){
+  const cs=curvesOf(e), out=[];
+  for(const c of cs) if(c.k==="seg") out.push(c);
+  return out;
+}
+function nearestOnEnt(e,w){
+  let best=null,bd=1e18;
+  for(const c of curvesOf(e)){
+    let p=null;
+    if(c.k==="seg"){
+      const t=Math.max(0,Math.min(1,projParam(w,c.a,c.b)));
+      p=add(c.a,mul(sub(c.b,c.a),t));
+    } else if(c.k==="circ"||c.k==="arc"){
+      const d=sub(w,c.c), L=len(d);
+      if(!(L>1e-9)) continue;
+      const th=Math.atan2(d.y,d.x);
+      if(c.k==="arc" && !arcContains(c,wrap(th))) continue;
+      p=V(c.c.x+c.r*Math.cos(th), c.c.y+c.r*Math.sin(th));
+    }
+    if(!p||!isFinite(p.x)||!isFinite(p.y)) continue;
+    const dd=dist(p,w);
+    if(dd<bd){ bd=dd; best=p; }
+  }
+  return best;
+}
+function perpOnEnt(e,B){
+  const out=[];
+  if(!B) return out;
+  for(const c of curvesOf(e)){
+    if(c.k==="seg"){
+      const t=projParam(B,c.a,c.b);
+      if(t<-1e-9||t>1+1e-9) continue;
+      const p=add(c.a,mul(sub(c.b,c.a),t));
+      if(dist(p,B)>1e-9) out.push(p);
+    } else if(c.k==="circ"||c.k==="arc"){
+      const d=sub(B,c.c), L=len(d);
+      if(!(L>1e-9)) continue;
+      const u=mul(d,1/L);
+      for(const s of [1,-1]){
+        const p=add(c.c,mul(u,s*c.r));
+        if(c.k==="arc" && !arcContains(c,wrap(ang(c.c,p)))) continue;
+        out.push(p);
+      }
+    }
+  }
+  return out;
+}
+function tanOnEnt(e,B){
+  const out=[];
+  if(!B) return out;
+  for(const c of curvesOf(e)){
+    if(c.k!=="circ"&&c.k!=="arc") continue;
+    const d=sub(B,c.c), L=len(d);
+    if(!(L>c.r+1e-9)) continue;              // inside the circle: no tangent
+    const q=Math.max(-1,Math.min(1,c.r/L));  // acos domain guard
+    const a=Math.acos(q), base=Math.atan2(d.y,d.x);
+    for(const s of [1,-1]){
+      const th=base+s*a;
+      const p=V(c.c.x+c.r*Math.cos(th), c.c.y+c.r*Math.sin(th));
+      if(!isFinite(p.x)||!isFinite(p.y)) continue;
+      if(c.k==="arc" && !arcContains(c,wrap(ang(c.c,p)))) continue;
+      out.push(p);
+    }
+  }
+  return out;
+}
+function snapCandidates(w){
+  const tol=px(tolPx(11));
+  const out=[];
+  const push=(kind,p,label)=>{
+    if(out.length>=SNAP_MAX_CAND) return;
+    if(!p||!isFinite(p.x)||!isFinite(p.y)) return;
+    const d=dist(p,w);
+    if(d>tol) return;
+    out.push({p,kind,label:label||SNAP_NAME[kind],d});
+  };
+  const ents=snapNearbyEnts(w,tol,SNAP_MAX_ENTS);
+
+  for(const e of ents){
+    const annot=ANNOT_TYPES.has(e.t);
+    if(annot){
+      if(snapEnabled("point")) for(const p of entPoints(e)) push("point",p);
+    } else if(snapEnabled("end")){
+      for(const p of entPoints(e)) push("end",p);
+    }
+    if(snapEnabled("center")) for(const p of entCenters(e)) push("center",p);
+    if(snapEnabled("quad"))   for(const p of entQuads(e))   push("quad",p);
+    if(snapEnabled("mid")){
+      const segs=snapSegmentsOf(e);
+      if(segs.length){
+        for(const c of segs) for(const m of snapSubdivisions(c.a,c.b,w)) push("mid",m.p,m.label);
+      } else {
+        for(const p of entMids(e)) push("mid",p);
+      }
+    }
+  }
+
+  /* Nearest, perpendicular and tangent are only meaningful when the cursor is
+     actually over the element, which also keeps the work proportional. */
+  const base=snapBase();
+  for(const e of ents){
+    if(ANNOT_TYPES.has(e.t)) continue;
+    if(!entHit(e,w,tol)) continue;
+    if(snapEnabled("near")){ const p=nearestOnEnt(e,w); if(p) push("near",p); }
+    if(snapEnabled("perp")) for(const p of perpOnEnt(e,base)) push("perp",p);
+    if(snapEnabled("tan"))  for(const p of tanOnEnt(e,base)) push("tan",p);
+  }
+
+  if(snapEnabled("int")){
+    const few=ents.slice(0,SNAP_MAX_INT_ENTS);
+    for(let i=0;i<few.length;i++)
+      for(let j=i+1;j<few.length;j++){
+        let xs=[];
+        try{ xs=entInt(few[i],few[j],false,false)||[]; }catch(_){ xs=[]; }
+        for(const p of xs) push("int",p);
+        if(out.length>=SNAP_MAX_CAND) break;
+      }
+  }
+
+  /* Collapse duplicates that land on the same pixel, keeping the strongest. */
+  const seen=new Map();
+  for(const cand of out){
+    const key=Math.round(X(cand.p.x))+":"+Math.round(Y(cand.p.y));
+    const prev=seen.get(key);
+    if(!prev || SNAP_RANK[cand.kind]>SNAP_RANK[prev.kind]) seen.set(key,cand);
+  }
+  const list=[...seen.values()];
+  list.sort((a,b)=>{
+    const r=SNAP_RANK[b.kind]-SNAP_RANK[a.kind];
+    if(r) return r;
+    return a.d-b.d;
+  });
+  return list;
+}
+function snapCycleReset(){ S.snapCycle=0; S.snapAnchor=null; }
+function snapCycleNext(){
+  if(!S.snapList.length) return false;
+  S.snapCycle=(S.snapCycle+1)%S.snapList.length;
+  S.snapAnchor={sx:S.mouse.sx, sy:S.mouse.sy};
+  const c=S.snapList[S.snapCycle];
+  echo(c.label+"  ("+(S.snapCycle+1)+" of "+S.snapList.length+")  Tab for next");
+  draw();
+  return true;
+}
+function snapSetOverride(k){
+  S.snapOverride=k;
+  S.snapSuspend=false;
+  snapCycleReset();
+  echo(k? ("Snap override: "+SNAP_NAME[k]+" for the next pick") : "Snap override cleared");
+  paintOptbar(); draw();
+}
+/* Revit rounds the rubber band to fixed length and angle increments when
+   nothing better is under the cursor. */
+function applyDimSnap(p,from){
+  if(!S.dimSnap||!from) return p;
+  let d=sub(p,from), L=len(d);
+  if(!(L>1e-9)) return p;
+  let th=Math.atan2(d.y,d.x);
+  if(S.dimSnapAng>0){
+    const step=S.dimSnapAng*Math.PI/180;
+    th=Math.round(th/step)*step;
+  }
+  if(S.dimSnapLen>0) L=Math.max(S.dimSnapLen,Math.round(L/S.dimSnapLen)*S.dimSnapLen);
+  return V(from.x+L*Math.cos(th), from.y+L*Math.sin(th));
+}
+
+/* A snap override only makes sense while a point is being requested. */
+function snapPickActive(){
+  const T=TOOLS[S.tool];
+  if(!T) return false;
+  if(isMeasureTool(S.tool)) return true;
+  if(S.tool==="select") return false;
+  if(T.pick) return true;
+  return (T.pts===-1 || T.pts>0 || S.pending.length>0 || !!S.base);
+}
+
+/* ====================================================== EXPERIMENTAL FEATURES
+   Twenty tools where the physics is the mechanism, not the joke. Every one has
+   a job: repair imported geometry, prove an enclosure is closed, find the
+   duplicates you cannot see, lay out a diagram, or present one.
+
+   House rules for everything in here:
+     - bounded. Particle counts, iteration counts, raster size and animation
+       duration are all capped, so no drawing however hostile can turn an
+       effect into a hang.
+     - undoable. Anything that mutates geometry calls snap() first.
+     - invisible to exports. Effects paint after S.exporting has returned, so a
+       PNG or SVG never contains a spark.
+     - opt-in. The whole tab is hidden until you ask for it.                  */
+
+const XCAP={
+  PARTS: 1400,          // live particles
+  MS: 14000,            // any single effect
+  RASTER: 640,          // longest edge of the enclosure raster
+  CELLS: 640*640,
+  ITER: 400,            // layout relaxation passes
+  ENTS: 20000,          // entities any sweep will look at
+  PAIRS: 4000,          // pairwise comparisons
+  REPORT: 40            // findings listed before we summarise
+};
+const XSTAMPS=["VOID","REVISED","APPROVED","REJECTED","AS BUILT","DRAFT","FOR REVIEW","SUPERSEDED"];
+
+S.experimental=false;
+S.x={
+  weldR:9, ironTol:1.4, repelPad:8, wrapOffset:8, corridor:60, sonarRays:24,
+  stampWord:"VOID", xray:false, spotlight:false, current:false
+};
+
+/* ---- effect driver ----------------------------------------------------- */
+const XFX={parts:[], marks:[], until:0, raf:0, kind:null, data:null, t0:0};
+function xfxStop(){
+  if(XFX.raf) cancelAnimationFrame(XFX.raf);
+  XFX.raf=0; XFX.parts.length=0; XFX.marks.length=0; XFX.kind=null; XFX.data=null; XFX.until=0;
+}
+function xfxRun(kind,ms,data,onTick,onDone){
+  /* Tools push their findings into XFX.marks and then start the animation, so
+     starting must not wipe them - only an explicit stop does. */
+  const keep=XFX.marks.slice();
+  xfxStop();
+  XFX.marks=keep;
+  XFX.kind=kind; XFX.data=data||null;
+  XFX.t0=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+  XFX.until=XFX.t0+Math.max(1,Math.min(XCAP.MS,ms));
+  const step=()=>{
+    const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+    const done=now>=XFX.until;
+    try{ if(onTick) onTick(Math.min(1,(now-XFX.t0)/Math.max(1,XFX.until-XFX.t0)), now); }
+    catch(err){ console.error(err); xfxStop(); draw(); return; }
+    draw();
+    if(done){ const d=onDone; xfxStop(); if(d) try{ d(); }catch(err){ console.error(err); } draw(); return; }
+    XFX.raf=requestAnimationFrame(step);
+  };
+  XFX.raf=requestAnimationFrame(step);
+}
+function xPart(x,y,vx,vy,life,col,r){
+  if(XFX.parts.length>=XCAP.PARTS) return;
+  XFX.parts.push({x,y,vx,vy,life,max:life,col:col||"#8fd0ff",r:r||2});
+}
+function xBeep(kind){
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC) return;
+    xBeep._c=xBeep._c||new AC();
+    const c=xBeep._c;
+    if(c.state==="suspended" && c.resume) c.resume();
+    const o=c.createOscillator(), g=c.createGain();
+    const map={thunk:[90,.16,"square"], tick:[900,.05,"triangle"], sweep:[220,.3,"sawtooth"], pop:[440,.08,"sine"]};
+    const [f,d,t]=map[kind]||map.pop;
+    o.type=t; o.frequency.setValueAtTime(f,c.currentTime);
+    o.frequency.exponentialRampToValueAtTime(Math.max(40,f*0.4),c.currentTime+d);
+    g.gain.setValueAtTime(.09,c.currentTime);
+    g.gain.exponentialRampToValueAtTime(.0001,c.currentTime+d);
+    o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime+d+.02);
+  }catch(_){}
+}
+
+/* ---- shared geometry --------------------------------------------------- */
+function xEnts(){ return S.ents.slice(0,XCAP.ENTS).filter(e=>{ const L=S.layers[e.li]; return !L||L.on; }); }
+function xSelOrAll(){
+  const sel=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
+  return sel.length? sel : xEnts();
+}
+function xSegs(e){
+  const out=[];
+  for(const c of curvesOf(e)) if(c.k==="seg") out.push(c);
+  if(!out.length){
+    const P=flatten(e);
+    if(P&&P.length>1) for(let i=0;i<P.length-1;i++) out.push({a:P[i],b:P[i+1]});
+  }
+  return out;
+}
+function xEndpoints(e){
+  if(e.t==="line") return [{get:()=>e.a,set:p=>e.a=p},{get:()=>e.b,set:p=>e.b=p}];
+  if(e.t==="pline"||e.t==="spline"){
+    if(!e.pts.length) return [];
+    const n=e.pts.length;
+    return [{get:()=>e.pts[0],set:p=>e.pts[0]=p},{get:()=>e.pts[n-1],set:p=>e.pts[n-1]=p}];
+  }
+  return [];
+}
+function xBox(list){
+  let x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,any=false;
+  for(const e of list){
+    const b=entBox(e);
+    if(!b||!isFinite(b.x0)||!isFinite(b.y1)) continue;
+    any=true; x0=Math.min(x0,b.x0); y0=Math.min(y0,b.y0); x1=Math.max(x1,b.x1); y1=Math.max(y1,b.y1);
+  }
+  return any? {x0,y0,x1,y1} : null;
+}
+/* Ray cast against every straight span in the drawing. Bounded by XCAP.ENTS. */
+function xRayHit(from,dir,maxD){
+  const d=norm(dir);
+  if(!isFinite(d.x)) return null;
+  let best=null, bd=maxD;
+  for(const e of xEnts()) for(const c of xSegs(e)){
+    const r=lineLineInt(from, add(from,mul(d,bd||1e7)), c.a, c.b);
+    if(!r) continue;
+    if(r.t<1e-9 || r.u<-1e-9 || r.u>1+1e-9) continue;
+    const dd=dist(from,r.p);
+    if(dd<bd){ bd=dd; best={p:r.p,d:dd,ent:e}; }
+  }
+  return best;
+}
+
+/* ---- enclosure raster: the engine behind Flood Fill and Rain Test ------- */
+function xRaster(box,maxDim){
+  const w0=Math.max(1e-9,box.x1-box.x0), h0=Math.max(1e-9,box.y1-box.y0);
+  const lim=Math.max(16,Math.min(XCAP.RASTER,maxDim||XCAP.RASTER));
+  const k=Math.min(lim/w0, lim/h0);
+  const W2=Math.max(8,Math.min(lim,Math.round(w0*k)));
+  const H2=Math.max(8,Math.min(lim,Math.round(h0*k)));
+  if(W2*H2>XCAP.CELLS) return null;
+  const c=document.createElement("canvas");
+  c.width=W2; c.height=H2;
+  const g=c.getContext("2d");
+  if(!g) return null;
+  g.fillStyle="#000"; g.fillRect(0,0,W2,H2);
+  g.strokeStyle="#fff"; g.lineWidth=1.5; g.lineCap="round"; g.lineJoin="round";
+  const PX=p=>((p.x-box.x0)/w0)*W2, PY=p=>H2-((p.y-box.y0)/h0)*H2;
+  g.beginPath();
+  let drawn=0;
+  for(const e of xEnts()){
+    for(const c2 of xSegs(e)){
+      g.moveTo(PX(c2.a),PY(c2.a)); g.lineTo(PX(c2.b),PY(c2.b));
+      if(++drawn>XCAP.CELLS) break;
+    }
+    if(drawn>XCAP.CELLS) break;
+  }
+  g.stroke();
+  let data;
+  try{ data=g.getImageData(0,0,W2,H2).data; }catch(_){ return null; }
+  const cells=new Uint8Array(W2*H2);
+  for(let i=0;i<W2*H2;i++) cells[i]= data[i*4]>80 ? 1 : 0;
+  return {cells,w:W2,h:H2,box,sx:w0/W2,sy:h0/H2};
+}
+/* Pure, so it can be tested on a synthetic mask without a canvas. */
+function xFlood(R,cx,cy){
+  if(!R) return null;
+  const {cells,w,h}=R;
+  if(!(cx>=0&&cy>=0&&cx<w&&cy<h)) return null;
+  if(cells[cy*w+cx]) return {blocked:true,count:0,perim:0,escaped:false,seen:null};
+  const seen=new Uint8Array(w*h);
+  const stack=new Int32Array(w*h);
+  let sp=0;
+  stack[sp++]=cy*w+cx; seen[cy*w+cx]=1;
+  let count=0, perim=0, escaped=false;
+  while(sp>0){
+    const i=stack[--sp];
+    count++;
+    const x=i%w, y=(i/w)|0;
+    if(x===0||y===0||x===w-1||y===h-1){ escaped=true; perim++; }
+    const nb=[[1,0],[-1,0],[0,1],[0,-1]];
+    for(let n=0;n<4;n++){
+      const nx=x+nb[n][0], ny=y+nb[n][1];
+      if(nx<0||ny<0||nx>=w||ny>=h) continue;
+      const j=ny*w+nx;
+      if(cells[j]){ perim++; continue; }
+      if(!seen[j]){ seen[j]=1; stack[sp++]=j; }
+    }
+  }
+  return {count,perim,escaped,seen,w,h};
+}
+function xCellCentre(R,i){
+  const x=i%R.w, y=(i/R.w)|0;
+  return V(R.box.x0+(x+.5)*R.sx, R.box.y1-(y+.5)*R.sy);
+}
+function xCellOf(R,p){
+  return {cx:Math.floor((p.x-R.box.x0)/R.sx), cy:Math.floor((R.box.y1-p.y)/R.sy)};
+}
+function xRegionAt(p,pad){
+  const b=xBox(xEnts());
+  if(!b) return null;
+  const m=Math.max((b.x1-b.x0),(b.y1-b.y0))*0.04+(pad||0);
+  const box={x0:Math.min(b.x0,p.x)-m, y0:Math.min(b.y0,p.y)-m, x1:Math.max(b.x1,p.x)+m, y1:Math.max(b.y1,p.y)+m};
+  const R=xRaster(box);
+  if(!R) return null;
+  const c=xCellOf(R,p);
+  const F=xFlood(R,c.cx,c.cy);
+  return F? {R,F} : null;
+}
+
+/* ====================== CLEANUP ======================================== */
+function xMagnet(){
+  const r=px(S.x.weldR);
+  const list=xSelOrAll();
+  const handles=[];
+  for(const e of list) for(const h of xEndpoints(e)) handles.push(h);
+  if(handles.length<2) return echo("Nothing with loose ends in that selection","warn");
+  if(handles.length>XCAP.PAIRS) return echo("Too many endpoints to weld in one pass ("+handles.length+")","warn");
+  const used=new Uint8Array(handles.length);
+  const groups=[];
+  for(let i=0;i<handles.length;i++){
+    if(used[i]) continue;
+    const g=[i]; used[i]=1;
+    const pi=handles[i].get();
+    for(let j=i+1;j<handles.length;j++){
+      if(used[j]) continue;
+      if(dist(pi,handles[j].get())<=r){ used[j]=1; g.push(j); }
+    }
+    if(g.length>1) groups.push(g);
+  }
+  if(!groups.length) return echo("No endpoints within "+fmt(r)+" of each other","warn");
+  snap();
+  let moved=0;
+  for(const g of groups){
+    let sx=0,sy=0;
+    for(const i of g){ const p=handles[i].get(); sx+=p.x; sy+=p.y; }
+    const c=V(sx/g.length, sy/g.length);
+    for(const i of g){ if(dist(handles[i].get(),c)>1e-12) moved++; handles[i].set(c); }
+    xPart(0,0,0,0,0);
+    XFX.marks.push({p:c,kind:"weld"});
+  }
+  flowInvalidateIndex(); draw(); updateProps();
+  xfxRun("marks",1400,null,null,null);
+  xBeep("tick");
+  echo("Welded "+groups.length+" junction"+(groups.length===1?"":"s")+", moved "+moved+" endpoint"+(moved===1?"":"s"));
+}
+function xVacuum(){
+  const before=S.ents.length;
+  const keyOf=e=>{
+    try{ return e.t+"|"+JSON.stringify(entPoints(e))+"|"+(e.r||"")+"|"+(e.s||""); }catch(_){ return null; }
+  };
+  const seen=new Set();
+  const junk={zero:0,dupe:0,empty:0,orphan:0};
+  snap();
+  S.ents=S.ents.filter(e=>{
+    if(e.t==="line" && dist(e.a,e.b)<1e-9){ junk.zero++; return false; }
+    if(e.t==="circle" && !(e.r>1e-9)){ junk.zero++; return false; }
+    if((e.t==="pline"||e.t==="spline") && (!e.pts||e.pts.length<2)){ junk.empty++; return false; }
+    if((e.t==="text"||e.t==="mtext") && !String(e.s||"").trim()){ junk.empty++; return false; }
+    if(e.t==="ink" && (!e.pts||e.pts.length<2)){ junk.empty++; return false; }
+    const k=keyOf(e);
+    if(k){ if(seen.has(k)){ junk.dupe++; return false; } seen.add(k); }
+    return true;
+  });
+  junk.orphan=flowPrune();
+  const gone=before-S.ents.length;
+  if(!gone){ S.undo.pop(); return echo("Nothing to clean up - the drawing is tidy"); }
+  S.sel.clear(); resetNudge(); flowInvalidateIndex(); draw(); updateProps();
+  xBeep("sweep");
+  echo("Vacuumed "+gone+": "+junk.dupe+" duplicate, "+junk.zero+" zero-length, "+
+       junk.empty+" empty, "+junk.orphan+" orphaned connector"+(junk.orphan===1?"":"s"));
+}
+function xIron(){
+  const list=xSelOrAll();
+  const tol=px(S.x.ironTol);
+  let straightened=0, thinned=0;
+  snap();
+  for(const e of list){
+    if(e.t==="pline"||e.t==="spline"){
+      if(!e.pts||e.pts.length<3) continue;
+      const n0=e.pts.length;
+      const simp=mkRDP(e.pts, tol);
+      if(simp.length>=2 && simp.length<n0){ e.pts=simp; thinned+=n0-simp.length; }
+      if(e.pts.length>2 && !e.closed){
+        const A=e.pts[0], B=e.pts[e.pts.length-1];
+        let dev=0;
+        for(const p of e.pts) dev=Math.max(dev, ptSegDist(p,A,B));
+        if(dev<=tol){ e.pts=[A,B]; straightened++; }
+      }
+    } else if(e.t==="line"){
+      const d=sub(e.b,e.a);
+      if(Math.abs(d.y)<=tol && Math.abs(d.x)>tol){ e.b=V(e.b.x,e.a.y); straightened++; }
+      else if(Math.abs(d.x)<=tol && Math.abs(d.y)>tol){ e.b=V(e.a.x,e.b.y); straightened++; }
+    }
+  }
+  if(!straightened && !thinned){ S.undo.pop(); return echo("Nothing needed pressing at "+fmt(tol)+" tolerance"); }
+  draw(); updateProps();
+  xBeep("sweep");
+  echo("Ironed: "+straightened+" run"+(straightened===1?"":"s")+" straightened, "+thinned+" surplus vertices removed");
+}
+function xDominantAngle(list){
+  const bins=new Float64Array(90);
+  for(const e of list) for(const c of xSegs(e)){
+    const L=dist(c.a,c.b);
+    if(!(L>1e-9)) continue;
+    let a=deg(Math.atan2(c.b.y-c.a.y, c.b.x-c.a.x));
+    a=((a%90)+90)%90;
+    bins[Math.min(89,Math.floor(a))]+=L;
+  }
+  let bi=-1, bv=0;
+  for(let i=0;i<90;i++) if(bins[i]>bv){ bv=bins[i]; bi=i; }
+  if(bi<0||bv<=0) return null;
+  /* refine within the winning degree using a length-weighted mean */
+  let sum=0, wsum=0;
+  for(const e of list) for(const c of xSegs(e)){
+    const L=dist(c.a,c.b);
+    if(!(L>1e-9)) continue;
+    let a=deg(Math.atan2(c.b.y-c.a.y, c.b.x-c.a.x));
+    a=((a%90)+90)%90;
+    if(Math.abs(a-(bi+0.5))>1.5) continue;
+    sum+=a*L; wsum+=L;
+  }
+  return wsum>0 ? sum/wsum : bi+0.5;
+}
+function xCentrifuge(){
+  const list=xSelOrAll();
+  if(!list.length) return echo("Nothing to align","warn");
+  const a=xDominantAngle(list);
+  if(a==null) return echo("No straight runs to take a bearing from","warn");
+  const off=(a>45? a-90 : a);
+  if(Math.abs(off)<1e-4) return echo("Already square - dominant bearing is "+fmt(a)+"\u00B0");
+  const b=xBox(list);
+  const c=V((b.x0+b.x1)/2,(b.y0+b.y1)/2);
+  snap();
+  for(const e of list) rotEnt(e,c,rad(-off));
+  flowInvalidateIndex(); draw(); updateProps();
+  xfxRun("spin",700,{c},null,null);
+  xBeep("sweep");
+  echo("De-skewed by "+fmt(-off)+"\u00B0 about the selection centre");
+}
+function xLevel(p){
+  const i=hitIndex(p);
+  if(i<0) return echo("Point at a line to level it","warn");
+  const e=S.ents[i];
+  if(e.t!=="line") return echo("The spirit level works on lines","warn");
+  const d=sub(e.b,e.a);
+  snap();
+  if(Math.abs(d.x)>=Math.abs(d.y)){ e.b=V(e.b.x,e.a.y); echo("Levelled horizontal"); }
+  else { e.b=V(e.a.x,e.b.y); echo("Plumbed vertical"); }
+  S.sel=new Set([i]);
+  draw(); updateProps();
+  xBeep("tick");
+}
+
+/* ====================== DIAGNOSTICS ==================================== */
+function xFlood2(p){
+  const got=xRegionAt(p);
+  if(!got) return echo("Nothing to pour into","warn");
+  const {R,F}=got;
+  if(F.blocked) return echo("That point is on a line - aim inside a space","warn");
+  const area=F.count*R.sx*R.sy;
+  const perim=F.perim*((R.sx+R.sy)/2);
+  XFX.marks.length=0;
+  XFX.marks.push({kind:"fill",R,seen:F.seen,col:F.escaped?"#ff9f43":"#4fd1a5"});
+  xfxRun("marks",2600,null,null,null);
+  xBeep("pop");
+  if(F.escaped) echo("That space is not enclosed - paint escaped to the sheet edge. Approx "+fmt(area)+" mm\u00B2 flooded","warn");
+  else echo("Area \u2248 "+fmt(area)+" mm\u00B2   Perimeter \u2248 "+fmt(perim)+" mm   (raster estimate)");
+}
+function xRain(p){
+  const got=xRegionAt(p);
+  if(!got) return echo("Nothing to rain on","warn");
+  const {R,F}=got;
+  if(F.blocked) return echo("Aim inside a space, not on a line","warn");
+  const leaks=[];
+  if(F.escaped){
+    for(let i=0;i<F.seen.length && leaks.length<60;i++){
+      if(!F.seen[i]) continue;
+      const x=i%R.w, y=(i/R.w)|0;
+      if(x===0||y===0||x===R.w-1||y===R.h-1) leaks.push(xCellCentre(R,i));
+    }
+  }
+  XFX.marks.length=0;
+  for(const q of leaks) XFX.marks.push({kind:"leak",p:q});
+  const cells=[];
+  for(let i=0;i<F.seen.length && cells.length<400;i+=Math.max(1,(F.seen.length/400)|0))
+    if(F.seen[i]) cells.push(xCellCentre(R,i));
+  xfxRun("rain",3200,{cells,leaks},(t)=>{
+    if(XFX.parts.length<XCAP.PARTS && cells.length){
+      for(let k=0;k<3;k++){
+        const c=cells[(Math.random()*cells.length)|0];
+        xPart(c.x, c.y+px(60)*(1-t), 0, -px(90), 900, F.escaped?"#ff9f43":"#7fc4ff", 1.6);
+      }
+    }
+    for(const q of XFX.parts){ q.x+=q.vx*0.016; q.y+=q.vy*0.016; q.life-=16; }
+    XFX.parts=XFX.parts.filter(q=>q.life>0);
+  },null);
+  xBeep("sweep");
+  if(F.escaped) echo("Leaks - water reached the sheet edge through "+leaks.length+" opening cell"+(leaks.length===1?"":"s")+". Marked in orange.","warn");
+  else echo("Watertight - the region is fully enclosed");
+}
+function xXray(){
+  S.x.xray=!S.x.xray;
+  if(!S.x.xray){ XFX.marks.length=0; draw(); return echo("X-ray off"); }
+  const list=xEnts();
+  const marks=[];
+  let pairs=0;
+  for(let i=0;i<list.length && pairs<XCAP.PAIRS;i++){
+    const bi=entBox(list[i]);
+    if(!bi||!isFinite(bi.x0)) continue;
+    for(let j=i+1;j<list.length && pairs<XCAP.PAIRS;j++){
+      pairs++;
+      const bj=entBox(list[j]);
+      if(!bj||!isFinite(bj.x0)) continue;
+      if(bi.x1<bj.x0||bj.x1<bi.x0||bi.y1<bj.y0||bj.y1<bi.y0) continue;
+      if(list[i].t!==list[j].t) continue;
+      const pi=entPoints(list[i]), pj=entPoints(list[j]);
+      if(pi.length!==pj.length||!pi.length) continue;
+      let same=true;
+      for(let k=0;k<pi.length;k++) if(dist(pi[k],pj[k])>px(1.5)){ same=false; break; }
+      if(same && marks.length<600) marks.push({kind:"hot",ent:list[j]});
+    }
+  }
+  XFX.marks.length=0;
+  for(const m of marks) XFX.marks.push(m);
+  draw();
+  echo(marks.length? ("X-ray on - "+marks.length+" stacked or duplicate object"+(marks.length===1?"":"s")+" glowing")
+                   : "X-ray on - nothing stacked");
+}
+function xSonar(p){
+  const n=Math.max(4,Math.min(72,S.x.sonarRays|0));
+  const reach=drawingSpan();
+  const hits=[];
+  for(let i=0;i<n;i++){
+    const th=i/n*TAU;
+    const h=xRayHit(p,V(Math.cos(th),Math.sin(th)),reach);
+    if(h) hits.push({th,d:h.d,p:h.p});
+  }
+  if(!hits.length){ echo("Nothing within reach of that point","warn"); return; }
+  hits.sort((a,b)=>a.d-b.d);
+  const nearest=hits[0], farthest=hits[hits.length-1];
+  XFX.marks.length=0;
+  for(const h of hits) XFX.marks.push({kind:"ping",p,q:h.p});
+  xfxRun("sonar",1800,{p,hits,reach:farthest.d},null,null);
+  xBeep("pop");
+  echo("Clearance: nearest "+fmt(nearest.d)+" mm at "+fmt(deg(nearest.th))+"\u00B0, "+
+       "widest "+fmt(farthest.d)+" mm, "+hits.length+" of "+n+" rays hit something");
+}
+function xEarthquake(){
+  const tol=px(S.x.weldR);
+  const list=xEnts();
+  const handles=[];
+  for(const e of list) for(const h of xEndpoints(e)) handles.push({p:h.get(),e});
+  const fake=[];
+  let pairs=0;
+  for(let i=0;i<handles.length && pairs<XCAP.PAIRS;i++)
+    for(let j=i+1;j<handles.length && pairs<XCAP.PAIRS;j++){
+      pairs++;
+      const d=dist(handles[i].p,handles[j].p);
+      if(d>1e-9 && d<=tol && fake.length<600) fake.push(handles[i].p);
+    }
+  const dangling=S.ents.filter(e=>e.t==="edge" && (!flowEnd(e.from)||!flowEnd(e.to))).length;
+  XFX.marks.length=0;
+  for(const q of fake) XFX.marks.push({kind:"crack",p:q});
+  xfxRun("shake",900,null,null,null);
+  xBeep("thunk");
+  if(!fake.length && !dangling) echo("Shook it - everything held. No false joints within "+fmt(tol)+".");
+  else echo("Shook it - "+fake.length+" joint"+(fake.length===1?"":"s")+" that look connected are not"+
+            (dangling?(", and "+dangling+" connector"+(dangling===1?"":"s")+" have lost a node"):"")+
+            ". Magnet will close them.","warn");
+}
+function xAnts(){
+  const sel=[...S.sel].map(i=>S.ents[i]).filter(e=>e&&(e.t==="line"||e.t==="pline"));
+  const list=sel.length? sel : xEnts().filter(e=>e.t==="line"||e.t==="pline");
+  if(!list.length) return echo("Select a chain of lines for the ants to walk","warn");
+  const tol=px(2.5);
+  const segs=[];
+  for(const e of list) for(const c of xSegs(e)) segs.push({a:c.a,b:c.b,used:false});
+  if(!segs.length) return echo("Nothing walkable there","warn");
+  if(segs.length>XCAP.PAIRS) return echo("That chain is too long to walk ("+segs.length+" segments)","warn");
+  const path=[segs[0].a, segs[0].b];
+  segs[0].used=true;
+  let grew=true;
+  while(grew){
+    grew=false;
+    const tail=path[path.length-1];
+    for(const s of segs){
+      if(s.used) continue;
+      if(dist(s.a,tail)<=tol){ path.push(s.b); s.used=true; grew=true; break; }
+      if(dist(s.b,tail)<=tol){ path.push(s.a); s.used=true; grew=true; break; }
+    }
+  }
+  const closed=path.length>2 && dist(path[0],path[path.length-1])<=tol;
+  const leftover=segs.filter(s=>!s.used).length;
+  XFX.marks.length=0;
+  if(!closed) XFX.marks.push({kind:"gap",p:path[path.length-1]});
+  xfxRun("ants",4000,{path},null,null);
+  xBeep("tick");
+  if(closed) echo("Loop closes - "+(path.length-1)+" segments walked"+(leftover?(", "+leftover+" not part of it"):""));
+  else echo("Gap - the ants fall off after "+(path.length-1)+" segment"+(path.length===2?"":"s")+". End marked.","warn");
+}
+function xBulldozer(a,b){
+  const width=px(Math.max(4,S.x.corridor));
+  const d=norm(sub(b,a));
+  if(!isFinite(d.x)) return echo("Drag a corridor across the plan","warn");
+  const n=perp(d), h=width/2;
+  const quad=[add(a,mul(n,h)), add(b,mul(n,h)), sub(b,mul(n,h)), sub(a,mul(n,h))];
+  const hits=[];
+  for(const e of xEnts()){
+    if(hits.length>=XCAP.REPORT*10) break;
+    let hit=mkPointInPoly(entPoints(e)[0]||V(1e18,1e18), quad);
+    if(!hit) for(const c of xSegs(e)){
+      if(mkPointInPoly(c.a,quad)||mkPointInPoly(c.b,quad)){ hit=true; break; }
+      let crossed=false;
+      for(let i=0;i<4;i++){
+        const r=lineLineInt(c.a,c.b,quad[i],quad[(i+1)%4]);
+        if(r && r.t>=0 && r.t<=1 && r.u>=0 && r.u<=1){ crossed=true; break; }
+      }
+      if(crossed){ hit=true; break; }
+    }
+    if(hit) hits.push(e);
+  }
+  XFX.marks.length=0;
+  XFX.marks.push({kind:"corridor",quad});
+  for(const e of hits.slice(0,400)) XFX.marks.push({kind:"hot",ent:e});
+  xfxRun("marks",3000,null,null,null);
+  xBeep("thunk");
+  echo("Corridor "+fmt(width)+" mm wide by "+fmt(dist(a,b))+" mm: "+hits.length+
+       " object"+(hits.length===1?"":"s")+" in the way");
+}
+
+/* ====================== LAYOUT ========================================= */
+function xGravity(){
+  const list=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
+  if(!list.length) return echo("Select what should fall","warn");
+  const moving=new Set(list);
+  const floorFor=(e)=>{
+    const b=entBox(e);
+    if(!b||!isFinite(b.x0)) return null;
+    let best=null;
+    for(const o of xEnts()){
+      if(moving.has(o)) continue;
+      const ob=entBox(o);
+      if(!ob||!isFinite(ob.x0)) continue;
+      if(ob.x1<b.x0||ob.x0>b.x1) continue;
+      if(ob.y1>b.y0+1e-9) continue;
+      if(best===null||ob.y1>best) best=ob.y1;
+    }
+    return best;
+  };
+  snap();
+  let dropped=0, total=0;
+  for(const e of list){
+    const b=entBox(e);
+    const f=floorFor(e);
+    if(f===null||!b) continue;
+    const dy=f-b.y0;
+    if(dy>=-1e-9) continue;
+    moveEnt(e,V(0,dy));
+    dropped++; total+=-dy;
+    XFX.marks.push({kind:"impact",p:V((b.x0+b.x1)/2, f)});
+  }
+  if(!dropped){ S.undo.pop(); return echo("Nothing had anywhere to fall to"); }
+  flowInvalidateIndex(); draw(); updateProps();
+  xfxRun("marks",1200,null,null,null);
+  xBeep("thunk");
+  echo("Dropped "+dropped+" object"+(dropped===1?"":"s")+", "+fmt(total)+" mm of fall");
+}
+function xRepel(){
+  const pad=px(S.x.repelPad);
+  const list=(([...S.sel].map(i=>S.ents[i]).filter(Boolean)).length
+    ? [...S.sel].map(i=>S.ents[i]) : xEnts())
+    .filter(e=>e&&(e.t==="node"||e.t==="mtext"||e.t==="text"));
+  if(list.length<2) return echo("Repel needs two or more labels or nodes","warn");
+  if(list.length>1200) return echo("Too many labels to relax at once ("+list.length+")","warn");
+  const boxes=list.map(e=>{ const b=entBox(e); return b&&isFinite(b.x0)? b : null; });
+  const move=list.map(()=>V(0,0));
+  let iters=0, hits=1;
+  while(hits>0 && iters<Math.min(XCAP.ITER,180)){
+    iters++; hits=0;
+    for(let i=0;i<list.length;i++){
+      if(!boxes[i]) continue;
+      for(let j=i+1;j<list.length;j++){
+        if(!boxes[j]) continue;
+        const A=boxes[i], B=boxes[j];
+        const ox=Math.min(A.x1,B.x1)-Math.max(A.x0,B.x0)+pad;
+        const oy=Math.min(A.y1,B.y1)-Math.max(A.y0,B.y0)+pad;
+        if(ox<=0||oy<=0) continue;
+        hits++;
+        const acx=(A.x0+A.x1)/2, acy=(A.y0+A.y1)/2, bcx=(B.x0+B.x1)/2, bcy=(B.y0+B.y1)/2;
+        if(ox<oy){
+          const s=(acx<=bcx? -1:1)*ox/2;
+          A.x0+=s; A.x1+=s; B.x0-=s; B.x1-=s;
+          move[i].x+=s; move[j].x-=s;
+        } else {
+          const s=(acy<=bcy? -1:1)*oy/2;
+          A.y0+=s; A.y1+=s; B.y0-=s; B.y1-=s;
+          move[i].y+=s; move[j].y-=s;
+        }
+      }
+    }
+  }
+  let n=0;
+  for(let i=0;i<list.length;i++) if(len(move[i])>1e-9) n++;
+  if(!n) return echo("Nothing was overlapping");
+  snap();
+  for(let i=0;i<list.length;i++) if(len(move[i])>1e-9) moveEnt(list[i],move[i]);
+  flowInvalidateIndex(); draw(); updateProps();
+  xBeep("pop");
+  echo("Pushed "+n+" label"+(n===1?"":"s")+" apart in "+iters+" pass"+(iters===1?"":"es"));
+}
+function xSpring(){
+  const nodes=xEnts().filter(e=>e.t==="node"&&e.k!=="lane");
+  const edges=xEnts().filter(e=>e.t==="edge");
+  if(nodes.length<2) return echo("Spring layout needs at least two nodes","warn");
+  if(nodes.length>400) return echo("Too many nodes for a spring pass ("+nodes.length+")","warn");
+  const idx=new Map(nodes.map((n,i)=>[n.id,i]));
+  const pos=nodes.map(n=>V(n.p.x,n.p.y));
+  const b=xBox(nodes);
+  const span=Math.max(1,Math.hypot(b.x1-b.x0,b.y1-b.y0));
+  const ideal=span/Math.sqrt(nodes.length)*0.9;
+  const iters=Math.min(XCAP.ITER,220);
+  for(let it=0; it<iters; it++){
+    const f=pos.map(()=>V(0,0));
+    for(let i=0;i<pos.length;i++)
+      for(let j=i+1;j<pos.length;j++){
+        const d=sub(pos[i],pos[j]);
+        let L=len(d);
+        if(L<1e-6){ d.x=(Math.random()-.5); d.y=(Math.random()-.5); L=len(d)||1; }
+        const rep=(ideal*ideal)/L;
+        const u=mul(d,rep/L);
+        f[i]=add(f[i],u); f[j]=sub(f[j],u);
+      }
+    for(const e of edges){
+      const a=e.from&&e.from.id!=null? idx.get(e.from.id) : undefined;
+      const c=e.to&&e.to.id!=null? idx.get(e.to.id) : undefined;
+      if(a===undefined||c===undefined) continue;
+      const d=sub(pos[c],pos[a]);
+      const L=Math.max(1e-6,len(d));
+      const att=(L*L)/ideal;
+      const u=mul(d,att/L*0.5);
+      f[a]=add(f[a],u); f[c]=sub(f[c],u);
+    }
+    const cool=ideal*0.1*(1-it/iters);
+    for(let i=0;i<pos.length;i++){
+      const L=Math.max(1e-9,len(f[i]));
+      pos[i]=add(pos[i], mul(f[i], Math.min(cool,L)/L));
+    }
+  }
+  const cb={x:0,y:0};
+  for(const p of pos){ cb.x+=p.x; cb.y+=p.y; }
+  cb.x/=pos.length; cb.y/=pos.length;
+  const c0=V((b.x0+b.x1)/2,(b.y0+b.y1)/2);
+  snap();
+  nodes.forEach((n,i)=>{
+    const target=V(pos[i].x-cb.x+c0.x, pos[i].y-cb.y+c0.y);
+    if(!isFinite(target.x)||!isFinite(target.y)) return;
+    moveEnt(n, sub(target, n.p));
+  });
+  flowInvalidateIndex(); draw(); updateProps();
+  xBeep("sweep");
+  echo("Relaxed "+nodes.length+" nodes and "+edges.length+" connectors over "+iters+" passes");
+}
+function xShrinkWrap(){
+  const list=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
+  const src=list.length? list : xEnts();
+  const pts=[];
+  for(const e of src){
+    for(const p of entPoints(e)) pts.push(p);
+    for(const c of xSegs(e)){ pts.push(c.a); pts.push(c.b); }
+    if(pts.length>XCAP.PAIRS) break;
+  }
+  const clean=pts.filter(p=>p&&isFinite(p.x)&&isFinite(p.y)).slice(0,XCAP.PAIRS);
+  if(clean.length<3) return echo("Need three or more points to wrap","warn");
+  clean.sort((a,b)=>a.x-b.x||a.y-b.y);
+  const cross=(o,a,b)=>(a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
+  const lower=[], upper=[];
+  for(const p of clean){ while(lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop(); lower.push(p); }
+  for(let i=clean.length-1;i>=0;i--){ const p=clean[i]; while(upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop(); upper.push(p); }
+  lower.pop(); upper.pop();
+  const hull=lower.concat(upper);
+  if(hull.length<3) return echo("Those points are collinear - nothing to wrap","warn");
+  const off=px(S.x.wrapOffset);
+  const c={x:0,y:0};
+  for(const p of hull){ c.x+=p.x; c.y+=p.y; }
+  c.x/=hull.length; c.y/=hull.length;
+  const grown=hull.map(p=>{
+    const d=sub(p,V(c.x,c.y)), L=len(d);
+    return L>1e-9? add(p,mul(d,off/L)) : p;
+  });
+  snap();
+  S.ents.push({t:"pline", li:S.cur, si:S.curStyle, closed:true, pts:grown});
+  S.sel=new Set([S.ents.length-1]);
+  flowInvalidateIndex(); draw(); updateProps();
+  xBeep("pop");
+  echo("Wrapped "+hull.length+" hull points at "+fmt(off)+" mm offset");
+}
+
+/* ====================== PRESENTATION =================================== */
+function xTimelapse(){
+  if(!S.undo.length) return echo("No history to replay yet","warn");
+  const frames=S.undo.slice(-60).concat([stateBlob()]);
+  const hold=stateBlob();
+  const per=Math.max(60, Math.min(400, 4000/frames.length));
+  let i=0;
+  echo("Replaying "+frames.length+" steps - Esc to stop");
+  xfxRun("timelapse", Math.min(XCAP.MS, per*frames.length), {frames},
+    ()=>{
+      const want=Math.min(frames.length-1, Math.floor((( (typeof performance!=="undefined"&&performance.now)?performance.now():Date.now()) - XFX.t0)/per));
+      if(want!==i){ i=want; try{ applyBlob(frames[i]); }catch(_){} }
+    },
+    ()=>{ try{ applyBlob(hold); }catch(_){} S.sel.clear(); updateProps(); echo("Replay finished - drawing restored"); });
+}
+function xSpotlight(){
+  S.x.spotlight=!S.x.spotlight;
+  draw();
+  echo(S.x.spotlight? (S.sel.size? "Spotlight on "+S.sel.size+" object"+(S.sel.size===1?"":"s") : "Spotlight on - select something to light it")
+                    : "Spotlight off");
+}
+function xCurrent(){
+  S.x.current=!S.x.current;
+  if(!S.x.current){ xfxStop(); draw(); return echo("Flow off"); }
+  const edges=xEnts().filter(e=>e.t==="edge");
+  if(!edges.length){ S.x.current=false; return echo("No connectors to show flow along","warn"); }
+  const back=edges.filter(e=>{
+    const R=flowRoute(e);
+    return R && R.length>1 && R[R.length-1].x < R[0].x - 1e-9;
+  }).length;
+  xfxRun("current", XCAP.MS, {}, null, ()=>{ S.x.current=false; });
+  echo("Flow on - "+edges.length+" connector"+(edges.length===1?"":"s")+
+       (back? (", "+back+" running right to left") : ""));
+}
+function xStamp(p){
+  const word=XSTAMPS.includes(S.x.stampWord)? S.x.stampWord : "VOID";
+  const b=xBox(xEnts());
+  const span=b? Math.max(b.x1-b.x0,b.y1-b.y0) : px(300);
+  const h=Math.max(px(18), span*0.09);
+  let li=S.layers.findIndex(l=>l.name.toUpperCase()==="STAMP");
+  if(li<0){ S.layers.push({name:"STAMP",aci:1,on:true,lock:false}); li=S.layers.length-1; paintLayers(); }
+  snap();
+  S.ents.push({t:"text", li, si:S.curStyle, p:V(p.x-word.length*h*0.32, p.y), h, rot:rad(18), s:word});
+  S.sel=new Set([S.ents.length-1]);
+  draw(); updateProps();
+  XFX.marks.length=0;
+  for(let i=0;i<28;i++){
+    const th=Math.random()*TAU, r=Math.random()*h*1.4;
+    XFX.marks.push({kind:"splat", p:V(p.x+Math.cos(th)*r, p.y+Math.sin(th)*r), r:h*0.05*(0.4+Math.random())});
+  }
+  xfxRun("stamp",1400,{p,h},null,null);
+  xBeep("thunk");
+  echo(word+" stamped");
+}
+
+/* ---- painting ---------------------------------------------------------- */
+function xPaint(){
+  if(S.exporting) return;
+  const s=S.view.s;
+  if(S.x.spotlight && S.sel.size){
+    ctx.save();
+    ctx.fillStyle="rgba(8,10,13,.72)";
+    ctx.fillRect(0,0,W,H);
+    ctx.globalCompositeOperation="destination-out";
+    for(const i of S.sel){
+      const e=S.ents[i]; if(!e) continue;
+      const b=entBox(e); if(!b||!isFinite(b.x0)) continue;
+      const pad=px(10);
+      ctx.beginPath();
+      ctx.ellipse(X((b.x0+b.x1)/2), Y((b.y0+b.y1)/2),
+        Math.max(18,((b.x1-b.x0)/2+pad)*s), Math.max(18,((b.y1-b.y0)/2+pad)*s), 0,0,TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  if(XFX.kind==="shake"){
+    const k=(1-(( (typeof performance!=="undefined"&&performance.now)?performance.now():Date.now())-XFX.t0)/Math.max(1,XFX.until-XFX.t0));
+    ctx.save(); ctx.translate((Math.random()-.5)*10*k,(Math.random()-.5)*10*k); ctx.restore();
+  }
+  ctx.save();
+  ctx.lineWidth=1.4;
+  for(const m of XFX.marks){
+    if(m.kind==="hot" && m.ent){
+      const b=entBox(m.ent);
+      if(!b||!isFinite(b.x0)) continue;
+      ctx.strokeStyle="#ff6f63"; ctx.setLineDash([4,3]);
+      ctx.strokeRect(X(b.x0)-2, Y(b.y1)-2, (b.x1-b.x0)*s+4, (b.y1-b.y0)*s+4);
+      ctx.setLineDash([]);
+    } else if(m.kind==="weld"){
+      ctx.strokeStyle="#4fd1a5"; ctx.beginPath(); ctx.arc(X(m.p.x),Y(m.p.y),7,0,TAU); ctx.stroke();
+    } else if(m.kind==="crack"||m.kind==="gap"){
+      ctx.strokeStyle="#ff6f63";
+      const q=m.p;
+      ctx.beginPath();
+      ctx.moveTo(X(q.x)-7,Y(q.y)-7); ctx.lineTo(X(q.x)+7,Y(q.y)+7);
+      ctx.moveTo(X(q.x)+7,Y(q.y)-7); ctx.lineTo(X(q.x)-7,Y(q.y)+7);
+      ctx.stroke();
+    } else if(m.kind==="leak"){
+      ctx.strokeStyle="#ff9f43"; ctx.beginPath(); ctx.arc(X(m.p.x),Y(m.p.y),5,0,TAU); ctx.stroke();
+    } else if(m.kind==="impact"){
+      ctx.strokeStyle="#8fd0ff"; ctx.beginPath();
+      ctx.moveTo(X(m.p.x)-9,Y(m.p.y)); ctx.lineTo(X(m.p.x)+9,Y(m.p.y)); ctx.stroke();
+    } else if(m.kind==="ping"){
+      ctx.strokeStyle="rgba(143,208,255,.5)"; ctx.beginPath();
+      ctx.moveTo(X(m.p.x),Y(m.p.y)); ctx.lineTo(X(m.q.x),Y(m.q.y)); ctx.stroke();
+    } else if(m.kind==="corridor"){
+      ctx.strokeStyle="#ffd166"; ctx.fillStyle="rgba(255,209,102,.10)";
+      ctx.beginPath();
+      m.quad.forEach((q,i)=> i? ctx.lineTo(X(q.x),Y(q.y)) : ctx.moveTo(X(q.x),Y(q.y)));
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    } else if(m.kind==="splat"){
+      ctx.fillStyle="rgba(220,48,48,.55)";
+      ctx.beginPath(); ctx.arc(X(m.p.x),Y(m.p.y),Math.max(1,m.r*s),0,TAU); ctx.fill();
+    } else if(m.kind==="fill" && m.R && m.seen){
+      const R=m.R;
+      ctx.fillStyle=m.col||"rgba(79,209,165,.28)";
+      ctx.globalAlpha=.28;
+      const cw=R.sx*s, ch=R.sy*s;
+      for(let i=0;i<m.seen.length;i++){
+        if(!m.seen[i]) continue;
+        const x=i%R.w, y=(i/R.w)|0;
+        ctx.fillRect(X(R.box.x0+x*R.sx), Y(R.box.y1-y*R.sy), Math.max(1,cw+.6), Math.max(1,ch+.6));
+      }
+      ctx.globalAlpha=1;
+    }
+  }
+  if(XFX.kind==="ants" && XFX.data && XFX.data.path){
+    const P=XFX.data.path;
+    const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+    const t=((now-XFX.t0)/900)%1;
+    ctx.strokeStyle="#ffd166"; ctx.setLineDash([6,6]); ctx.lineDashOffset=-t*12;
+    ctx.beginPath();
+    P.forEach((q,i)=> i? ctx.lineTo(X(q.x),Y(q.y)) : ctx.moveTo(X(q.x),Y(q.y)));
+    ctx.stroke(); ctx.setLineDash([]);
+    let total=0;
+    for(let i=0;i<P.length-1;i++) total+=dist(P[i],P[i+1]);
+    ctx.fillStyle="#ffd166";
+    for(let k=0;k<6;k++){
+      let want=((t+k/6)%1)*total, acc=0, q=P[0];
+      for(let i=0;i<P.length-1;i++){
+        const L=dist(P[i],P[i+1]);
+        if(acc+L>=want){ q=add(P[i], mul(sub(P[i+1],P[i]), L>0?(want-acc)/L:0)); break; }
+        acc+=L;
+      }
+      ctx.beginPath(); ctx.arc(X(q.x),Y(q.y),2.2,0,TAU); ctx.fill();
+    }
+  }
+  if(XFX.kind==="sonar" && XFX.data){
+    const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+    const t=Math.min(1,(now-XFX.t0)/Math.max(1,XFX.until-XFX.t0));
+    ctx.strokeStyle="rgba(143,208,255,"+(1-t).toFixed(2)+")";
+    ctx.beginPath(); ctx.arc(X(XFX.data.p.x),Y(XFX.data.p.y), Math.max(1,XFX.data.reach*t*s), 0, TAU);
+    ctx.stroke();
+  }
+  if(S.x.current){
+    const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+    ctx.fillStyle="#8fd0ff";
+    let drawn=0;
+    for(const e of S.ents){
+      if(e.t!=="edge"||drawn>400) continue;
+      const R=flowRoute(e);
+      if(!R||R.length<2) continue;
+      let total=0;
+      for(let i=0;i<R.length-1;i++) total+=dist(R[i],R[i+1]);
+      if(!(total>0)) continue;
+      for(let k=0;k<3;k++){
+        let want=(((now/1400)+k/3)%1)*total, acc=0, q=R[0];
+        for(let i=0;i<R.length-1;i++){
+          const L=dist(R[i],R[i+1]);
+          if(acc+L>=want){ q=add(R[i], mul(sub(R[i+1],R[i]), L>0?(want-acc)/L:0)); break; }
+          acc+=L;
+        }
+        ctx.beginPath(); ctx.arc(X(q.x),Y(q.y),2.4,0,TAU); ctx.fill();
+        drawn++;
+      }
+    }
+  }
+  for(const q of XFX.parts){
+    const a=Math.max(0,Math.min(1,q.life/Math.max(1,q.max)));
+    ctx.globalAlpha=a; ctx.fillStyle=q.col;
+    ctx.beginPath(); ctx.arc(X(q.x),Y(q.y),q.r,0,TAU); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+  ctx.restore();
+}
+
+/* ---- registration ------------------------------------------------------ */
+const XPICK={
+  xlevel:p=>xLevel(p),
+  xfloodfill:p=>xFlood2(p),
+  xraintest:p=>xRain(p),
+  xsonar:p=>xSonar(p),
+  xstamp:p=>xStamp(p),
+  xbulldozer:p=>{
+    if(!S.pending.length){ S.pending=[p]; setPrompt(); draw(); return; }
+    const a=S.pending[0]; S.pending=[];
+    setPrompt(); xBulldozer(a,p);
+  }
+};
+const XTOOLDEF={
+  xlevel:{label:"Spirit Level", alias:"XLEVEL", prompts:["Point at a line"],
+    svg:'<rect x="2.4" y="7.4" width="15.2" height="5.2" rx="2.2"/><path d="M8.4 7.4v5.2M11.6 7.4v5.2"/><circle cx="10" cy="10" r="1.5"/>'},
+  xfloodfill:{label:"Flood Fill", alias:"XFILL", prompts:["Pour into a space"],
+    svg:'<path d="M8.6 2.8l6.6 6.6-6.1 6.1-6.6-6.6z"/><path d="M6.4 5l7 7"/><path d="M17.6 13.6c0 1-.7 1.8-1.6 1.8s-1.6-.8-1.6-1.8 1.6-2.8 1.6-2.8 1.6 1.8 1.6 2.8z"/>'},
+  xraintest:{label:"Rain Test", alias:"XRAIN", prompts:["Pour into a space"],
+    svg:'<path d="M5.4 9.4a3 3 0 01.5-5.9 3.8 3.8 0 017-1.1 3 3 0 013.7 3.2 2.8 2.8 0 01-.9 5.4H6"/><path d="M6.6 13.4l-1 3M10 13.4l-1 3M13.4 13.4l-1 3"/>'},
+  xsonar:{label:"Sonar", alias:"XSONAR", prompts:["Ping from a point"],
+    svg:'<circle cx="10" cy="10" r="1.6"/><circle cx="10" cy="10" r="5"/><circle cx="10" cy="10" r="8.2"/>'},
+  xstamp:{label:"Stamp", alias:"XSTAMP", prompts:["Place the stamp"],
+    svg:'<path d="M4.4 16.6h11.2v-2H4.4z"/><path d="M6.6 14.6V12h6.8v2.6"/><path d="M8 12V6.4a2 2 0 014 0V12"/>'},
+  xbulldozer:{label:"Bulldozer", alias:"XDOZE", prompts:["Corridor start","Corridor end"],
+    svg:'<path d="M2.6 14.6h11.8"/><circle cx="5.4" cy="16" r="1.6"/><circle cx="11.4" cy="16" r="1.6"/><path d="M4.4 12.6h9V9.4h-4l-1.4-2.8h-3.6z"/><path d="M16.4 6v8.6"/>'}
+};
+for(const [id,T] of Object.entries(XTOOLDEF)){
+  TOOLS[id]={label:T.label, alias:T.alias, svg:T.svg, prompts:T.prompts,
+             pts: id==="xbulldozer"?2:1, experimental:true};
+  ALIAS[id]=id; ALIAS[id.toLowerCase()]=id;
+  if(T.alias) ALIAS[T.alias.toLowerCase()]=id;
+}
+Object.assign(ACTIONS,{
+  xmagnet:{label:"Magnet", alias:"XMAG",
+    svg:'<path d="M5.4 16.4V9a4.6 4.6 0 019.2 0v7.4"/><path d="M3 16.4h4.8M12.2 16.4H17"/><path d="M5.4 12.4h2.4M12.2 12.4h2.4"/>',
+    run:()=>xMagnet()},
+  xvacuum:{label:"Vacuum", alias:"XVAC",
+    svg:'<path d="M3.4 16.6h5.2v-3.2H3.4z"/><path d="M8.6 15A7.4 7.4 0 0116 7.6"/><path d="M13 3.4l4 1.4-1.2 4.2z"/>',
+    run:()=>xVacuum()},
+  xiron:{label:"Steam Iron", alias:"XIRON",
+    svg:'<path d="M2.6 14.6h14.8a6 6 0 00-6-6H6.4a3.8 3.8 0 00-3.8 3.8z"/><path d="M2.6 16.8h14.8"/><path d="M7 5.6q1.2-1.4 0-2.8M10.6 5.6q1.2-1.4 0-2.8"/>',
+    run:()=>xIron()},
+  xcentrifuge:{label:"Centrifuge", alias:"XSPIN",
+    svg:'<circle cx="10" cy="10" r="7.4"/><path d="M10 2.6v7.4l5.2 5.2"/><path d="M14.6 3.6l1.8-1.4"/>',
+    run:()=>xCentrifuge()},
+  xxray:{label:"X-Ray", alias:"XRAY",
+    svg:'<rect x="2.6" y="2.6" width="14.8" height="14.8" rx="1.6"/><path d="M10 4.4v11.2M6 7.4h8M6.8 12h6.4"/>',
+    run:()=>xXray()},
+  xquake:{label:"Earthquake", alias:"XQUAKE",
+    svg:'<path d="M1.6 10h3l2-5 3 10 3-8 2.2 3h3.6"/>',
+    run:()=>xEarthquake()},
+  xants:{label:"Marching Ants", alias:"XANTS",
+    svg:'<path d="M2.6 13h14.8"/><circle cx="5" cy="10.4" r="1.5"/><circle cx="10" cy="10.4" r="1.5"/><circle cx="15" cy="10.4" r="1.5"/><path d="M3.4 8.6l1 1.2M6.6 8.6l-1 1.2M8.4 8.6l1 1.2M11.6 8.6l-1 1.2M13.4 8.6l1 1.2M16.6 8.6l-1 1.2"/>',
+    run:()=>xAnts()},
+  xgravity:{label:"Gravity", alias:"XGRAV",
+    svg:'<circle cx="10" cy="5" r="2.4"/><path d="M10 8.4v5.2M7.6 11.4L10 13.8l2.4-2.4"/><path d="M2.6 17h14.8"/>',
+    run:()=>xGravity()},
+  xrepel:{label:"Repel", alias:"XREPEL",
+    svg:'<rect x="1.6" y="7" width="5.4" height="6" rx="1"/><rect x="13" y="7" width="5.4" height="6" rx="1"/><path d="M8.4 10h-1.4M11.6 10h1.4"/><path d="M9 8.4L7.4 10 9 11.6M11 8.4L12.6 10 11 11.6"/>',
+    run:()=>xRepel()},
+  xspring:{label:"Spring Layout", alias:"XSPRING",
+    svg:'<circle cx="4.4" cy="5.4" r="2"/><circle cx="15.6" cy="6.4" r="2"/><circle cx="9.4" cy="15" r="2"/><path d="M6 6.4l3 7M14 8l-3.4 5.6M6.2 5.6l7.4.6"/>',
+    run:()=>xSpring()},
+  xwrap:{label:"Shrink Wrap", alias:"XWRAP",
+    svg:'<path d="M10 2.6l6.6 4.2-2.4 8.6H5.8L3.4 6.8z"/><circle cx="8.4" cy="9.4" r="1.4"/><circle cx="12.4" cy="11" r="1.4"/>',
+    run:()=>xShrinkWrap()},
+  xtimelapse:{label:"Time-lapse", alias:"XLAPSE",
+    svg:'<circle cx="10" cy="10" r="7.4"/><path d="M10 5.6V10l3 2"/><path d="M2.8 6.4l2.6.6.6-2.6"/>',
+    run:()=>xTimelapse()},
+  xspotlight:{label:"Spotlight", alias:"XSPOT",
+    svg:'<path d="M7.4 2.6h5.2l3.4 6H4z"/><path d="M4 8.6l3.4 8.8h5.2L16 8.6"/>',
+    run:()=>xSpotlight()},
+  xcurrent:{label:"Current", alias:"XFLOW",
+    svg:'<path d="M2.6 7q3-2.4 6 0t6 0 2.8-1.2"/><path d="M2.6 12q3-2.4 6 0t6 0 2.8-1.2"/><path d="M11.4 15.4l2.2 1.4-2.2 1.4"/>',
+    run:()=>xCurrent()}
+});
+const XACTIONS=new Set(["xmagnet","xvacuum","xiron","xcentrifuge","xxray","xquake","xants",
+  "xgravity","xrepel","xspring","xwrap","xtimelapse","xspotlight","xcurrent"]);
+function xWidget(){
+  const wrap=document.createElement("div"); wrap.className="rstack";
+  const mk=(label,title,get,set,step)=>{
+    const l=document.createElement("label");
+    l.style.display="flex"; l.style.alignItems="center"; l.style.gap="3px"; l.title=title;
+    const sp=document.createElement("span"); sp.className="oh"; sp.textContent=label;
+    const i=document.createElement("input");
+    i.type="number"; i.step=step||"any"; i.value=get(); i.style.maxWidth="52px";
+    i.onchange=()=>{ const v=parseFloat(i.value); if(isFinite(v)) set(v); };
+    l.append(sp,i); return l;
+  };
+  const r1=document.createElement("div"); r1.className="rrow"; r1.style.gap="6px";
+  r1.append(
+    mk("Weld px","Magnet and Earthquake radius",()=>S.x.weldR,v=>S.x.weldR=Math.max(0,Math.min(400,v))),
+    mk("Iron px","Steam Iron tolerance",()=>S.x.ironTol,v=>S.x.ironTol=Math.max(0,Math.min(400,v))));
+  const r2=document.createElement("div"); r2.className="rrow"; r2.style.gap="6px";
+  r2.append(
+    mk("Gap px","Repel padding",()=>S.x.repelPad,v=>S.x.repelPad=Math.max(0,Math.min(400,v))),
+    mk("Wrap px","Shrink Wrap offset",()=>S.x.wrapOffset,v=>S.x.wrapOffset=Math.max(0,Math.min(400,v))));
+  const r3=document.createElement("div"); r3.className="rrow"; r3.style.gap="6px";
+  const sel=document.createElement("select");
+  sel.title="Stamp wording";
+  for(const wd of XSTAMPS){
+    const o=document.createElement("option"); o.value=wd; o.textContent=wd;
+    if(wd===S.x.stampWord) o.selected=true; sel.append(o);
+  }
+  sel.onchange=()=>{ S.x.stampWord=XSTAMPS.includes(sel.value)? sel.value : "VOID"; };
+  r3.append(mk("Dozer px","Bulldozer corridor width",()=>S.x.corridor,v=>S.x.corridor=Math.max(4,Math.min(4000,v))), sel);
+  wrap.append(r1,r2,r3);
+  return wrap;
+}
+function xExperimentalToggle(){
+  const wrap=document.createElement("div"); wrap.className="rstack";
+  const b=document.createElement("button");
+  b.className="big"; b.type="button"; b.dataset.tg="experimental";
+  b.setAttribute("aria-pressed",String(S.experimental));
+  b.title="Reveal the Experimental Features tab. Physics-driven cleanup, diagnostic and layout tools. Everything there is undoable and never appears in an export.";
+  b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true">'+
+    '<path d="M8 2.6h4M8.6 2.6v5L4.4 15a1.6 1.6 0 001.4 2.4h8.4a1.6 1.6 0 001.4-2.4l-4.2-7.4v-5"/>'+
+    '<path d="M6.6 12.4h6.8"/></svg><span>Experimental</span>';
+  b.onclick=()=>xSetExperimental(!S.experimental);
+  const l=document.createElement("div");
+  l.style.cssText="font-size:10px;color:var(--ink-faint);text-align:center";
+  l.textContent="opt in";
+  wrap.append(b,l); return wrap;
+}
+function xSetExperimental(on){
+  S.experimental=!!on;
+  try{ localStorage.setItem("b2db.experimental.v1", S.experimental?"1":"0"); }catch(_){}
+  if(!S.experimental){
+    xfxStop();
+    S.x.xray=false; S.x.spotlight=false; S.x.current=false;
+    if(ribbonTab==="Experimental Features") ribbonTab="Home";
+    if(TOOLS[S.tool] && TOOLS[S.tool].experimental) setTool("select");
+  }
+  paintRibbon(); paintOptbar(); draw();
+  echo(S.experimental? "Experimental Features tab revealed" : "Experimental Features tab hidden");
+}
+function xVisibleTabs(){
+  return Object.keys(RIBBON).filter(n=> n!=="Experimental Features" || S.experimental);
+}
+
 /* ============================================================ keyboard */
 window.addEventListener("keydown",e=>{
   const typing = !!S.ask || (document.activeElement===cmdin && cmdin.value.length>0);
   if(e.key==="Escape"){ cmdin.value=""; cancel(); return; }
+  if(!typing && e.key==="Tab" && S.tool!=="measurealong" && S.snapList.length>1){
+    e.preventDefault(); snapCycleNext(); return;
+  }
   if(!typing && e.key==="Tab" && S.tool==="measurealong"){
     e.preventDefault(); S.measureTabChain=!S.measureTabChain; S.measureEscArmed=false;
     echo(S.measureTabChain?"Chain preview · click to measure connected run":"Element preview"); draw(); return;
@@ -5472,32 +6897,84 @@ const RIBBON={
   View:[
     {name:"Navigate", big:"zoomext", small:["mobileui"]},
     {name:"Drafting aids", custom:"toggles"},
+    {name:"Snaps", custom:"snaps"},
     {name:"Grid", custom:"grid"},
-    {name:"Combat", custom:"punch"}
+    {name:"Labs", custom:"xtoggle"}
+  ],
+  "Experimental Features":[
+    {name:"Cleanup",      big:"xmagnet",   small:["xvacuum","xiron","xcentrifuge","xlevel"]},
+    {name:"Diagnostics",  big:"xfloodfill",small:["xraintest","xxray","xsonar","xquake","xants","xbulldozer"]},
+    {name:"Layout",       big:"xrepel",    small:["xgravity","xspring","xwrap"]},
+    {name:"Presentation", big:"xstamp",    small:["xtimelapse","xspotlight","xcurrent"]},
+    {name:"Settings",     custom:"xsettings"},
+    {name:"Combat",       custom:"punch"}
   ]
 };
 let ribbonTab="Home";
 function itemOf(id){ return TOOLS[id] || ACTIONS[id]; }
+
+/* All ribbon clicks go through one dispatcher. This is deliberately the only
+   place a generated ribbon button activates a tool/action, so active state
+   cannot drift between tabs, especially Experimental Features. */
+function activateRibbonItem(id){
+  if(TOOLS[id]){
+    setTool(id);
+    return;
+  }
+  const A=ACTIONS[id];
+  if(!A){
+    console.error("Ribbon item has no tool/action:",id);
+    echo("Button is not wired: "+id,"warn");
+    return;
+  }
+  if(XACTIONS.has(id) && !S.experimental){
+    echo("Experimental Features is off","warn");
+    return;
+  }
+
+  /* One-shot commands must not leave the previous drawing/pick tool armed.
+     Selection is preserved by setTool("select"), but pending points, pick
+     stages, measure graphics and pressed-state from the old tool are cleared. */
+  if(S.tool!=="select") setTool("select");
+  A.run();
+  paintRibbon();
+  paintOptbar();
+  setPrompt();
+  draw();
+}
+
 function mkBtn(id,big){
   const T=itemOf(id), b=document.createElement("button");
+  b.type="button";
   b.className=big?"big":"small"; b.dataset.item=id;
+  if(!T){
+    b.disabled=true;
+    b.title="Unwired ribbon item: "+id;
+    b.textContent=id;
+    console.error("Unwired ribbon item:",id);
+    return b;
+  }
   const hot = T.hot? " or press "+T.hot : "";
   b.title=T.label+"   type "+(T.alias||id)+hot;
   b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true">'+T.svg+'</svg><span>'+
     T.label.replace(/,.*$/,"").replace(/\s*\(.*\)$/,"")+'</span>';
-  b.onclick=()=>{ if(TOOLS[id]) setTool(id); else ACTIONS[id].run(); paintRibbon(); };
+  b.onclick=()=>activateRibbonItem(id);
   return b;
 }
 function paintRibbon(){
   const tabs=document.getElementById("rtabs");
-  if(!tabs.childElementCount){
-    for(const name of Object.keys(RIBBON)){
+  const want=xVisibleTabs();
+  const have=[...tabs.children].map(b=>b.textContent);
+  if(have.length!==want.length || have.some((n,i)=>n!==want[i])){
+    tabs.innerHTML="";
+    for(const name of want){
       const b=document.createElement("button");
       b.className="rtab"; b.textContent=name; b.setAttribute("role","tab");
       b.onclick=()=>{ ribbonTab=name; paintRibbon(); };
       tabs.append(b);
     }
   }
+  if(!want.includes(ribbonTab)) ribbonTab=want[0]||"Home";
   [...tabs.children].forEach(b=>b.setAttribute("aria-selected",String(b.textContent===ribbonTab)));
 
   const host=document.getElementById("rpanels");
@@ -5526,11 +7003,16 @@ function paintRibbon(){
     if(P.custom==="pen")     body.append(penWidget());
     if(P.custom==="flow")    body.append(flowWidget());
     if(P.custom==="png")     body.append(pngWidget());
+    if(P.custom==="snaps")   body.append(snapWidget());
+    if(P.custom==="xtoggle") body.append(xExperimentalToggle());
+    if(P.custom==="xsettings") body.append(xWidget());
     const lab=document.createElement("div"); lab.className="rpanel-label"; lab.textContent=P.name;
     panel.append(body,lab); host.append(panel);
   }
   host.querySelectorAll(".big,.small").forEach(b=>{
-    if(TOOLS[b.dataset.item]) b.setAttribute("aria-pressed",String(b.dataset.item===S.tool));
+    const id=b.dataset.item;
+    if(id && TOOLS[id]) b.setAttribute("aria-pressed",String(id===S.tool));
+    else if(id) b.setAttribute("aria-pressed","false");
   });
   cv.className = S.tool==="select" ? "picking"
     : (MK_TOOLS[S.tool] ? (MK_TOOLS[S.tool].kind==="erase" ? "erasing" : "inking") : "");
@@ -5764,6 +7246,15 @@ function paintOptbar(){
     const sp=document.createElement("span"); sp.textContent=label;
     wrap.append(i,sp); return wrap;
   };
+  if(S.snapSuspend||S.snapOverride){
+    const b=document.createElement("button");
+    b.className="small"; b.type="button"; b.style.minWidth="0";
+    b.textContent=S.snapSuspend?"Snaps suspended (SS)":("Snap: "+SNAP_NAME[S.snapOverride]);
+    b.setAttribute("aria-pressed","true");
+    b.title="Click to clear";
+    b.onclick=()=>{ S.snapSuspend=false; snapSetOverride(null); };
+    host.append(b);
+  }
   const readField=(label,val)=>{
     const wrap=document.createElement("label");
     const sp=document.createElement("span"); sp.textContent=label; sp.className="oh";
@@ -6028,6 +7519,11 @@ function updateProps(){
       "Imported files are sanitised before they touch the drawing &middot; the app makes no network calls<br>"+
       "<b style=\"color:#9fd0ff\">Revit 2016 Measure</b>: <kbd>MB</kbd> between references &middot; Chain in Options Bar &middot; double-click finishes a chain &middot; <kbd>MA</kbd> along element &middot; <kbd>Tab</kbd> previews a connected chain<br>"+
       "Measurements are temporary &middot; first <kbd>Esc</kbd> clears the current measurement &middot; second <kbd>Esc</kbd> exits Measure<br>"+
+      "<b style=\"color:#ffd166\">Snaps</b>: endpoint, intersection, midpoint, centre, quadrant, perpendicular, tangent, point, nearest &middot; View &rsaquo; Snaps<br>"+
+      "<kbd>Tab</kbd> cycles the snaps under the cursor &middot; midpoints keep halving the half you hover &middot; <kbd>SS</kbd> suspends, <kbd>SO</kbd> clears an override<br>"+
+      "While picking a point type <kbd>SE SM SN SI SC SQ SP ST SX</kbd> to force one snap for that pick<br>"+
+      "<b style=\"color:#c9a0ff\">Experimental Features</b> is hidden until you opt in from View &rsaquo; Labs (or type <kbd>LABS</kbd>)<br>"+
+      "Physics-driven cleanup, diagnostics, layout and presentation &middot; all undoable, none of it appears in an export<br>"+
       "<kbd>F7</kbd> show grid &middot; <kbd>F8</kbd> ortho &middot; <kbd>F9</kbd> grid snap &middot; <kbd>F3</kbd> osnap &middot; <kbd>F6</kbd> image-edge snap<br>"+
       "Type <kbd>x,y</kbd> <kbd>@dx,dy</kbd> <kbd>len&lt;ang</kbd> or a bare length<br>"+
       "Drag right = window, drag left = crossing<br>"+
@@ -7037,13 +8533,38 @@ compactButton.addEventListener("click",()=>setCompactRibbon(!appShell.classList.
 document.getElementById("rtabs").addEventListener("dblclick",()=>setCompactRibbon(!appShell.classList.contains("ribbon-compact")));
 restoreShellPrefs();
 
+/* DOM/ribbon integrity check. Runs after all tool registrations are complete. */
+function auditRibbonButtons(){
+  const missing=[];
+  for(const [tab,panels] of Object.entries(RIBBON)){
+    for(const P of panels){
+      const ids=[];
+      if(P.big) ids.push(P.big);
+      if(P.small) ids.push(...P.small);
+      for(const id of ids) if(!itemOf(id)) missing.push(tab+": "+id);
+    }
+  }
+  if(missing.length){
+    console.error("Ribbon wiring audit failed",missing);
+    echo("Ribbon wiring fault: "+missing.join(", "),"warn");
+    return false;
+  }
+  return true;
+}
+
 /* ============================================================ boot */
 if(window.ResizeObserver) new ResizeObserver(resize).observe(document.getElementById("stage"));
 else window.addEventListener("resize",resize);
+auditRibbonButtons();
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
 resize(); readout();
 cmdin.focus();
 setDocName(S.docName);
+(function initExperimental(){
+  let pref=null;
+  try{ pref=localStorage.getItem("b2db.experimental.v1"); }catch(_){}
+  if(pref==="1"){ S.experimental=true; paintRibbon(); }
+})();
 (function initMobile(){
   let pref=null;
   try{ pref=localStorage.getItem("b2db.mobile.v1"); }catch(_){}
