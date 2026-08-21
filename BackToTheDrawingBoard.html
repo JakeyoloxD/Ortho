@@ -482,6 +482,13 @@ const S = {
   refImage: null,      // tracing underlay; transform/crop metadata lives on the object
   edgeAssist: true,
   edgeThreshold: 62,
+  /* Revit 2016 Measure state is temporary and never saved as drawing geometry. */
+  measureChain: false,
+  measureSegs: [],
+  measureTotal: 0,
+  measureLabel: null,
+  measureTabChain: false,
+  measureEscArmed: false,
   groupSeq: 1,
   pending: [],        // picked points for the active tool
   base: null,         // move/copy base point
@@ -901,6 +908,12 @@ const TOOLS={
   pickLines:{label:"Pick lines", pts:0, alias:"PICK", pick:"pickLines", prompts:["Pick a line to offset"],
     svg:'<path d="M3 15L15 3"/><path d="M7 17L17 7"/><circle cx="6" cy="9" r="1.3"/>'},
 
+  /* Revit 2016 Modify > Measure. Temporary graphics, not permanent dimensions. */
+  measurebetween:{label:"Measure Between Two References", pts:0, alias:"MB", prompts:["Select first reference","Select second reference"],
+    svg:'<path d="M3 5v10M17 5v10M3 10h14"/><path d="M6 8l-3 2 3 2M14 8l3 2-3 2"/>'},
+  measurealong:{label:"Measure Along An Element", pts:0, alias:"MA", pick:"measurealong", prompts:["Select element"],
+    svg:'<path d="M3 14L7 6l5 7 5-9"/><path d="M3 17h14"/>'},
+
   imgmove:{label:"Move Image", pts:2, alias:"IMGMOVE", prompts:["Reference point","Destination"],
     svg:'<rect x="3" y="4" width="11" height="9"/><path d="M5 11l2.6-2.7 2 2 2-3 2.4 3.7"/><path d="M16 7v8M12 11h8"/>'},
   imgcal:{label:"Calibrate Image", pts:2, alias:"IMGCAL", prompts:["First known point","Second known point"],
@@ -963,9 +976,68 @@ const ACTIONS={
 };
 const SELOPS=["move","copy","mirror","rotate","scale","array","explode"];
 // scale intentionally not pts:1 any more - see feed()/commit() for its own point-count logic
-const PICKTOOLS=["trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","pickLines"];
+const PICKTOOLS=["trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","pickLines","measurealong"];
+const isMeasureTool=t=>t==="measurebetween"||t==="measurealong";
+function clearMeasurement(keepEsc){
+  S.pending=[]; S.measureSegs=[]; S.measureTotal=0; S.measureLabel=null; S.measureTabChain=false;
+  if(!keepEsc) S.measureEscArmed=false;
+}
+function measurePath(e){
+  if(!e) return null;
+  if(e.t==="line") return [e.a,e.b];
+  if(e.t==="pline") return e.pts&&e.pts.length>1?e.pts.slice():null;
+  if(e.t==="arc"||e.t==="circle"||e.t==="ellipse"||e.t==="spline") return flatten(e);
+  return null;
+}
+function measureSegmentsForPath(P,closed,source){
+  const out=[]; if(!P||P.length<2) return out;
+  for(let i=0;i<P.length-1;i++) if(dist(P[i],P[i+1])>1e-9) out.push({a:P[i],b:P[i+1],source});
+  if(closed&&P.length>2&&dist(P[P.length-1],P[0])>1e-9) out.push({a:P[P.length-1],b:P[0],source});
+  return out;
+}
+function setMeasuredSegments(segs){
+  S.measureSegs=segs||[];
+  S.measureTotal=S.measureSegs.reduce((n,q)=>n+dist(q.a,q.b),0);
+  S.measureEscArmed=false; paintOptbar(); draw();
+}
+function feedMeasureBetween(p){
+  S.measureEscArmed=false;
+  if(!S.pending.length){
+    S.measureSegs=[]; S.measureTotal=0; S.measureLabel=null; S.pending=[p]; paintOptbar(); setPrompt(); draw(); return;
+  }
+  const a=S.pending[S.pending.length-1]; if(dist(a,p)<1e-9) return;
+  if(S.measureChain){
+    S.pending.push(p); S.measureSegs.push({a,b:p}); S.measureTotal+=dist(a,p);
+  }else{
+    S.measureSegs=[{a,b:p}]; S.measureTotal=dist(a,p); S.pending=[];
+  }
+  paintOptbar(); setPrompt(); draw();
+}
+function finishMeasureChain(){
+  if(S.tool!=="measurebetween"||!S.measureChain) return;
+  S.pending=[]; S.measureEscArmed=false; paintOptbar(); setPrompt(); draw();
+}
+function measureAlongPick(i){
+  const e=S.ents[i]; if(!e) return; let segs=[];
+  if(S.measureTabChain&&e.t==="line"){
+    const tr=traceChainPoints(i);
+    for(const j of tr.idxs){const q=S.ents[j];if(q&&q.t==="line")segs.push({a:q.a,b:q.b,source:j});}
+  }else{
+    const P=measurePath(e);
+    if(P){
+      segs=measureSegmentsForPath(P,!!e.closed||e.t==="circle",i);
+      if(e.t!=="line"&&e.t!=="pline") for(const q of segs) q.noLabel=true;
+      if(segs.length && (e.t!=="line"&&e.t!=="pline")) S.measureLabel={p:P[Math.floor(P.length/2)],text:null};
+    }
+  }
+  if(!segs.length) return echo("That element cannot be measured along","warn");
+  setMeasuredSegments(segs);
+  if(S.measureLabel){ S.measureLabel.text=fmt(S.measureTotal); draw(); }
+  echo("Total Length  "+fmt(S.measureTotal));
+}
 function setTool(t){
   if(S.touchUI) setTimeout(updateActionBar,0);
+  const prev=S.tool; if(isMeasureTool(prev)&&prev!==t) clearMeasurement(false);
   S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; resetNudge();
   if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
   if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && S.refImage && S.refImage.locked){ echo("Reference image is locked","warn"); t="select"; }
@@ -990,6 +1062,7 @@ function setTool(t){
     S.op={r: t==="fillet"? S.lastFillet : S.lastChamfer};
     say("Pick first line");
     return; }
+  if(t==="measurebetween"||t==="measurealong"){ clearMeasurement(false); setPrompt(); paintOptbar(); draw(); return; }
 }
 function say(t){ S.op.prompt=t; document.getElementById("prompt").textContent=t+":"; }
 function askArray(){
@@ -1036,6 +1109,8 @@ function setPrompt(){
   if((S.tool==="pline"||S.tool==="spline")&&S.pending.length) txt="Next point or Enter to finish:";
   if(S.tool==="line"&&S.chain&&S.pending.length) txt="Next point or Enter to finish chain:";
   if((S.tool==="move"||S.tool==="copy")) txt = (S.base?"Destination":"Base point")+":";
+  if(S.tool==="measurebetween") txt=S.pending.length?(S.measureChain?"Select next reference or double-click to finish:":"Select second reference:"):"Select first reference:";
+  if(S.tool==="measurealong") txt="Select element:";
   document.getElementById("prompt").textContent=txt;
 }
 function echo(m,cls){
@@ -1047,6 +1122,7 @@ function echo(m,cls){
 function feed(p){
   const T=TOOLS[S.tool];
   if(S.tool==="select"){ return; }
+  if(S.tool==="measurebetween") return feedMeasureBetween(p);
   if(S.tool==="move"||S.tool==="copy"){
     if(!S.base){ S.base=p; setPrompt(); return; }
     const d=sub(p,S.base); snap();
@@ -1262,6 +1338,12 @@ function finishChain(){
 }
 function cancel(){
   if(S.ask){ S.ask=null; setPrompt(); echo(""); return; }
+  if(isMeasureTool(S.tool)){
+    const active=S.pending.length||S.measureSegs.length||S.measureTotal>0;
+    if(active){ clearMeasurement(true); S.measureEscArmed=true; setPrompt(); paintOptbar(); draw(); echo("Measurement cleared · Esc again to exit Measure"); return; }
+    if(S.measureEscArmed){ S.measureEscArmed=false; setTool("select"); echo(""); return; }
+    S.measureEscArmed=true; echo("Esc again to exit Measure"); return;
+  }
   S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
   if(S.tool!=="select") setTool("select"); else { S.sel.clear(); draw(); updateProps(); }
   echo("");
@@ -1729,6 +1811,7 @@ function draw(){
   });
   if(S.exporting) return;
   drawPreview();
+  paintMeasurement();
   mkPaintLive();
   flowPaintLive();
   drawBand();
@@ -2018,6 +2101,38 @@ function drawPreview(){
   function box(a,b){ctx.beginPath();ctx.rect(X(Math.min(a.x,b.x)),Y(Math.max(a.y,b.y)),
     Math.abs(b.x-a.x)*S.view.s,Math.abs(b.y-a.y)*S.view.s);ctx.stroke();}
 }
+function paintMeasurement(){
+  if(!isMeasureTool(S.tool)) return;
+  const segs=S.measureSegs.slice();
+  if(S.tool==="measurebetween"&&S.pending.length){
+    const a=S.pending[S.pending.length-1],b=cursorPoint(); if(dist(a,b)>1e-9) segs.push({a,b,preview:true});
+  }
+  ctx.save(); ctx.strokeStyle=getCSS("--pen-strong"); ctx.lineWidth=1; ctx.setLineDash([]);
+  const fs=11; ctx.font=fs+"px "+getCSS("--ui"); ctx.textAlign="center"; ctx.textBaseline="bottom";
+  for(const q of segs){
+    const a=q.a,b=q.b,L=dist(a,b); if(!(L>1e-9)) continue;
+    ctx.globalAlpha=q.preview?.72:1; ctx.beginPath();ctx.moveTo(X(a.x),Y(a.y));ctx.lineTo(X(b.x),Y(b.y));ctx.stroke();
+    const n=perp(norm(sub(b,a)));
+    for(const p0 of [a,b]){ const p1=add(p0,mul(n,px(5))),p2=sub(p0,mul(n,px(5)));ctx.beginPath();ctx.moveTo(X(p1.x),Y(p1.y));ctx.lineTo(X(p2.x),Y(p2.y));ctx.stroke(); }
+    if(!q.noLabel){
+      const mid=mul(add(a,b),.5),angDeg=deg(Math.atan2(b.y-a.y,b.x-a.x));
+      const txt=fmt(L)+(Math.abs(angDeg)>1e-7?"   "+fmt(angDeg)+"°":"");
+      const tw=ctx.measureText(txt).width+8,tx=X(mid.x),ty=Y(mid.y)-5;
+      ctx.globalAlpha=.88;ctx.fillStyle="rgba(25,28,33,.92)";ctx.fillRect(tx-tw/2,ty-fs,tw,fs+4);
+      ctx.globalAlpha=1;ctx.fillStyle=getCSS("--ink");ctx.fillText(txt,tx,ty+1);
+    }
+  }
+  if(S.measureLabel&&S.measureLabel.p&&S.measureLabel.text){
+    const tx=X(S.measureLabel.p.x),ty=Y(S.measureLabel.p.y)-5,txt=S.measureLabel.text,tw=ctx.measureText(txt).width+8;
+    ctx.globalAlpha=.88;ctx.fillStyle="rgba(25,28,33,.92)";ctx.fillRect(tx-tw/2,ty-fs,tw,fs+4);
+    ctx.globalAlpha=1;ctx.fillStyle=getCSS("--ink");ctx.fillText(txt,tx,ty+1);
+  }
+  if(S.tool==="measurealong"&&S.hover>=0&&S.measureTabChain&&S.ents[S.hover]&&S.ents[S.hover].t==="line"){
+    const tr=traceChainPoints(S.hover);ctx.strokeStyle=getCSS("--snap");ctx.lineWidth=2;ctx.globalAlpha=.8;
+    for(const j of tr.idxs){const e=S.ents[j];if(e){ctx.beginPath();ctx.moveTo(X(e.a.x),Y(e.a.y));ctx.lineTo(X(e.b.x),Y(e.b.y));ctx.stroke();}}
+  }
+  ctx.restore();
+}
 function drawBand(){
   if(!S.band) return;
   const {a,b}=S.band, cross=b.x<a.x;
@@ -2088,6 +2203,15 @@ function hitIndex(p){
   }
   return -1;
 }
+function hitIndexMeasure(p){
+  const tol=px(tolPx(7));
+  for(let i=S.ents.length-1;i>=0;i--){
+    const e=S.ents[i], L=S.layers[e.li];
+    if(!L||!L.on) continue;
+    if(measurePath(e)&&entHit(e,p,tol)) return i;
+  }
+  return -1;
+}
 function doPick(i,p,shift){
   const t=S.tool;
   if(i<0){ echo("Nothing under the cursor","warn"); return; }
@@ -2102,7 +2226,7 @@ function doPick(i,p,shift){
     if(S.op.boundary==null){ S.op.boundary=i; say("Pick the element to trim or extend"); draw(); return; }
     if(i===S.op.boundary){ echo("Pick a different element","warn"); return; }
     trimExtendToBoundary(i,S.op.boundary,p);
-    if(t==="trimsingle") setTool("select");
+    if(t==="trimsingle"){ S.op={}; say("Pick a boundary reference"); }
     else say("Pick another element to trim/extend to the same boundary");
     return;
   }
@@ -2117,6 +2241,7 @@ function doPick(i,p,shift){
     S.op={r:S.op.r}; say("Pick first line");
     return;
   }
+  if(t==="measurealong"){ measureAlongPick(i); return; }
 }
 
 /* Trace a connected run of coincident "line" entities in both directions from
@@ -2248,7 +2373,7 @@ window.addEventListener("pointermove",e=>{
     S.band={a:downAt.w, b:V(wX(S.mouse.sx),wY(S.mouse.sy))};
   }
   S.hover = (TOOLS[S.tool].pick && !((S.tool==="offset"||S.tool==="pickLines")&&S.op.stage==="side"))
-    ? hitIndex(V(wX(S.mouse.sx),wY(S.mouse.sy))) : -1;
+    ? (S.tool==="measurealong"?hitIndexMeasure(V(wX(S.mouse.sx),wY(S.mouse.sy))):hitIndex(V(wX(S.mouse.sx),wY(S.mouse.sy)))) : -1;
   readout(); draw();
 });
 window.addEventListener("pointerup",e=>{
@@ -2271,8 +2396,9 @@ window.addEventListener("pointerup",e=>{
     updateProps();
   } else if(TOOLS[S.tool].pick){
     if(!dragging || slid){
+      S.measureEscArmed=false;
       if((S.tool==="offset"||S.tool==="pickLines") && S.op.stage==="side") offsetSide(w);
-      else doPick(hitIndex(slid? w : downAt.w), w, e.shiftKey||downAt.shift);
+      else { const hp=S.tool==="measurealong"?hitIndexMeasure(slid?w:downAt.w):hitIndex(slid?w:downAt.w); doPick(hp,w,e.shiftKey||downAt.shift); }
     }
   } else {
     if(!dragging || slid) feed(w);
@@ -2290,7 +2416,8 @@ cv.addEventListener("wheel",e=>{
   readout(); draw();
 },{passive:false});
 cv.addEventListener("dblclick",()=>{
-  if(S.tool==="pline"||S.tool==="spline") finishPline();
+  if(S.tool==="measurebetween"&&S.measureChain) finishMeasureChain();
+  else if(S.tool==="pline"||S.tool==="spline") finishPline();
   else if(S.tool==="line"&&S.chain) finishChain();
   else if(S.tool==="select"){
     const hit=flowHitAt(cursorPoint());
@@ -2339,7 +2466,8 @@ cmdin.addEventListener("keydown",e=>{
   const raw=cmdin.value.trim(); cmdin.value="";
   if(S.ask){ const {cb}=S.ask; S.ask=null; cb(raw); setPrompt(); return; }
   if(!raw){
-    if(S.tool==="pline"||S.tool==="spline") finishPline();
+    if(S.tool==="measurebetween"&&S.measureChain) finishMeasureChain();
+    else if(S.tool==="pline"||S.tool==="spline") finishPline();
     else if(S.tool==="line"&&S.chain) finishChain();
     return;
   }
@@ -2375,6 +2503,7 @@ for(const [id,T] of Object.entries(TOOLS)){
   if(T.alias) ALIAS[T.alias.toLowerCase()]=id;
 }
 Object.assign(ALIAS,{li:"line",p:"pline",rec:"rect",ci:"circle",dli:"dim",txt:"text",
+  mb:"measurebetween",ma:"measurealong",measure:"measurebetween",
   sel:"select",cha:"chamfer",mi:"mirror",ro:"rotate",
   sc:"scale",ar:"array",x:"explode",e:"erase"});
 function handleCommand(raw){
@@ -4001,7 +4130,7 @@ S.png={width:2000, bg:"#ffffff", grid:false, margin:5};
 S.flow.laneW=280; S.flow.laneH=560; S.flow.laneDir="v";
 
 let refImgEl=null;         // the live <img>, kept alive across undo
-let autoTimer=null, autoStamp="";
+let autoTimer=null, autoStamp="", autoDBPromise=null;
 
 function setDocName(n){
   S.docName=safeFileName(String(n||"untitled").replace(/\.(b2db|json|dxf)$/i,""),"untitled");
@@ -4116,7 +4245,7 @@ function serializeDrawing(withImage){
     app:FILE_TAG, version:FILE_VER, saved:new Date().toISOString(), name:S.docName,
     ents:S.ents, layers:S.layers, styles:S.styles, cur:S.cur, curStyle:S.curStyle,
     view:S.view, gridStep:S.gridStep, gridShow:S.gridShow, gridSnap:S.gridSnap,
-    ortho:S.ortho, osnap:S.osnap, weld:S.weld, edgeAssist:S.edgeAssist,
+    ortho:S.ortho, osnap:S.osnap, weld:S.weld, edgeAssist:S.edgeAssist, edgeThreshold:S.edgeThreshold,
     textHeight:S.textHeight, groupSeq:S.groupSeq,
     flow:S.flow, mk:S.mk, png:S.png,
     ref: refDoc(withImage!==false)
@@ -4131,7 +4260,7 @@ function applyDrawing(raw,label){
   S.cur=Math.max(0,Math.min(d.cur|0, S.layers.length-1));
   S.curStyle=Math.max(0,Math.min(d.curStyle|0, S.styles.length-1));
   if(d.view && isFinite(d.view.s) && d.view.s>0) S.view={cx:d.view.cx,cy:d.view.cy,s:d.view.s};
-  for(const k of ["gridStep","gridShow","gridSnap","ortho","osnap","weld","edgeAssist","textHeight","groupSeq"])
+  for(const k of ["gridStep","gridShow","gridSnap","ortho","osnap","weld","edgeAssist","edgeThreshold","textHeight","groupSeq"])
     if(d[k]!==undefined) S[k]=d[k];
   mergePlain(S.flow,d.flow); mergePlain(S.mk,d.mk); mergePlain(S.png,d.png);
   S.sel.clear(); S.undo.length=0; S.redo.length=0; S.op={}; S.pending=[]; S.base=null;
@@ -4174,37 +4303,80 @@ function openDrawingText(txt,name){
 }
 
 /* ---- autosave --------------------------------------------------------- */
+/* Full recovery uses IndexedDB so embedded references are not silently lost at
+   localStorage quota. localStorage remains a deliberately smaller fallback. */
+const AUTODB="BackToTheDrawingBoard", AUTOSTORE="recovery", AUTODBKEY="autosave.v2";
+function recoveryDB(){
+  if(!("indexedDB" in window)) return Promise.resolve(null);
+  if(autoDBPromise) return autoDBPromise;
+  autoDBPromise=new Promise(resolve=>{
+    try{
+      const q=indexedDB.open(AUTODB,1);
+      q.onupgradeneeded=()=>{ if(!q.result.objectStoreNames.contains(AUTOSTORE)) q.result.createObjectStore(AUTOSTORE); };
+      q.onsuccess=()=>resolve(q.result); q.onerror=()=>resolve(null); q.onblocked=()=>resolve(null);
+    }catch(_){ resolve(null); }
+  });
+  return autoDBPromise;
+}
+async function idbSetAutosave(txt){
+  const db=await recoveryDB(); if(!db) return false;
+  return await new Promise(resolve=>{ try{
+    const tx=db.transaction(AUTOSTORE,"readwrite"); tx.objectStore(AUTOSTORE).put(txt,AUTODBKEY);
+    tx.oncomplete=()=>resolve(true); tx.onerror=()=>resolve(false); tx.onabort=()=>resolve(false);
+  }catch(_){resolve(false);} });
+}
+async function idbGetAutosave(){
+  const db=await recoveryDB(); if(!db) return null;
+  return await new Promise(resolve=>{ try{
+    const q=db.transaction(AUTOSTORE,"readonly").objectStore(AUTOSTORE).get(AUTODBKEY);
+    q.onsuccess=()=>resolve(typeof q.result==="string"?q.result:null); q.onerror=()=>resolve(null);
+  }catch(_){resolve(null);} });
+}
+async function idbDeleteAutosave(){
+  const db=await recoveryDB(); if(!db) return false;
+  return await new Promise(resolve=>{ try{
+    const tx=db.transaction(AUTOSTORE,"readwrite"); tx.objectStore(AUTOSTORE).delete(AUTODBKEY);
+    tx.oncomplete=()=>resolve(true); tx.onerror=()=>resolve(false); tx.onabort=()=>resolve(false);
+  }catch(_){resolve(false);} });
+}
 function markDirty(){
   if(autoTimer) clearTimeout(autoTimer);
   autoTimer=setTimeout(autosaveNow,1500);
 }
 function autosaveNow(){
   autoTimer=null;
+  let full="",fallback="";
   try{
-    let doc=serializeDrawing(true), txt=JSON.stringify(doc);
-    if(txt.length>2.4e6){ doc=serializeDrawing(false); doc.imageDropped=true; txt=JSON.stringify(doc); }
-    if(txt.length>4.4e6){ autoStamp="too large to autosave"; return; }
-    localStorage.setItem(AUTOKEY,txt);
-    autoStamp="saved "+new Date().toLocaleTimeString();
-  }catch(_){ autoStamp="autosave unavailable"; }
+    full=JSON.stringify(serializeDrawing(true));
+    if(full.length>SEC.MAX_DOC){ const d=serializeDrawing(false); d.imageDropped=true; full=JSON.stringify(d); }
+    let small=full;
+    if(small.length>2.4e6){ const d=serializeDrawing(false); d.imageDropped=true; small=JSON.stringify(d); }
+    fallback=small.length<=4.4e6?small:"";
+  }catch(_){ autoStamp="autosave unavailable"; return; }
+  const stamp="saved "+new Date().toLocaleTimeString();
+  idbSetAutosave(full).then(ok=>{ if(ok){autoStamp=stamp;draw();} });
+  try{
+    if(fallback) localStorage.setItem(AUTOKEY,fallback); else localStorage.removeItem(AUTOKEY);
+    if(!("indexedDB" in window)) autoStamp=fallback?stamp:"too large to autosave";
+  }catch(_){ if(!("indexedDB" in window)) autoStamp="autosave unavailable"; }
 }
-function autosaveDoc(){
+async function autosaveDoc(){
   try{
-    const t=localStorage.getItem(AUTOKEY);
-    if(!t) return null;
+    let t=await idbGetAutosave();
+    if(!t) t=localStorage.getItem(AUTOKEY);
+    if(!t||t.length>SEC.MAX_DOC) return null;
     const d=sanitizeDoc(safeParse(t));
-    return (d && d.ents.length) ? d : null;
+    return (d&&d.ents.length)?d:null;
   }catch(_){ return null; }
 }
-function offerRestore(){
-  const d=autosaveDoc();
-  if(!d) return;
-  const when=d.saved ? new Date(d.saved).toLocaleString() : "earlier";
+async function offerRestore(){
+  const d=await autosaveDoc(); if(!d) return;
+  const when=d.saved?new Date(d.saved).toLocaleString():"earlier";
   requestString("Restore autosave from "+when+"?  y/n","y",v=>{
     if(/^y/i.test(String(v||""))){
       applyDrawing(d,"Autosave restored");
-      if(d.imageDropped) echo("Autosave restored - the reference image was too large to keep");
-    } else echo("Starting fresh. The autosave stays until you draw something.");
+      if(d.imageDropped) echo("Autosave restored - the reference image was omitted from fallback recovery");
+    }else echo("Starting fresh. The autosave stays until you draw something.");
     setPrompt();
   });
 }
@@ -4216,19 +4388,16 @@ function wipeLocalData(){
   requestString("Erase autosave, clipboard and saved preferences from this browser?  y/n","",v=>{
     if(/^y/i.test(String(v||""))){
       let n=0;
-      for(const k of LOCAL_KEYS){
-        try{ if(localStorage.getItem(k)!=null){ localStorage.removeItem(k); n++; } }catch(_){}
-      }
-      clipMem=null; autoStamp="";
-      draw();
-      echo("Wiped "+n+" stored item"+(n===1?"":"s")+" from this browser");
-    } else echo("Nothing wiped");
+      for(const k of LOCAL_KEYS){ try{ if(localStorage.getItem(k)!=null){localStorage.removeItem(k);n++;} }catch(_){} }
+      idbDeleteAutosave(); clipMem=null; autoStamp=""; draw();
+      echo("Wiped "+n+" local item"+(n===1?"":"s")+" plus recovery database");
+    }else echo("Nothing wiped");
     setPrompt();
   });
 }
 function clearAutosave(){
-  try{ localStorage.removeItem(AUTOKEY); }catch(_){}
-  autoStamp=""; echo("Autosave cleared");
+  try{localStorage.removeItem(AUTOKEY);}catch(_){}
+  idbDeleteAutosave(); autoStamp=""; echo("Autosave cleared");
 }
 
 /* ---- entity clipboard ------------------------------------------------- */
@@ -5176,7 +5345,7 @@ function sanStyles(a){
     if(!st || typeof st!=="object") continue;
     const pat=Array.isArray(st.pat)? st.pat.slice(0,16).map(v=>Math.abs(safeNum(v,1,1e4))) : null;
     out.push({name:safeStr(st.name,64)||"STYLE", w:Math.abs(safeNum(st.w,0.25,1e3)),
-              pat: pat && pat.length? pat : null});
+              aci:safeInt(st.aci,7,255), pat: pat && pat.length? pat : null});
   }
   return out.length? out : [{name:"Continuous",w:0.25,pat:null}];
 }
@@ -5236,6 +5405,10 @@ function sanitizeDoc(d){
 window.addEventListener("keydown",e=>{
   const typing = !!S.ask || (document.activeElement===cmdin && cmdin.value.length>0);
   if(e.key==="Escape"){ cmdin.value=""; cancel(); return; }
+  if(!typing && e.key==="Tab" && S.tool==="measurealong"){
+    e.preventDefault(); S.measureTabChain=!S.measureTabChain; S.measureEscArmed=false;
+    echo(S.measureTabChain?"Chain preview · click to measure connected run":"Element preview"); draw(); return;
+  }
   if(e.key==="F8"){ e.preventDefault(); return toggle("ortho"); }
   if(e.key==="F9"){ e.preventDefault(); return toggle("gridSnap"); }
   if(e.key==="F7"){ e.preventDefault(); return toggle("gridShow"); }
@@ -5271,6 +5444,7 @@ const RIBBON={
     {name:"Modify", big:"move",
       small:["select","copy","rotate","mirror","scale","trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","array","explode","erase","group","ungroup","clipcut","clipcopy","clippaste"]},
     {name:"Annotate", big:"dim", small:["text"]},
+    {name:"Measure", big:"measurebetween", small:["measurealong"]},
     {name:"Line Style", custom:"style"},
     {name:"Layers", custom:"layers", small:["dellayer"]}
   ],
@@ -5590,6 +5764,12 @@ function paintOptbar(){
     const sp=document.createElement("span"); sp.textContent=label;
     wrap.append(i,sp); return wrap;
   };
+  const readField=(label,val)=>{
+    const wrap=document.createElement("label");
+    const sp=document.createElement("span"); sp.textContent=label; sp.className="oh";
+    const i=document.createElement("input"); i.type="text"; i.value=val; i.readOnly=true; i.disabled=true; i.style.width="92px";
+    wrap.append(sp,i); return wrap;
+  };
   const radio=(options,val,set)=>{
     const wrap=document.createElement("div"); wrap.className="rrow";
     for(const [v,l] of options){
@@ -5602,7 +5782,13 @@ function paintOptbar(){
   };
   if(flowIsTool(S.tool)){ flowOptbar(host,{num,chk,radio}); return; }
   if(mkIsTool(S.tool)){ mkOptbar(host,{num,chk,radio}); return; }
-  if(S.tool==="line"){
+  if(S.tool==="measurebetween"){
+    host.append(chk("Chain",S.measureChain,v=>{ S.measureChain=v; clearMeasurement(false); setPrompt(); }));
+    host.append(readField("Total Length",S.measureTotal>0?fmt(S.measureTotal):""));
+  } else if(S.tool==="measurealong"){
+    host.append(readField("Total Length",S.measureTotal>0?fmt(S.measureTotal):""));
+    const hint=document.createElement("span"); hint.className="oh"; hint.textContent=S.measureTabChain?"Tab: chain preview":"Tab: connected chain"; host.append(hint);
+  } else if(S.tool==="line"){
     host.append(chk("Chain", S.chain, v=>{S.chain=v; S.pending=[]; S.chainPrev=null; setPrompt(); draw();}));
     host.append(num("Offset", S.drawOffset, "any", v=>S.drawOffset=v));
     host.append(chk("Radius", S.useRadius, v=>S.useRadius=v));
@@ -5840,6 +6026,8 @@ function updateProps(){
       "<kbd>Ctrl</kbd>+<kbd>S</kbd> save a .b2db &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open one &middot; <kbd>PNG</kbd> export &middot; <kbd>CPIMG</kbd> copy image<br>"+
       "Work autosaves to this browser &middot; <kbd>RESTORE</kbd> brings it back &middot; layers have an \u2715 to delete<br>"+
       "Imported files are sanitised before they touch the drawing &middot; the app makes no network calls<br>"+
+      "<b style=\"color:#9fd0ff\">Revit 2016 Measure</b>: <kbd>MB</kbd> between references &middot; Chain in Options Bar &middot; double-click finishes a chain &middot; <kbd>MA</kbd> along element &middot; <kbd>Tab</kbd> previews a connected chain<br>"+
+      "Measurements are temporary &middot; first <kbd>Esc</kbd> clears the current measurement &middot; second <kbd>Esc</kbd> exits Measure<br>"+
       "<kbd>F7</kbd> show grid &middot; <kbd>F8</kbd> ortho &middot; <kbd>F9</kbd> grid snap &middot; <kbd>F3</kbd> osnap &middot; <kbd>F6</kbd> image-edge snap<br>"+
       "Type <kbd>x,y</kbd> <kbd>@dx,dy</kbd> <kbd>len&lt;ang</kbd> or a bare length<br>"+
       "Drag right = window, drag left = crossing<br>"+
@@ -6281,7 +6469,8 @@ const mapp=(m,x,y)=>({x:m[0]*x+m[2]*y+m[4], y:m[1]*x+m[3]*y+m[5]});
 const mscale=m=>Math.sqrt(Math.abs(m[0]*m[3]-m[1]*m[2]))||1;
 
 /* ---- main ---- */
-async function read(bytes, log){
+async function read(bytes, log, pageIndex){
+  pageIndex=Math.max(0,Math.trunc(pageIndex||0));
   const str=latin1(bytes);
   const objs=new Map();
   const re=/(\d+)\s+(\d+)\s+obj\b/g;
@@ -6355,8 +6544,8 @@ async function read(bytes, log){
   }
 
   /* pages */
-  let pages=[...objs.values()].filter(r=>r.dict&&r.dict.Type&&r.dict.Type.name==="Page");
-  const out={subpaths:[], texts:[], images:0, pages:0, box:null, undecoded:0, filters:new Set()};
+  let pages=[...objs.values()].filter(r=>r.dict&&r.dict.Type&&r.dict.Type.name==="Page").sort((a,b)=>a.id-b.id);
+  const out={subpaths:[], texts:[], images:0, pages:0, pageCount:pages.length, pageIndex:0, box:null, undecoded:0, filters:new Set()};
 
   const emitFor = async (content, resources, baseCTM, box)=>{
     await runContent(content, resources, baseCTM, out, 0, objs, resolve, streamData);
@@ -6364,7 +6553,8 @@ async function read(bytes, log){
 
   if(pages.length){
     out.pages=pages.length;
-    const pg=pages[0];                       // first page only
+    pageIndex=Math.max(0,Math.min(pageIndex,pages.length-1)); out.pageIndex=pageIndex;
+    const pg=pages[pageIndex];
     let box=resolve(pg.dict.MediaBox)||[0,0,595,842];
     box=box.map(v=>typeof v==="number"?v:0);
     out.box=box;
@@ -6540,32 +6730,41 @@ async function importPDF(file){
   try{ data=new Uint8Array(await file.arrayBuffer()); }
   catch(err){ return echo("Could not read that file","warn"); }
   if(PDFIN.latin1(data.subarray(0,8)).indexOf("%PDF")<0) return echo("That is not a PDF","warn");
-  if(typeof DecompressionStream==="undefined")
-    return echo("This browser cannot inflate PDF streams","warn");
-  let res;
-  try{ res=await PDFIN.read(data, m=>echo(m)); }
+  if(typeof DecompressionStream==="undefined") return echo("This browser cannot inflate PDF streams","warn");
+  let first;
+  try{ first=await PDFIN.read(data,m=>echo(m),0); }
   catch(err){ console.error(err); return echo("Could not parse that PDF: "+err.message,"warn"); }
-
-  if(res.subpaths.length>SEC.MAX_SUBPATHS)
-    return echo("That PDF contains an implausible amount of geometry ("+res.subpaths.length+" paths)","warn");
-  if(!res.subpaths.length){
-    if(res.undecoded)
-      return echo("Could not decode "+res.undecoded+" stream(s) using "+
-        ([...res.filters].join(", ")||"an unknown filter")+" - that encoding is not supported","warn");
-    return echo(res.images
-      ? "No vector linework - that looks like a scanned drawing, so there is nothing to extract"
-      : "No vector linework found in that PDF","warn");
-  }
-  pdfPending={res, name:file.name};
-  requestString("Drawing scale 1:N  (page is "+
-    (res.box? Math.round((res.box[2]-res.box[0])*25.4/72)+"x"+Math.round((res.box[3]-res.box[1])*25.4/72)+"mm" : "unknown")+
-    ")", "100", v=>placePDF(parseFloat(v)));
+  const count=Math.max(1,first.pageCount||first.pages||1);
+  const continueWith=(res,page)=>{
+    if(res.subpaths.length>SEC.MAX_SUBPATHS){ pdfPending=null; return echo("That PDF page contains an implausible amount of geometry ("+res.subpaths.length+" paths)","warn"); }
+    if(!res.subpaths.length){
+      pdfPending=null;
+      if(res.undecoded) return echo("Could not decode "+res.undecoded+" stream(s) using "+([...res.filters].join(", ")||"an unknown filter")+" - that encoding is not supported","warn");
+      return echo(res.images?"No vector linework on page "+page+" - it looks scanned/raster":"No vector linework found on page "+page,"warn");
+    }
+    pdfPending={res,name:file.name,page,pageCount:count};
+    requestString("Drawing scale 1:N  (page "+page+(count>1?"/"+count:"")+" is "+
+      (res.box?Math.round((res.box[2]-res.box[0])*25.4/72)+"x"+Math.round((res.box[3]-res.box[1])*25.4/72)+"mm":"unknown")+")","100",v=>placePDF(parseFloat(v)));
+  };
+  if(count===1){ continueWith(first,1); return; }
+  pdfPending={data,name:file.name,pageCount:count};
+  requestString("PDF page 1-"+count,"1",async v=>{
+    let page=Math.trunc(parseFloat(v));
+    if(!(page>=1&&page<=count)){ pdfPending=null; return echo("Choose a page from 1 to "+count,"warn"); }
+    let res=first;
+    if(page!==1){
+      echo("Reading page "+page+" of "+count+" ...");
+      try{ res=await PDFIN.read(data,m=>echo(m),page-1); }
+      catch(err){ console.error(err); pdfPending=null; return echo("Could not parse page "+page+": "+err.message,"warn"); }
+    }
+    continueWith(res,page);
+  });
 }
 let pdfPending=null;
 function placePDF(scale){
   if(!pdfPending) return;
   if(!isFinite(scale)||scale<=0) scale=1;
-  const {res,name}=pdfPending; pdfPending=null;
+  const {res,name,page,pageCount}=pdfPending; pdfPending=null;
   const K=(25.4/72)*scale;
   const ox=res.box?res.box[0]:0, oy=res.box?res.box[1]:0;
   const T=p=>V((p.x-ox)*K, (p.y-oy)*K);
@@ -6607,7 +6806,7 @@ function placePDF(scale){
   S.ents.push(...clean);
   flowInvalidateIndex();
   S.sel.clear(); paintLayers(); zoomExtents(); updateProps();
-  echo(name+": "+made+" objects, "+txt+" labels at 1:"+scale+
+  echo(name+(pageCount>1?" · page "+page+"/"+pageCount:"")+": "+made+" objects, "+txt+" labels at 1:"+scale+
        (skipped?"  ("+skipped+" over the "+MAX_PDF_ENTS+" cap)":"")+
        (res.images?"  ["+res.images+" raster image(s) ignored]":""));
 }
@@ -6693,7 +6892,7 @@ document.getElementById("filein").onchange=e=>{
 };
 function newDrawing(){
   snap(); S.ents=[]; S.sel.clear(); S.refImage=null; refImgEl=null; S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
-  document.getElementById("fname").textContent="untitled.dxf \u00B7 units mm";
+  setDocName("untitled");
   draw(); updateProps(); echo("New drawing");
 }
 function newFile(){
