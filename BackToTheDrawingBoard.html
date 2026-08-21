@@ -330,6 +330,7 @@
 </div>
 
 <input type="file" id="filein" accept=".dxf,.DXF" style="display:none">
+<input type="file" id="b2dbin" accept=".b2db,.json" style="display:none">
 <input type="file" id="imagein" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" style="display:none">
 
 <script>
@@ -576,7 +577,9 @@ function moveEnt(e,d){
 }
 
 /* ============================================================ view */
-const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
+/* let, not const: PNG export repoints these at an offscreen canvas, redraws
+   the scene at export resolution, then puts them back. */
+let cv=document.getElementById("cv"), ctx=cv.getContext("2d");
 let W=0,H=0,DPR=1;
 function resize(){
   DPR=window.devicePixelRatio||1;
@@ -593,20 +596,56 @@ const wY = sy => S.view.cy - (sy - H/2)/S.view.s;
 const px = n => n/S.view.s;   // pixels -> world units
 
 /* ============================================================ history */
+/* Undo used to snapshot entities only, so calibrating or cropping a reference
+   image - or renaming a layer - could not be taken back. The snapshot now
+   covers layers, styles and the image placement too. The <img> itself stays
+   out of JSON and is held in refImgEl so a removed image can come back. */
+function refState(){
+  const R=S.refImage;
+  if(!R) return null;
+  refImgEl=R.img||refImgEl;
+  return {name:R.name,x:R.x,y:R.y,w:R.w,h:R.h,opacity:R.opacity,visible:R.visible,
+          locked:R.locked,rot:R.rot||0,crop:R.crop||null,mode:R.mode||"fade"};
+}
+function restoreRef(o){
+  if(!o){ S.refImage=null; return; }
+  if(!refImgEl) return;
+  S.refImage=Object.assign({},o,{img:refImgEl});
+  try{ prepareReferenceEdges(S.refImage); }catch(_){}
+}
+function stateBlob(){
+  return JSON.stringify({e:S.ents, l:S.layers, y:S.styles, c:S.cur, cs:S.curStyle,
+                         r:refState(), fs:S.flow?S.flow.seq:1, gs:S.groupSeq});
+}
+function applyBlob(t){
+  const d=JSON.parse(t);
+  S.ents=d.e||[];
+  if(Array.isArray(d.l) && d.l.length) S.layers=d.l;
+  if(Array.isArray(d.y) && d.y.length) S.styles=d.y;
+  S.cur=Math.max(0,Math.min(d.c|0,S.layers.length-1));
+  S.curStyle=Math.max(0,Math.min(d.cs|0,S.styles.length-1));
+  restoreRef(d.r);
+  if(S.flow && d.fs) S.flow.seq=d.fs;
+  if(d.gs) S.groupSeq=d.gs;
+  paintLayers(); paintStyles();
+}
 function snap(){
-  S.undo.push(JSON.stringify(S.ents));
+  S.undo.push(stateBlob());
   if(S.undo.length>120) S.undo.shift();
   S.redo.length=0;
+  markDirty();
 }
 function undo(){
   if(!S.undo.length) return echo("Nothing to undo","warn");
-  S.redo.push(JSON.stringify(S.ents));
-  S.ents=JSON.parse(S.undo.pop()); S.sel.clear(); resetNudge(); draw(); updateProps(); echo("Undo");
+  S.redo.push(stateBlob());
+  applyBlob(S.undo.pop());
+  S.sel.clear(); resetNudge(); markDirty(); draw(); updateProps(); paintRibbon(); echo("Undo");
 }
 function redo(){
   if(!S.redo.length) return echo("Nothing to redo","warn");
-  S.undo.push(JSON.stringify(S.ents));
-  S.ents=JSON.parse(S.redo.pop()); S.sel.clear(); resetNudge(); draw(); updateProps(); echo("Redo");
+  S.undo.push(stateBlob());
+  applyBlob(S.redo.pop());
+  S.sel.clear(); resetNudge(); markDirty(); draw(); updateProps(); paintRibbon(); echo("Redo");
 }
 
 /* ============================================================ snapping */
@@ -957,6 +996,7 @@ function commit(){
     case "imgmove": {
       if(!S.refImage){ S.pending=[]; setTool("select"); return; }
       const d=sub(P[1],P[0]);
+      snap();
       S.refImage.x+=d.x; S.refImage.y+=d.y;
       S.pending=[]; echo("Reference image moved"); setTool("select"); updateProps(); draw(); return;
     }
@@ -969,6 +1009,7 @@ function commit(){
         const actual=parseFloat(v);
         if(!(actual>0)){ echo("Known distance must be greater than zero","warn"); setTool("select"); return; }
         const k=actual/measured, R=S.refImage;
+        snap();
         R.x=a.x+(R.x-a.x)*k; R.y=a.y+(R.y-a.y)*k;
         R.w*=k; R.h*=k;
         echo("Reference calibrated: "+fmt(measured)+" -> "+fmt(actual)+" mm");
@@ -982,6 +1023,7 @@ function commit(){
       const a=P[0], b=P[1], th=ang(a,b);
       if(dist(a,b)<1e-9){echo("Pick two different points","warn");setTool("select");return;}
       const target=Math.round(th/(Math.PI/2))*(Math.PI/2), dth=target-th;
+      snap();
       const v=sub(V(R.x,R.y),a), co=Math.cos(dth), si=Math.sin(dth);
       R.x=a.x+v.x*co-v.y*si; R.y=a.y+v.x*si+v.y*co; R.rot=(R.rot||0)+dth;
       echo("Reference straightened by "+fmt(deg(dth))+"°"); setTool("select"); updateProps(); draw(); return;
@@ -995,6 +1037,7 @@ function commit(){
       const x0=Math.max(0,Math.min(nw,Math.min(a.x,b.x))), x1=Math.max(0,Math.min(nw,Math.max(a.x,b.x)));
       const y0=Math.max(0,Math.min(nh,Math.min(a.y,b.y))), y1=Math.max(0,Math.min(nh,Math.max(a.y,b.y)));
       if(x1-x0<4||y1-y0<4){echo("Crop is too small","warn");setTool("select");return;}
+      snap();
       R.crop={sx:x0,sy:y0,sw:x1-x0,sh:y1-y0};
       echo("Reference cropped to working area"); setTool("select"); updateProps(); draw(); return;
     }
@@ -1104,7 +1147,7 @@ function finishChain(){
 }
 function cancel(){
   if(S.ask){ S.ask=null; setPrompt(); echo(""); return; }
-  S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; mkDraw=null; flowDraw=null; flowResize=null;
+  S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
   if(S.tool!=="select") setTool("select"); else { S.sel.clear(); draw(); updateProps(); }
   echo("");
 }
@@ -1225,7 +1268,7 @@ function nodeRefs(e){
 }
 const WELD_TOL=1e-6;
 function applyDelta(indices,d,weld){
-  const idx=new Set(indices);
+  const idx=new Set(laneExpand(indices));
   const anchors=[];
   for(const i of idx){ const e=S.ents[i]; if(!e) continue;
     anchors.push(...entPoints(e), ...entCenters(e)); }
@@ -1343,9 +1386,33 @@ function ungroupSelection(){
    meet at a single clean joint. This is fillet with a zero radius: filletPair's
    cut() already sets each near endpoint to the corner regardless of whether that
    endpoint currently falls short of it (extend) or past it (trim). */
+function cornerCut(e,pick,q){
+  const tp=paramOn(e,pick), tq=paramOn(e,q);
+  if(e.t==="line"){ if(tp<tq) e.b=q; else e.a=q; return true; }
+  if(e.t==="arc"){ const a=wrap(ang(e.c,q)); if(tp<tq) e.a1=a; else e.a0=a; return true; }
+  return false;
+}
 function trimExtendCorner(i1,p1,i2,p2){
-  const ok=filletPair(i1,p1,i2,p2,0,false);
-  if(ok) echo("Joined at corner");
+  const e1=S.ents[i1], e2=S.ents[i2];
+  /* Two lines keep the proven fillet-at-zero-radius path. */
+  if(e1.t==="line" && e2.t==="line"){
+    const ok=filletPair(i1,p1,i2,p2,0,false);
+    if(ok) echo("Joined at corner");
+    return ok;
+  }
+  /* Anything involving an arc: find the crossing nearest both picks, then move
+     each element's far end onto it - trim or extend, whichever it needs. */
+  const okType=t=>t==="line"||t==="arc";
+  if(!okType(e1.t)||!okType(e2.t)) return echo("Trim to Corner works on lines and arcs","warn");
+  const cand=entInt(e1,e2,true,true);
+  if(!cand.length) return echo("Those elements do not meet, even extended","warn");
+  let q=null, bd=1e18;
+  for(const c of cand){ const d=dist(c,p1)+dist(c,p2); if(d<bd){ bd=d; q=c; } }
+  if(dist(q,p1)<1e-9 || dist(q,p2)<1e-9) return echo("Pick away from the corner","warn");
+  snap();
+  cornerCut(e1,p1,q); cornerCut(e2,p2,q);
+  S.sel.clear(); draw(); updateProps(); echo("Joined at corner");
+  return true;
 }
 
 /* Shared by Trim/Extend Single Element and Trim/Extend Multiple Elements: move
@@ -1499,15 +1566,31 @@ function nudge(dx,dy,e){
 
 /* ============================================================ render */
 function draw(){
-  const cnt=document.getElementById("counts");
-  if(cnt) cnt.textContent=S.ents.length+" objects \u00B7 "+S.layers.length+" layers"+(S.refImage?(" \u00B7 reference"+(S.refImage.locked?" locked":"")):"");
+  if(!S.exporting){
+    const cnt=document.getElementById("counts");
+    if(cnt) cnt.textContent=S.ents.length+" objects \u00B7 "+S.layers.length+" layers"
+      +(S.refImage?(" \u00B7 reference"+(S.refImage.locked?" locked":"")):"")
+      +(autoStamp?(" \u00B7 "+autoStamp):"");
+  }
   ctx.clearRect(0,0,W,H);
+  if(S.exporting && S.exporting.bg && S.exporting.bg!=="transparent"){
+    ctx.fillStyle=S.exporting.bg; ctx.fillRect(0,0,W,H);
+  }
   drawReferenceImage();
   drawGrid();
+  /* Lanes are the backdrop a diagram stands on, so they are painted before
+     everything else regardless of the order they were drawn in. */
+  S.ents.forEach((e,i)=>{
+    if(!(e.t==="node" && e.k==="lane")) return;
+    const L=S.layers[e.li]||S.layers[0];
+    if(!L.on) return;
+    flowPaintEnt(e, S.sel.has(i), i===S.hover);
+  });
   const tol=px(6);
   S.ents.forEach((e,i)=>{
     const L=S.layers[e.li]||S.layers[0];
     if(!L.on) return;
+    if(e.t==="node" && e.k==="lane") return;
     const selected=S.sel.has(i);
     const hot = i===S.hover || i===S.op.first;
     if(flowIsEnt(e)){ flowPaintEnt(e,selected,hot); return; }
@@ -1516,6 +1599,7 @@ function draw(){
       if(doomed){ ctx.save(); ctx.globalAlpha=.2; mkPaintEnt(e); ctx.restore(); }
       else mkPaintEnt(e);
       if(selected||hot) mkPaintSelection(e);
+      if(selected) paintGrips(e);
       return;
     }
     const st = styleOf(e);
@@ -1528,6 +1612,7 @@ function draw(){
     ctx.setLineDash([]);
     if(selected) grips(e);
   });
+  if(S.exporting) return;
   drawPreview();
   mkPaintLive();
   flowPaintLive();
@@ -1556,6 +1641,7 @@ function getCSS(v){return getComputedStyle(document.documentElement).getProperty
 
 function drawGrid(){
   if(!S.gridShow) return;
+  if(S.exporting && !S.exporting.grid) return;
   const g=gridPitch();
   const x0=wX(0), x1=wX(W), y0=wY(H), y1=wY(0);
   ctx.lineWidth=1;
@@ -1638,12 +1724,7 @@ function paintDim(e){
   ctx.fillText(val,0,-2);
   ctx.restore();
 }
-function grips(e){
-  ctx.fillStyle=getCSS("--pen");
-  for(const p of [...entPoints(e),...entCenters(e)]){
-    ctx.fillRect(Math.round(X(p.x))-3,Math.round(Y(p.y))-3,6,6);
-  }
-}
+function grips(e){ paintGrips(e); }
 function drawPreview(){
   const P=S.pending;
   const c=cursorPoint();
@@ -2021,7 +2102,7 @@ cv.addEventListener("pointerdown",e=>{
   if(e.button!==0) return;
   if(mkIsTool(S.tool)){ mkPointerDown(e); return; }
   if(flowIsTool(S.tool)){ flowPointerDown(e); return; }
-  if(flowBeginResize(S.mouse.sx,S.mouse.sy)) return;
+  if(gripBegin(S.mouse.sx,S.mouse.sy)) return;
   downAt={sx:S.mouse.sx, sy:S.mouse.sy, w:cursorPoint(), shift:e.shiftKey};
   dragging=false;
 });
@@ -2034,6 +2115,7 @@ window.addEventListener("pointermove",e=>{
     draw(); return;
   }
   if(mkDraw){ mkPointerMove(e); return; }
+  if(gripDrag){ gripMove(); return; }
   if(flowResize){ flowApplyResize(cursorPoint()); readout(); draw(); return; }
   if(flowDraw){ flowPointerMove(e); return; }
   if(downAt && !dragging && Math.hypot(S.mouse.sx-downAt.sx,S.mouse.sy-downAt.sy)>4) dragging=true;
@@ -2047,6 +2129,7 @@ window.addEventListener("pointermove",e=>{
 window.addEventListener("pointerup",e=>{
   if(panning){ panning=false; panFrom=null; cv.classList.remove("panning"); return; }
   if(mkDraw){ mkPointerUp(e); return; }
+  if(gripDrag){ gripEnd(); return; }
   if(flowResize){ flowResize=null; draw(); updateProps(); echo("Resized node"); return; }
   if(flowDraw){ flowPointerUp(e); return; }
   if(!downAt) return;
@@ -2177,6 +2260,8 @@ function handleCommand(raw){
     case "redo": return redo();
     case "z": case "ze": case "zoom": return zoomExtents();
     case "ortho": return toggle("ortho");
+    case "restore": return offerRestore();
+    case "clearautosave": return clearAutosave();
     case "grid": case "gridshow": case "showgrid": return toggle("gridShow");
     case "snap": case "gridsnap": return toggle("gridSnap");
     case "osnap": return toggle("osnap");
@@ -3092,6 +3177,7 @@ function flowNodeAt(p){
 }
 function flowEntName(e){
   if(e.t==="edge") return "CONNECTOR";
+  if(e.k==="lane") return "SWIMLANE";
   return ({proc:"PROCESS", dec:"DECISION", term:"START / END", data:"DATA", note:"NOTE"}[e.k]||"NODE");
 }
 function flowLayer(){
@@ -3129,6 +3215,10 @@ function flowEnd(end){
   return null;
 }
 function flowRoute(e){
+  if(e.wp && e.wp.length){
+    const chain=edgeChain(e);
+    if(chain) return e.route==="ortho" ? edgeElbows(chain) : chain;
+  }
   const A=flowEnd(e.from), B=flowEnd(e.to);
   if(!A||!B) return null;
   const ca=A.c, cb=B.c;
@@ -3284,18 +3374,12 @@ function flowPaintSelection(e){
   ctx.strokeStyle=getCSS("--pen"); ctx.lineWidth=1; ctx.setLineDash([5,3]);
   ctx.strokeRect(X(b.x0-pad), Y(b.y1+pad), (b.x1-b.x0+2*pad)*S.view.s, (b.y1-b.y0+2*pad)*S.view.s);
   ctx.setLineDash([]);
-  if(e.t==="node"){
-    ctx.fillStyle=getCSS("--pen");
-    for(const [wx,wy] of [[e.p.x-e.w/2,e.p.y+e.h/2],[e.p.x+e.w/2,e.p.y+e.h/2],
-                          [e.p.x+e.w/2,e.p.y-e.h/2],[e.p.x-e.w/2,e.p.y-e.h/2]])
-      ctx.fillRect(Math.round(X(wx))-3, Math.round(Y(wy))-3, 6, 6);
-  }
   ctx.restore();
 }
 function flowPaintEnt(e,selected,hot){
-  if(e.t==="node") flowPaintNode(e,selected,hot);
+  if(e.t==="node") (e.k==="lane"? flowPaintLane : flowPaintNode)(e,selected,hot);
   else flowPaintEdge(e,selected,hot);
-  if(selected) flowPaintSelection(e);
+  if(selected){ flowPaintSelection(e); paintGrips(e); }
 }
 function flowPaintLive(){
   if(!flowDraw) return;
@@ -3332,7 +3416,12 @@ function flowMkNode(k, centre, w, h){
     mk:{fill:S.flow.fill, line:S.flow.line, text:S.flow.text, w:S.flow.strokeW/S.view.s}
   };
   if(k==="note") e.mk.fill = S.flow.fill==="#f4f7fb" ? "#ffe9a8" : S.flow.fill;
+  if(k==="lane"){ e.dir=S.flow.laneDir; e.s=""; }
   return e;
+}
+function flowDefaultSize(k){
+  return k==="lane" ? {w:S.flow.laneW/S.view.s, h:S.flow.laneH/S.view.s}
+                    : {w:S.flow.w/S.view.s,    h:S.flow.h/S.view.s};
 }
 function flowPointerDown(e){
   const T=FLOW_TOOLS[S.tool], p=cursorPoint();
@@ -3379,7 +3468,7 @@ function flowPointerUp(ev){
     const T=FLOW_TOOLS[D.tool];
     let ent;
     if(D.moved && D.ent) ent=D.ent;
-    else ent=flowMkNode(T.k, D.a, S.flow.w/S.view.s, S.flow.h/S.view.s);
+    else { const z=flowDefaultSize(T.k); ent=flowMkNode(T.k, D.a, z.w, z.h); }
     snap(); S.ents.push(ent);
     draw(); updateProps();
     if(S.flow.askNode) return flowAskLabel(ent, true);
@@ -3420,6 +3509,14 @@ function flowHitAt(p){
   return null;
 }
 function flowHitEnt(e,p,tol){
+  if(e.t==="node" && e.k==="lane"){
+    /* A lane is a backdrop: only its border and its title band are clickable,
+       or it would swallow every pick inside the column. */
+    const P=flowNodePoly(e);
+    for(let i=0;i<P.length;i++) if(ptSegDist(p,P[i],P[(i+1)%P.length])<=tol) return true;
+    const hb=laneHeaderRect(e);
+    return p.x>=hb.x0 && p.x<=hb.x1 && p.y>=hb.y0 && p.y<=hb.y1;
+  }
   if(e.t==="node"){
     const P=flowNodePoly(e);
     if(mkPointInPoly(p,P)) return true;
@@ -3466,8 +3563,8 @@ function flowBeginResize(sx,sy){
   flowResize={e, g};
   return true;
 }
-function flowApplyResize(p){
-  const e=flowResize.e, g=flowResize.g;
+function flowApplyResize(p){ flowResizeTo(flowResize.e, flowResize.g, p); }
+function flowResizeTo(e,g,p){
   let x0=e.p.x-e.w/2, x1=e.p.x+e.w/2, y0=e.p.y-e.h/2, y1=e.p.y+e.h/2;
   if(g.indexOf("w")>=0) x0=p.x;
   if(g.indexOf("e")>=0) x1=p.x;
@@ -3571,6 +3668,11 @@ function flowOptbar(host,H){
   const refresh=()=>{ paintOptbar(); paintRibbon(); draw(); };
   if(T.kind==="node"){
     host.append(lab("Fill"), flowFillChips(refresh));
+    if(T.k==="lane"){
+      host.append(H.radio([["v","Columns"],["h","Rows"]], S.flow.laneDir, v=>S.flow.laneDir=v));
+      host.append(H.num("Lane W px", S.flow.laneW, "any", v=>S.flow.laneW=Math.max(40,v)));
+      host.append(H.num("Lane H px", S.flow.laneH, "any", v=>S.flow.laneH=Math.max(40,v)));
+    }
     host.append(flowColorField("Line", ()=>S.flow.line, v=>S.flow.line=v));
     host.append(flowColorField("Text", ()=>S.flow.text, v=>S.flow.text=v));
     host.append(H.num("W px", S.flow.w, "any", v=>S.flow.w=Math.max(20,v)));
@@ -3621,6 +3723,11 @@ function flowPropRows(e,H){
     i.oninput=()=>{ set(i.value); draw(); };
     d.append(i); return d;
   };
+  if(e.t==="node" && e.k==="lane")
+    rows.push(H.choice("Direction", e.dir==="h"?"h":"v", [["v","Columns"],["h","Rows"]],
+      v=>{ snap(); e.dir=v; }));
+  if(e.t==="edge")
+    rows.push(H.info("Waypoints", String((e.wp||[]).length)));
   if(e.t==="node"){
     rows.push(H.txt("Label", String(e.s||"").replace(/\n/g,"\\n"),
       v=>{ snap(); e.s=v.replace(/\\n/g,"\n"); flowFit(e); }));
@@ -3722,6 +3829,608 @@ function flowDXF(e,ly,g){
   }
 }
 
+/* ============================================================ FILES & IMAGE
+   Everything in this block exists because a drawing you cannot save, paste or
+   reopen is a drawing you did once. Native .b2db round-trips the parts DXF and
+   SVG throw away: markup styling, node identity, connector bindings.          */
+
+const FILE_TAG="BackToTheDrawingBoard", FILE_VER=1;
+const AUTOKEY="b2db.autosave.v1", CLIPKEY="b2db.clip.v1";
+
+S.exporting=null;
+S.docName="untitled";
+S.png={width:2000, bg:"#ffffff", grid:false, margin:5};
+S.flow.laneW=280; S.flow.laneH=560; S.flow.laneDir="v";
+
+let refImgEl=null;         // the live <img>, kept alive across undo
+let autoTimer=null, autoStamp="";
+
+function setDocName(n){
+  S.docName=String(n||"untitled").replace(/\.(b2db|json|dxf)$/i,"");
+  const el=document.getElementById("fname");
+  if(el) el.textContent=S.docName+" \u00B7 units mm";
+}
+
+/* ---- bounds of everything worth putting in a picture ------------------ */
+function contentBounds(){
+  let x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,any=false;
+  const grow=(a,b,c,d)=>{ any=true; x0=Math.min(x0,a); y0=Math.min(y0,b); x1=Math.max(x1,c); y1=Math.max(y1,d); };
+  S.ents.forEach(e=>{
+    const L=S.layers[e.li]; if(L && !L.on) return;
+    const q=entBox(e);
+    if(q && isFinite(q.x0) && isFinite(q.y1)) grow(q.x0,q.y0,q.x1,q.y1);
+  });
+  const R=S.refImage;
+  if(R && R.visible && R.img){ const h=Math.hypot(R.w,R.h)/2; grow(R.x-h,R.y-h,R.x+h,R.y+h); }
+  if(!any || !isFinite(x0) || !isFinite(y0) || !isFinite(x1) || !isFinite(y1)) return null;
+  return {x0,y0,x1,y1};
+}
+
+/* ---- render the scene into an offscreen canvas ------------------------
+   draw() paints through the module-level cv/ctx/W/H, so the honest way to get
+   a high-resolution frame is to point those at a bigger canvas, redraw, and
+   put them back. S.exporting suppresses crosshair, grips, band and preview. */
+function renderScene(opt){
+  const b=contentBounds();
+  if(!b) return null;
+  const m=Math.max(0,(opt.margin==null?5:opt.margin))/100;
+  const bw=Math.max(1e-6,b.x1-b.x0), bh=Math.max(1e-6,b.y1-b.y0);
+  const mx=bw*m+bw*0.002, my=bh*m+bh*0.002;
+  const x0=b.x0-mx, x1=b.x1+mx, y0=b.y0-my, y1=b.y1+my;
+  const worldW=x1-x0, worldH=y1-y0;
+  let wpx=Math.max(64,Math.min(12000, Math.round(opt.width||2000)));
+  let scale=wpx/worldW;
+  let hpx=Math.max(1,Math.round(worldH*scale));
+  const MAXPIX=36e6;
+  if(wpx*hpx>MAXPIX){
+    const k=Math.sqrt(MAXPIX/(wpx*hpx));
+    wpx=Math.max(64,Math.round(wpx*k)); scale=wpx/worldW; hpx=Math.max(1,Math.round(worldH*scale));
+  }
+  const c=document.createElement("canvas");
+  c.width=wpx; c.height=hpx;
+  const g=c.getContext("2d");
+  if(!g) return null;
+  const sv={cv,ctx,W,H,DPR,view:S.view,hover:S.hover,sel:S.sel,band:S.band};
+  cv=c; ctx=g; W=wpx; H=hpx; DPR=1;
+  S.view={cx:(x0+x1)/2, cy:(y0+y1)/2, s:scale};
+  S.hover=-1; S.sel=new Set(); S.band=null;
+  S.exporting=opt;
+  try{
+    ctx.setTransform(1,0,0,1,0,0);
+    draw();
+  } finally {
+    S.exporting=null;
+    cv=sv.cv; ctx=sv.ctx; W=sv.W; H=sv.H; DPR=sv.DPR;
+    S.view=sv.view; S.hover=sv.hover; S.sel=sv.sel; S.band=sv.band;
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    draw();
+  }
+  return c;
+}
+function pngOpts(){ return {width:S.png.width, bg:S.png.bg, grid:S.png.grid, margin:S.png.margin}; }
+function exportPNG(){
+  const c=renderScene(pngOpts());
+  if(!c) return echo("Nothing to export yet","warn");
+  const finish=bl=>{
+    if(!bl) return echo("Could not encode that image","warn");
+    const u=URL.createObjectURL(bl), a=document.createElement("a");
+    a.href=u; a.download=S.docName+".png"; a.click();
+    setTimeout(()=>URL.revokeObjectURL(u),2000);
+    echo("PNG exported  "+c.width+"\u00D7"+c.height);
+  };
+  if(c.toBlob) c.toBlob(finish,"image/png");
+  else finish(null);
+}
+function copyImage(){
+  const c=renderScene(pngOpts());
+  if(!c) return echo("Nothing to copy yet","warn");
+  if(!(navigator.clipboard && window.ClipboardItem && c.toBlob))
+    return echo("This browser will not hand over the clipboard - use Export PNG","warn");
+  c.toBlob(bl=>{
+    if(!bl) return echo("Could not encode that image","warn");
+    navigator.clipboard.write([new ClipboardItem({"image/png":bl})])
+      .then(()=>echo("Image copied  "+c.width+"\u00D7"+c.height))
+      .catch(()=>echo("Clipboard blocked here - use Export PNG instead","warn"));
+  },"image/png");
+}
+
+/* ---- save / open ------------------------------------------------------ */
+function refDoc(withSrc){
+  const R=S.refImage;
+  if(!R) return null;
+  const o={name:R.name,x:R.x,y:R.y,w:R.w,h:R.h,opacity:R.opacity,visible:R.visible,
+           locked:R.locked,rot:R.rot||0,crop:R.crop||null,mode:R.mode||"fade"};
+  if(withSrc && R.img){
+    try{
+      o.src = String(R.img.src||"").slice(0,5)==="data:" ? R.img.src : null;
+      if(!o.src){
+        const c=document.createElement("canvas");
+        c.width=R.img.naturalWidth; c.height=R.img.naturalHeight;
+        c.getContext("2d").drawImage(R.img,0,0);
+        o.src=c.toDataURL("image/png");
+      }
+    }catch(_){ o.src=null; }
+  }
+  return o;
+}
+function serializeDrawing(withImage){
+  return {
+    app:FILE_TAG, version:FILE_VER, saved:new Date().toISOString(), name:S.docName,
+    ents:S.ents, layers:S.layers, styles:S.styles, cur:S.cur, curStyle:S.curStyle,
+    view:S.view, gridStep:S.gridStep, gridShow:S.gridShow, gridSnap:S.gridSnap,
+    ortho:S.ortho, osnap:S.osnap, weld:S.weld, edgeAssist:S.edgeAssist,
+    textHeight:S.textHeight, groupSeq:S.groupSeq,
+    flow:S.flow, mk:S.mk, png:S.png,
+    ref: refDoc(withImage!==false)
+  };
+}
+function applyDrawing(d,label){
+  if(!d || d.app!==FILE_TAG) { echo("That is not a BackToTheDrawingBoard file","warn"); return false; }
+  S.ents=Array.isArray(d.ents)? d.ents : [];
+  if(Array.isArray(d.layers) && d.layers.length) S.layers=d.layers;
+  if(Array.isArray(d.styles) && d.styles.length) S.styles=d.styles;
+  S.cur=Math.max(0,Math.min(d.cur|0, S.layers.length-1));
+  S.curStyle=Math.max(0,Math.min(d.curStyle|0, S.styles.length-1));
+  if(d.view && isFinite(d.view.s) && d.view.s>0) S.view={cx:d.view.cx,cy:d.view.cy,s:d.view.s};
+  for(const k of ["gridStep","gridShow","gridSnap","ortho","osnap","weld","edgeAssist","textHeight","groupSeq"])
+    if(d[k]!==undefined) S[k]=d[k];
+  if(d.flow) Object.assign(S.flow,d.flow);
+  if(d.mk)   Object.assign(S.mk,d.mk);
+  if(d.png)  Object.assign(S.png,d.png);
+  S.sel.clear(); S.undo.length=0; S.redo.length=0; S.op={}; S.pending=[]; S.base=null;
+  S.refImage=null; refImgEl=null;
+  setDocName(d.name||"untitled");
+  if(d.ref && d.ref.src){
+    const img=new Image();
+    img.onload=()=>{
+      const o=Object.assign({},d.ref); delete o.src;
+      S.refImage=Object.assign(o,{img});
+      refImgEl=img;
+      try{ prepareReferenceEdges(S.refImage); }catch(_){}
+      draw(); updateProps(); paintRibbon();
+    };
+    img.src=d.ref.src;
+  }
+  syncToggles();
+  paintLayers(); paintStyles(); paintRibbon(); paintOptbar(); setPrompt();
+  draw(); updateProps();
+  echo((label||"Opened")+" \u00B7 "+S.ents.length+" objects");
+  return true;
+}
+function saveDrawing(){
+  requestString("Save as", S.docName, n=>{
+    setDocName(n||S.docName);
+    let txt;
+    try{ txt=JSON.stringify(serializeDrawing(true)); }
+    catch(_){ setPrompt(); return echo("Could not serialise this drawing","warn"); }
+    download(txt, S.docName+".b2db", "application/json");
+    echo("Saved "+S.docName+".b2db  ("+(txt.length/1024).toFixed(0)+" KB)");
+    setPrompt();
+  });
+}
+function openDrawingText(txt,name){
+  let d=null;
+  try{ d=JSON.parse(txt); }catch(_){ return echo("That file is not valid JSON","warn"); }
+  if(applyDrawing(d,"Opened") && name) setDocName(name);
+}
+
+/* ---- autosave --------------------------------------------------------- */
+function markDirty(){
+  if(autoTimer) clearTimeout(autoTimer);
+  autoTimer=setTimeout(autosaveNow,1500);
+}
+function autosaveNow(){
+  autoTimer=null;
+  try{
+    let doc=serializeDrawing(true), txt=JSON.stringify(doc);
+    if(txt.length>2.4e6){ doc=serializeDrawing(false); doc.imageDropped=true; txt=JSON.stringify(doc); }
+    if(txt.length>4.4e6){ autoStamp="too large to autosave"; return; }
+    localStorage.setItem(AUTOKEY,txt);
+    autoStamp="saved "+new Date().toLocaleTimeString();
+  }catch(_){ autoStamp="autosave unavailable"; }
+}
+function autosaveDoc(){
+  try{
+    const t=localStorage.getItem(AUTOKEY);
+    if(!t) return null;
+    const d=JSON.parse(t);
+    return (d && d.app===FILE_TAG && Array.isArray(d.ents) && d.ents.length) ? d : null;
+  }catch(_){ return null; }
+}
+function offerRestore(){
+  const d=autosaveDoc();
+  if(!d) return;
+  const when=d.saved ? new Date(d.saved).toLocaleString() : "earlier";
+  requestString("Restore autosave from "+when+"?  y/n","y",v=>{
+    if(/^y/i.test(String(v||""))){
+      applyDrawing(d,"Autosave restored");
+      if(d.imageDropped) echo("Autosave restored - the reference image was too large to keep");
+    } else echo("Starting fresh. The autosave stays until you draw something.");
+    setPrompt();
+  });
+}
+function clearAutosave(){
+  try{ localStorage.removeItem(AUTOKEY); }catch(_){}
+  autoStamp=""; echo("Autosave cleared");
+}
+
+/* ---- entity clipboard ------------------------------------------------- */
+let clipMem=null;
+function clipCopy(cut){
+  expandSelectionGroups();
+  if(!S.sel.size) return echo("Select something first","warn");
+  const src=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
+  let payload;
+  try{ payload={app:FILE_TAG, kind:"clip", ents:JSON.parse(JSON.stringify(src))}; }
+  catch(_){ return echo("That selection cannot be copied","warn"); }
+  clipMem=payload;
+  try{ localStorage.setItem(CLIPKEY,JSON.stringify(payload)); }catch(_){}
+  if(cut){ eraseSel(); echo("Cut "+src.length+" object(s)"); }
+  else echo("Copied "+src.length+" object(s)");
+}
+function clipRead(){
+  if(clipMem) return clipMem;
+  try{
+    const t=localStorage.getItem(CLIPKEY);
+    if(t){ const d=JSON.parse(t); if(d && d.kind==="clip" && Array.isArray(d.ents)) return d; }
+  }catch(_){}
+  return null;
+}
+function clipPaste(){
+  const d=clipRead();
+  if(!d || !d.ents.length) return echo("Clipboard is empty","warn");
+  let x0=1e18,y0=1e18,x1=-1e18,y1=-1e18;
+  for(const e of d.ents){
+    const q=entBox(e);
+    if(q && isFinite(q.x0)){ x0=Math.min(x0,q.x0); y0=Math.min(y0,q.y0); x1=Math.max(x1,q.x1); y1=Math.max(y1,q.y1); }
+  }
+  const centre = isFinite(x0) ? V((x0+x1)/2,(y0+y1)/2) : V(0,0);
+  const dlt=sub(cursorPoint(),centre);
+  snap();
+  const copies=cloneEntitiesFreshGroups(d.ents.map(clone)).map(e=>moveEnt(e,dlt));
+  for(const e of copies){
+    if(!(e.li>=0) || e.li>=S.layers.length) e.li=S.cur;
+    if(e.si!=null && e.si>=S.styles.length) e.si=S.curStyle;
+  }
+  const base=S.ents.length;
+  S.ents.push(...copies);
+  S.sel=new Set(copies.map((_,k)=>base+k));
+  setTool("select"); draw(); updateProps();
+  echo("Pasted "+copies.length+" object(s)");
+}
+
+/* ---- layer delete ----------------------------------------------------- */
+function deleteLayer(i){
+  if(!S.layers[i]) return;
+  if(S.layers.length<2) return echo("A drawing needs at least one layer","warn");
+  const nm=S.layers[i].name, n=S.ents.filter(e=>e.li===i).length;
+  const go=()=>{
+    snap();
+    S.ents=S.ents.filter(e=>e.li!==i);
+    for(const e of S.ents) if(e.li>i) e.li--;
+    S.layers.splice(i,1);
+    if(S.cur>i) S.cur--;
+    if(S.cur>=S.layers.length) S.cur=S.layers.length-1;
+    S.sel.clear(); flowPrune(); resetNudge();
+    paintLayers(); draw(); updateProps();
+    echo("Deleted layer "+nm+(n?" and "+n+" object"+(n>1?"s":""):""));
+  };
+  if(n) requestString("Delete layer "+nm+" and its "+n+" object"+(n>1?"s":"")+"?  y/n","",v=>{
+    if(/^y/i.test(String(v||""))) go(); else echo("Layer kept");
+    setPrompt();
+  });
+  else go();
+}
+
+/* ============================================================ GRIPS
+   One table describes every draggable handle in the app. gripSet returns the
+   handle positions plus the setter that consumes a new world point, so the
+   drag loop never needs to know what kind of thing it is holding.            */
+let gripDrag=null;
+
+function gripSet(e){
+  const G=[], push=(p,set)=>{ if(p && isFinite(p.x) && isFinite(p.y)) G.push({x:p.x,y:p.y,set}); };
+  switch(e.t){
+    case "line":
+      push(e.a,q=>e.a=q); push(e.b,q=>e.b=q); break;
+    case "pline": case "spline":
+      e.pts.forEach((p,k)=>push(p,q=>{ e.pts[k]=q; })); break;
+    case "circle":
+      push(e.c,q=>e.c=q);
+      push(V(e.c.x+e.r,e.c.y), q=>{ e.r=Math.max(1e-9,dist(e.c,q)); }); break;
+    case "arc": {
+      push(e.c,q=>e.c=q);
+      push(V(e.c.x+e.r*Math.cos(e.a0), e.c.y+e.r*Math.sin(e.a0)), q=>{ e.a0=wrap(ang(e.c,q)); });
+      push(V(e.c.x+e.r*Math.cos(e.a1), e.c.y+e.r*Math.sin(e.a1)), q=>{ e.a1=wrap(ang(e.c,q)); });
+      const mid=wrap(e.a0+wrap(e.a1-e.a0)/2);
+      push(V(e.c.x+e.r*Math.cos(mid), e.c.y+e.r*Math.sin(mid)), q=>{ e.r=Math.max(1e-9,dist(e.c,q)); });
+      break; }
+    case "ellipse": {
+      const ax=V(Math.cos(e.rot||0),Math.sin(e.rot||0)), ny=perp(ax);
+      push(e.c,q=>e.c=q);
+      push(add(e.c,mul(ax,e.rx)), q=>{ e.rx=Math.max(1e-9,dist(e.c,q)); });
+      push(add(e.c,mul(ny,e.ry)), q=>{ e.ry=Math.max(1e-9,dist(e.c,q)); });
+      break; }
+    case "text": push(e.p,q=>e.p=q); break;
+    case "dim": {
+      push(e.a,q=>e.a=q); push(e.b,q=>e.b=q);
+      const d=norm(sub(e.b,e.a)), nn=perp(d), mid=mul(add(e.a,e.b),.5);
+      push(add(mid,mul(nn,e.off||0)), q=>{
+        const dd=norm(sub(e.b,e.a)), n2=perp(dd), v=sub(q,e.a);
+        e.off=v.x*n2.x+v.y*n2.y;
+      });
+      break; }
+    case "ink":
+      if(e.pts.length){
+        push(e.pts[0], q=>{ e.pts[0]=q; });
+        push(e.pts[e.pts.length-1], q=>{ e.pts[e.pts.length-1]=q; });
+      }
+      break;
+    case "mshape": push(e.a,q=>e.a=q); push(e.b,q=>e.b=q); break;
+    case "mtext":  push(e.p,q=>e.p=q); if(e.lead) push(e.lead,q=>e.lead=q); break;
+    case "node":
+      for(const [g,hx,hy] of [["nw",-1,1],["ne",1,1],["se",1,-1],["sw",-1,-1]])
+        push(V(e.p.x+hx*e.w/2, e.p.y+hy*e.h/2), q=>flowResizeTo(e,g,q));
+      break;
+    case "edge": {
+      const wp=e.wp||[];
+      wp.forEach((p,k)=>push(p,q=>{ e.wp[k]=q; }));
+      for(const gh of edgeGhosts(e)){
+        const k=gh.k;
+        G.push({
+          x:gh.x, y:gh.y, ghost:true,
+          insert(q){
+            if(!e.wp) e.wp=[];
+            e.wp.splice(k,0,V(q.x,q.y));
+            this.set=p=>{ e.wp[k]=p; };
+          },
+          set(){}
+        });
+      }
+      break; }
+  }
+  return G;
+}
+function paintGrips(e){
+  const G=gripSet(e);
+  ctx.save();
+  for(const g of G){
+    const x=Math.round(X(g.x)), y=Math.round(Y(g.y));
+    if(g.ghost){
+      ctx.strokeStyle=getCSS("--pen"); ctx.lineWidth=1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(x,y-3.5); ctx.lineTo(x+3.5,y); ctx.lineTo(x,y+3.5); ctx.lineTo(x-3.5,y);
+      ctx.closePath(); ctx.stroke();
+    } else {
+      ctx.fillStyle=getCSS("--pen");
+      ctx.fillRect(x-3,y-3,6,6);
+    }
+  }
+  ctx.restore();
+}
+function gripHitAt(sx,sy){
+  if(S.tool!=="select" || !S.sel.size) return null;
+  for(const i of S.sel){
+    const e=S.ents[i];
+    if(!e) continue;
+    const L=S.layers[e.li];
+    if(L && (!L.on || L.lock)) continue;
+    for(const g of gripSet(e))
+      if(Math.hypot(X(g.x)-sx, Y(g.y)-sy)<=7) return {e,g,i};
+  }
+  return null;
+}
+function gripBegin(sx,sy){
+  const h=gripHitAt(sx,sy);
+  if(!h) return false;
+  snap();
+  gripDrag=h;
+  return true;
+}
+function gripMove(){
+  const q=cursorPoint();
+  const g=gripDrag.g;
+  if(g.ghost && !g._made){ g._made=true; g.insert(q); }
+  g.set(q);
+  readout(); draw();
+}
+function gripEnd(){
+  const e=gripDrag.e;
+  gripDrag=null;
+  if(e && e.t==="node") flowFit(e);
+  draw(); updateProps();
+  echo("Edited "+(e? (flowIsEnt(e)? flowEntName(e).toLowerCase() : mkIsEnt(e)? mkEntName(e).toLowerCase() : e.t) : "object"));
+}
+
+/* ============================================================ SWIMLANES */
+function laneHeader(e){
+  const t=Math.min(e.fs*2.4, (e.dir==="h"? e.w : e.h)*0.2);
+  return Math.max(e.fs*1.6, t);
+}
+function laneHeaderRect(e){
+  const hb=laneHeader(e);
+  const x0=e.p.x-e.w/2, x1=e.p.x+e.w/2, y0=e.p.y-e.h/2, y1=e.p.y+e.h/2;
+  return e.dir==="h" ? {x0, y0, x1:x0+hb, y1} : {x0, y0:y1-hb, x1, y1};
+}
+function flowPaintLane(e,selected,hot){
+  const s=S.view.s, m=e.mk||{};
+  const x=X(e.p.x-e.w/2), y=Y(e.p.y+e.h/2), w=e.w*s, h=e.h*s;
+  const hb=laneHeader(e)*s;
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.lineWidth=Math.max(1,(m.w||0)*s);
+  ctx.strokeStyle= hot? getCSS("--snap") : (m.line||"#2d6fa8");
+  ctx.globalAlpha=0.10; ctx.fillStyle=m.fill||"#f4f7fb";
+  ctx.fillRect(x,y,w,h);
+  ctx.globalAlpha=0.90;
+  if(e.dir==="h") ctx.fillRect(x,y,hb,h); else ctx.fillRect(x,y,w,hb);
+  ctx.globalAlpha=1;
+  ctx.strokeRect(x,y,w,h);
+  ctx.beginPath();
+  if(e.dir==="h"){ ctx.moveTo(x+hb,y); ctx.lineTo(x+hb,y+h); }
+  else { ctx.moveTo(x,y+hb); ctx.lineTo(x+w,y+hb); }
+  ctx.stroke();
+  if(e.s){
+    ctx.fillStyle=m.text||"#16202b";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.font=Math.max(7,e.fs*s)+"px "+getCSS("--draft");
+    if(e.dir==="h"){
+      ctx.translate(x+hb/2, y+h/2); ctx.rotate(-Math.PI/2);
+      ctx.fillText(e.s,0,0);
+    } else ctx.fillText(e.s, x+w/2, y+hb/2);
+  }
+  ctx.restore();
+}
+/* A lane picks up whatever is standing in it, so dragging the lane drags the
+   column. Membership is by centre point, decided at drag time. */
+function laneExpand(indices){
+  const set=new Set(indices);
+  const lanes=[...set].map(i=>S.ents[i]).filter(e=>e && e.t==="node" && e.k==="lane");
+  if(!lanes.length) return [...set];
+  S.ents.forEach((e,j)=>{
+    if(set.has(j) || !e) return;
+    const L=S.layers[e.li];
+    if(L && (!L.on || L.lock)) return;
+    let c=null;
+    if(e.t==="node") c=e.p;
+    else { const b=entBox(e); if(b && isFinite(b.x0)) c=V((b.x0+b.x1)/2,(b.y0+b.y1)/2); }
+    if(!c) return;
+    for(const ln of lanes){
+      if(ln===e) continue;
+      if(Math.abs(c.x-ln.p.x)<=ln.w/2 && Math.abs(c.y-ln.p.y)<=ln.h/2){ set.add(j); return; }
+    }
+  });
+  return [...set];
+}
+
+/* ============================================================ WAYPOINTS
+   The logical chain is anchor -> waypoints -> anchor. Elbows are generated on
+   top of it, so a waypoint index always matches a chain segment index and the
+   ghost handles line up with what you see.                                   */
+function flowDirTo(from,to,route){
+  const d=sub(to,from);
+  if(route!=="ortho") return d;
+  return Math.abs(d.x)>=Math.abs(d.y) ? V(d.x<0?-1:1,0) : V(0,d.y<0?-1:1);
+}
+function edgeChain(e){
+  const A=flowEnd(e.from), B=flowEnd(e.to);
+  if(!A||!B) return null;
+  const wp=(e.wp||[]).filter(p=>p && isFinite(p.x));
+  const firstT=wp.length? wp[0] : B.c;
+  const lastT =wp.length? wp[wp.length-1] : A.c;
+  const pa=A.node? flowRayExit(A.node, flowDirTo(A.c,firstT,e.route)) : A.c;
+  const pb=B.node? flowRayExit(B.node, flowDirTo(B.c,lastT,e.route)) : B.c;
+  return [pa,...wp,pb];
+}
+/* One ghost handle per logical segment, parked on the middle of the drawn
+   sub-path for that segment so it sits on the line you can actually see. */
+function edgeGhosts(e){
+  const chain=edgeChain(e);
+  if(!chain) return [];
+  const R=flowRoute(e)||chain;
+  if(chain.length===2){ const m=flowRouteMid(R); return [{x:m.x,y:m.y,k:0}]; }
+  const idxOf=(p,from)=>{
+    let bi=from, bd=1e18;
+    for(let i=from;i<R.length;i++){ const d=dist(R[i],p); if(d<bd){ bd=d; bi=i; } }
+    return bi;
+  };
+  const out=[];
+  let ri=0;
+  for(let k=0;k<chain.length-1;k++){
+    const ni=idxOf(chain[k+1],ri);
+    const seg=(ni>ri)? R.slice(ri,ni+1) : [chain[k],chain[k+1]];
+    const m=flowRouteMid(seg);
+    out.push({x:m.x,y:m.y,k});
+    ri=Math.max(ni,ri);
+  }
+  return out;
+}
+function edgeElbows(chain){
+  const out=[chain[0]];
+  for(let k=0;k<chain.length-1;k++){
+    const p=chain[k], q=chain[k+1];
+    if(Math.abs(q.x-p.x)>1e-9 && Math.abs(q.y-p.y)>1e-9)
+      out.push(Math.abs(q.x-p.x)>=Math.abs(q.y-p.y) ? V(q.x,p.y) : V(p.x,q.y));
+    out.push(q);
+  }
+  return out;
+}
+function flowClearWaypoints(){
+  const sel=[...S.sel].map(i=>S.ents[i]).filter(e=>e && e.t==="edge" && e.wp && e.wp.length);
+  const list=sel.length? sel : S.ents.filter(e=>e.t==="edge" && e.wp && e.wp.length);
+  if(!list.length) return echo("No connector has waypoints","warn");
+  snap();
+  let n=0;
+  for(const e of list){ n+=e.wp.length; delete e.wp; }
+  draw(); updateProps();
+  echo("Cleared "+n+" waypoint"+(n>1?"s":""));
+}
+
+/* ============================================================ UI wiring */
+function pngWidget(){
+  const wrap=document.createElement("div"); wrap.className="rstack";
+  const r1=document.createElement("div"); r1.className="rrow"; r1.style.gap="3px";
+  const lab=document.createElement("span"); lab.className="oh"; lab.textContent="px wide";
+  const wd=document.createElement("input");
+  wd.type="number"; wd.step="100"; wd.min="64"; wd.value=S.png.width; wd.style.maxWidth="66px";
+  wd.title="Long-edge width of the exported image";
+  wd.onchange=()=>{ const v=parseInt(wd.value,10); if(isFinite(v)) S.png.width=Math.max(64,Math.min(12000,v)); };
+  r1.append(lab,wd);
+  const r2=document.createElement("div"); r2.className="rrow"; r2.style.gap="3px";
+  const bg=document.createElement("select");
+  for(const [v,t] of [["#ffffff","White"],["transparent","Transparent"],["#12161b","Board"]]){
+    const o=document.createElement("option"); o.value=v; o.textContent=t;
+    if(v===S.png.bg) o.selected=true; bg.append(o);
+  }
+  bg.title="Background of the exported image";
+  bg.onchange=()=>S.png.bg=bg.value;
+  const gl=document.createElement("label"); gl.style.display="flex"; gl.style.alignItems="center"; gl.style.gap="3px";
+  const gc=document.createElement("input"); gc.type="checkbox"; gc.checked=S.png.grid;
+  gc.onchange=()=>S.png.grid=gc.checked;
+  const gt=document.createElement("span"); gt.className="oh"; gt.textContent="Grid";
+  gl.append(gc,gt);
+  r2.append(bg,gl);
+  wrap.append(r1,r2);
+  return wrap;
+}
+
+Object.assign(ACTIONS,{
+  exportpng:{label:"Export PNG", alias:"PNG",
+    svg:'<rect x="2.4" y="4" width="15.2" height="12" rx="1.6"/><circle cx="7" cy="8.4" r="1.4"/><path d="M2.8 13.6l4-3.6 3.2 2.8 2.8-2.4 4.4 3.8"/>',
+    run:()=>exportPNG()},
+  copyimage:{label:"Copy Image", alias:"CPIMG",
+    svg:'<rect x="6.4" y="6.4" width="11" height="11" rx="1.6"/><path d="M13.6 6.4V4a1.6 1.6 0 00-1.6-1.6H4A1.6 1.6 0 002.4 4v8a1.6 1.6 0 001.6 1.6h2.4"/>',
+    run:()=>copyImage()},
+  savedwg:{label:"Save", alias:"SAVE",
+    svg:'<path d="M3 4.6A1.6 1.6 0 014.6 3h8.6L17 6.8v8.6A1.6 1.6 0 0115.4 17H4.6A1.6 1.6 0 013 15.4z"/><path d="M6.4 3v5.2h7.2V3"/><rect x="6" y="11.4" width="8" height="5.6"/>',
+    run:()=>saveDrawing()},
+  opendwg:{label:"Open", alias:"OPEN",
+    svg:'<path d="M2.6 15.4V5.2A1.6 1.6 0 014.2 3.6h3.6l2 2.4h6A1.6 1.6 0 0117.4 7.6v7.8A1.6 1.6 0 0115.8 17H4.2a1.6 1.6 0 01-1.6-1.6z"/><path d="M2.6 8.6h14.8"/>',
+    run:()=>document.getElementById("b2dbin").click()},
+  clipcopy:{label:"Copy", alias:"CPY",
+    svg:'<rect x="6.4" y="6.4" width="11" height="11" rx="1.6"/><path d="M13.6 6.4V4a1.6 1.6 0 00-1.6-1.6H4A1.6 1.6 0 002.4 4v8a1.6 1.6 0 001.6 1.6h2.4"/>',
+    run:()=>clipCopy(false)},
+  clipcut:{label:"Cut", alias:"CUT",
+    svg:'<circle cx="5.4" cy="15" r="2.4"/><circle cx="14.6" cy="15" r="2.4"/><path d="M6.8 13.2L15 2.6M13.2 13.2L5 2.6"/>',
+    run:()=>clipCopy(true)},
+  clippaste:{label:"Paste", alias:"PST",
+    svg:'<path d="M5.6 4.2H4.4A1.6 1.6 0 002.8 5.8v10.6A1.6 1.6 0 004.4 18h8.4a1.6 1.6 0 001.6-1.6v-1"/><rect x="6.8" y="2.4" width="6" height="3.2" rx="1"/><rect x="9.2" y="8" width="8" height="8.4" rx="1.4"/>',
+    run:()=>clipPaste()},
+  fclearwp:{label:"Clear Waypoints", alias:"FCWP",
+    svg:'<path d="M2.6 15.4h4.2v-6h6.4v-5h4.2"/><path d="M12.4 12.6l4.6 4.6M17 12.6l-4.6 4.6"/>',
+    run:()=>flowClearWaypoints()},
+  dellayer:{label:"Delete Layer", alias:"LAYDEL",
+    svg:'<path d="M10 2.6L17.4 6.4 10 10.2 2.6 6.4z"/><path d="M2.6 10.4L10 14.2l7.4-3.8"/><path d="M12.6 15.4h4.8"/>',
+    run:()=>deleteLayer(S.cur)}
+});
+
+Object.assign(FLOW_TOOLS,{
+  fnlane:{kind:"node", k:"lane", label:"Swimlane", alias:"FLANE",
+    svg:'<rect x="2.4" y="2.6" width="15.2" height="14.8" rx="1.2"/><path d="M2.4 6.2h15.2M7.4 6.2v11.2M12.6 6.2v11.2"/>'}
+});
+TOOLS.fnlane={label:"Swimlane", alias:"FLANE", svg:FLOW_TOOLS.fnlane.svg, pts:0, flow:true};
+ALIAS["fnlane"]="fnlane"; ALIAS["flane"]="fnlane";
+S.mk.per.fnlane={size:2, alpha:1};
+
 /* ============================================================ keyboard */
 window.addEventListener("keydown",e=>{
   const typing = !!S.ask || (document.activeElement===cmdin && cmdin.value.length>0);
@@ -3735,6 +4444,11 @@ window.addEventListener("keydown",e=>{
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="z"){ e.preventDefault(); return e.shiftKey?redo():undo(); }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="y"){ e.preventDefault(); return redo(); }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="a"){ e.preventDefault(); S.sel=new Set(S.ents.map((_,i)=>i)); draw(); updateProps(); return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="c"){ e.preventDefault(); return clipCopy(false); }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="x"){ e.preventDefault(); return clipCopy(true); }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="v"){ e.preventDefault(); return clipPaste(); }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="s"){ e.preventDefault(); return saveDrawing(); }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="o"){ e.preventDefault(); return document.getElementById("b2dbin").click(); }
   if(e.key==="Delete"||e.key==="Backspace"){ if(!typing){ e.preventDefault(); eraseSel(); } return; }
   if(typing) return;
   const NUD={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]}[e.key];
@@ -3753,7 +4467,7 @@ const RIBBON={
     {name:"Draw", big:"line",
       small:["pline","rect","circle","arc","ellipse","pellipse","polygon","arccenter","spline","pickLines"]},
     {name:"Modify", big:"move",
-      small:["copy","rotate","mirror","scale","trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","array","explode","erase","group","ungroup"]},
+      small:["copy","rotate","mirror","scale","trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","array","explode","erase","group","ungroup","clipcut","clipcopy","clippaste"]},
     {name:"Annotate", big:"dim", small:["text"]},
     {name:"Line Style", custom:"style"},
     {name:"Layers", custom:"layers"}
@@ -3766,17 +4480,18 @@ const RIBBON={
     {name:"Markup",   big:"mkselect", small:["mkpick","mkapply","mkshow","mkclear"]}
   ],
   Flow:[
-    {name:"Nodes",   big:"fnproc", small:["fndec","fnterm","fndata","fnnote"]},
-    {name:"Connect", big:"fedge",  small:["flabel"]},
+    {name:"Nodes",   big:"fnproc", small:["fndec","fnterm","fndata","fnnote","fnlane"]},
+    {name:"Connect", big:"fedge",  small:["flabel","fclearwp"]},
     {name:"Style",   custom:"flow"},
     {name:"Arrange", big:"ftidy",
       small:["falignl","falignc","falignt","falignm","fdisth","fdistv","fautosize"]}
   ],
   Insert:[
+    {name:"Drawing", big:"savedwg", small:["opendwg","newdwg","undo","redo"]},
     {name:"Reference", big:"refimage", small:["imgmove","imgcal","imgstraight","imgcrop","imglock","imgtoggle","imgresetcrop","imgremove"]},
     {name:"Import", big:"opendxf"},
-    {name:"Export", big:"exportdxf", small:["exportsvg"]},
-    {name:"Drawing", big:"newdwg", small:["undo","redo"]}
+    {name:"Export", big:"exportpng", small:["copyimage","exportsvg","exportdxf"]},
+    {name:"Image", custom:"png"}
   ],
   View:[
     {name:"Navigate", big:"zoomext"},
@@ -3832,6 +4547,7 @@ function paintRibbon(){
     if(P.custom==="grid")    body.append(gridWidget());
     if(P.custom==="pen")     body.append(penWidget());
     if(P.custom==="flow")    body.append(flowWidget());
+    if(P.custom==="png")     body.append(pngWidget());
     const lab=document.createElement("div"); lab.className="rpanel-label"; lab.textContent=P.name;
     panel.append(body,lab); host.append(panel);
   }
@@ -4024,7 +4740,10 @@ function paintLayers(){
     const lk=document.createElement("button"); lk.className="licon"+(L.lock?" on":"");
     lk.textContent=L.lock?"\u25A0":"\u25A1"; lk.title="Lock / unlock";
     lk.onclick=ev=>{ev.stopPropagation(); L.lock=!L.lock; paintLayers();};
-    d.append(sw,nm,vis,lk); host.append(d);
+    const del=document.createElement("button"); del.className="licon";
+    del.textContent="\u2715"; del.title="Delete this layer";
+    del.onclick=ev=>{ev.stopPropagation(); deleteLayer(i);};
+    d.append(sw,nm,vis,lk,del); host.append(d);
   });
 }
 document.getElementById("btn-addlayer").onclick=()=>{
@@ -4174,6 +4893,10 @@ function updateProps(){
       "Markup lands on its own MARKUP layer &middot; <kbd>MSHOW</kbd> hide it &middot; <kbd>MERA</kbd> erase it &middot; <kbd>MCLR</kbd> clear it<br>"+
       "<b style=\"color:#8fb6d8\">Flow</b> tab: <kbd>N</kbd> node, click drops or drag sizes &middot; <kbd>J</kbd> connector, drag node to node<br>"+
       "Connectors bind to nodes and re-route when you move them &middot; double-click a node to relabel<br>"+
+      "Drag a hollow diamond on a connector to add a waypoint &middot; <kbd>FCWP</kbd> clears them<br>"+
+      "Select anything and drag its square handles to reshape it &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd>/<kbd>X</kbd>/<kbd>V</kbd> clipboard<br>"+
+      "<kbd>Ctrl</kbd>+<kbd>S</kbd> save a .b2db &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open one &middot; <kbd>PNG</kbd> export &middot; <kbd>CPIMG</kbd> copy image<br>"+
+      "Work autosaves to this browser &middot; <kbd>RESTORE</kbd> brings it back &middot; layers have an \u2715 to delete<br>"+
       "<kbd>F7</kbd> show grid &middot; <kbd>F8</kbd> ortho &middot; <kbd>F9</kbd> grid snap &middot; <kbd>F3</kbd> osnap &middot; <kbd>F6</kbd> image-edge snap<br>"+
       "Type <kbd>x,y</kbd> <kbd>@dx,dy</kbd> <kbd>len&lt;ang</kbd> or a bare length<br>"+
       "Drag right = window, drag left = crossing<br>"+
@@ -4948,12 +5671,22 @@ function toggleReferenceLock(){
 function resetReferenceCrop(){
   if(!S.refImage) return echo("No reference image loaded","warn");
   if(S.refImage.locked) return echo("Unlock the reference image first","warn");
+  snap();
   S.refImage.crop=null; draw(); updateProps(); echo("Reference crop reset");
 }
 function removeReferenceImage(){
   if(!S.refImage) return echo("No reference image loaded","warn");
+  snap();
   S.refImage=null; draw(); updateProps(); paintRibbon(); echo("Reference image removed");
 }
+document.getElementById("b2dbin").onchange=e=>{
+  const f=e.target.files[0]; e.target.value="";
+  if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>openDrawingText(String(r.result), f.name);
+  r.readAsText(f);
+};
+window.addEventListener("beforeunload",()=>{ try{ autosaveNow(); }catch(_){} });
 document.getElementById("imagein").onchange=e=>{
   const f=e.target.files[0]; e.target.value="";
   if(f) loadReferenceImage(f);
@@ -4961,12 +5694,12 @@ document.getElementById("imagein").onchange=e=>{
 document.getElementById("filein").onchange=e=>{
   const f=e.target.files[0]; if(!f) return;
   const r=new FileReader();
-  r.onload=()=>{ importDXF(String(r.result)); document.getElementById("fname").textContent=f.name+" \u00B7 units mm"; };
+  r.onload=()=>{ importDXF(String(r.result)); setDocName(f.name); };
   r.readAsText(f);
   e.target.value="";
 };
 function newDrawing(){
-  snap(); S.ents=[]; S.sel.clear(); S.refImage=null; S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
+  snap(); S.ents=[]; S.sel.clear(); S.refImage=null; refImgEl=null; S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
   document.getElementById("fname").textContent="untitled.dxf \u00B7 units mm";
   draw(); updateProps(); echo("New drawing");
 }
@@ -5103,6 +5836,8 @@ else window.addEventListener("resize",resize);
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
 resize(); readout();
 cmdin.focus();
+setDocName(S.docName);
+offerRestore();
 </script>
 </body>
 </html>
