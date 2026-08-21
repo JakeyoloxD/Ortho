@@ -346,6 +346,30 @@
   .rpanel .chips{padding:1px 0}
   canvas.inking{cursor:crosshair}
   canvas.erasing{cursor:cell}
+
+  /* ---- experimental reactive feedback -------------------------------- */
+  .x-react-label{position:absolute;left:50%;top:18%;transform:translate(-50%,-50%);z-index:18;pointer-events:none;
+    padding:7px 11px;border:1px solid rgba(120,183,241,.48);border-radius:999px;background:rgba(18,24,31,.88);
+    color:#dceeff;font:700 10px/1 var(--ui);letter-spacing:.08em;text-transform:uppercase;box-shadow:0 0 24px rgba(98,166,232,.18);
+    animation:x-react-label .9s ease-out forwards}
+  .x-react-ring{position:absolute;z-index:17;pointer-events:none;width:28px;height:28px;border:2px solid #78b7f1;border-radius:50%;
+    transform:translate(-50%,-50%);box-shadow:0 0 20px rgba(120,183,241,.45);animation:x-react-ring .7s cubic-bezier(.16,.84,.28,1) forwards}
+  .x-react-ring.warn{border-color:#ef8178;box-shadow:0 0 20px rgba(239,129,120,.5)}
+  .x-react-ring.good{border-color:#54c7c4;box-shadow:0 0 20px rgba(84,199,196,.5)}
+  .x-react-sweep{position:absolute;left:0;right:0;height:2px;z-index:16;pointer-events:none;
+    background:linear-gradient(90deg,transparent,rgba(120,183,241,.95),transparent);box-shadow:0 0 16px rgba(120,183,241,.7);
+    animation:x-react-sweep .9s ease-in-out forwards}
+  #stage.x-quake{animation:x-stage-quake .55s cubic-bezier(.36,.07,.19,.97)}
+  #stage.x-pulse::after{content:"";position:absolute;inset:0;z-index:15;pointer-events:none;border:2px solid rgba(120,183,241,.55);
+    box-shadow:inset 0 0 42px rgba(98,166,232,.18);animation:x-stage-pulse .7s ease-out forwards}
+  .big.x-click,.small.x-click{animation:x-button-click .34s ease-out}
+  @keyframes x-react-label{0%{opacity:0;transform:translate(-50%,-30%) scale(.88)}18%{opacity:1;transform:translate(-50%,-50%) scale(1.04)}100%{opacity:0;transform:translate(-50%,-75%) scale(1)}}
+  @keyframes x-react-ring{0%{opacity:.95;width:20px;height:20px}100%{opacity:0;width:130px;height:130px}}
+  @keyframes x-react-sweep{0%{top:8%;opacity:0}12%{opacity:1}100%{top:92%;opacity:0}}
+  @keyframes x-stage-pulse{0%{opacity:0}20%{opacity:1}100%{opacity:0}}
+  @keyframes x-stage-quake{0%,100%{transform:none}12%{transform:translate(-6px,3px) rotate(-.15deg)}24%{transform:translate(7px,-4px) rotate(.18deg)}38%{transform:translate(-5px,-3px)}55%{transform:translate(5px,4px)}72%{transform:translate(-3px,2px)}88%{transform:translate(2px,-2px)}}
+  @keyframes x-button-click{0%{transform:scale(1)}45%{transform:scale(.92);filter:brightness(1.45)}100%{transform:scale(1)}}
+
   /* ---- punch mode (Test Your Might) ---- */
   #app.punch-armed #cv{ cursor:crosshair; }
   #app.punch-armed #stage::after{
@@ -1125,7 +1149,7 @@ function echo(m,cls){
 function feed(p){
   if(S.snapOverride){ S.snapOverride=null; paintOptbar(); }
   snapCycleReset();
-  if(XPICK[S.tool] && S.experimental){ XPICK[S.tool](p); return; }
+  if(XPICK[S.tool] && S.experimental){ xUiReact(S.tool,"hit",p); XPICK[S.tool](p); return; }
   const T=TOOLS[S.tool];
   if(S.tool==="select"){ return; }
   if(S.tool==="measurebetween") return feedMeasureBetween(p);
@@ -5883,6 +5907,36 @@ function xBeep(kind){
   }catch(_){}
 }
 
+
+/* ---- experimental UI feedback ---------------------------------------- */
+function xUiReact(id, mode, p){
+  const stage=document.getElementById("stage");
+  const item=itemOf(id)||{};
+  const label=(item.label||id)+(mode==="armed"?" armed":mode==="hit"?" engaged":"");
+  const btn=document.querySelector('[data-item="'+id+'"]');
+  if(btn){ btn.classList.remove("x-click"); void btn.offsetWidth; btn.classList.add("x-click"); setTimeout(()=>btn.classList.remove("x-click"),380); }
+  if(!stage) return;
+  const tag=document.createElement("div"); tag.className="x-react-label"; tag.textContent=label; stage.appendChild(tag);
+  setTimeout(()=>tag.remove(),950);
+  const ring=document.createElement("div"); ring.className="x-react-ring";
+  let sx=stage.clientWidth/2, sy=stage.clientHeight/2;
+  if(p){ sx=X(p.x); sy=Y(p.y); }
+  ring.style.left=sx+"px"; ring.style.top=sy+"px"; stage.appendChild(ring);
+  setTimeout(()=>ring.remove(),760);
+  stage.classList.remove("x-pulse"); void stage.offsetWidth; stage.classList.add("x-pulse");
+  setTimeout(()=>stage.classList.remove("x-pulse"),760);
+}
+function xUiSweep(){
+  const stage=document.getElementById("stage"); if(!stage) return;
+  const bar=document.createElement("div"); bar.className="x-react-sweep"; stage.appendChild(bar);
+  setTimeout(()=>bar.remove(),980);
+}
+function xUiQuake(){
+  const stage=document.getElementById("stage"); if(!stage) return;
+  stage.classList.remove("x-quake"); void stage.offsetWidth; stage.classList.add("x-quake");
+  setTimeout(()=>stage.classList.remove("x-quake"),620);
+}
+
 /* ---- shared geometry --------------------------------------------------- */
 function xEnts(){ return S.ents.slice(0,XCAP.ENTS).filter(e=>{ const L=S.layers[e.li]; return !L||L.on; }); }
 function xSelOrAll(){
@@ -6066,6 +6120,8 @@ function xVacuum(){
   const gone=before-S.ents.length;
   if(!gone){ S.undo.pop(); return echo("Nothing to clean up - the drawing is tidy"); }
   S.sel.clear(); resetNudge(); flowInvalidateIndex(); draw(); updateProps();
+  xUiSweep();
+  xfxRun("vacuum",900,{box:xBox(xEnts())},null,null);
   xBeep("sweep");
   echo("Vacuumed "+gone+": "+junk.dupe+" duplicate, "+junk.zero+" zero-length, "+
        junk.empty+" empty, "+junk.orphan+" orphaned connector"+(junk.orphan===1?"":"s"));
@@ -6095,6 +6151,8 @@ function xIron(){
   }
   if(!straightened && !thinned){ S.undo.pop(); return echo("Nothing needed pressing at "+fmt(tol)+" tolerance"); }
   draw(); updateProps();
+  xUiSweep();
+  xfxRun("iron",950,{box:xBox(list)},null,null);
   xBeep("sweep");
   echo("Ironed: "+straightened+" run"+(straightened===1?"":"s")+" straightened, "+thinned+" surplus vertices removed");
 }
@@ -6149,6 +6207,8 @@ function xLevel(p){
   else { e.b=V(e.a.x,e.b.y); echo("Plumbed vertical"); }
   S.sel=new Set([i]);
   draw(); updateProps();
+  XFX.marks.length=0; XFX.marks.push({kind:"level",p:mul(add(e.a,e.b),.5)});
+  xfxRun("level",900,{p:mul(add(e.a,e.b),.5)},null,null);
   xBeep("tick");
 }
 
@@ -6223,6 +6283,8 @@ function xXray(){
   }
   XFX.marks.length=0;
   for(const m of marks) XFX.marks.push(m);
+  xUiSweep();
+  xfxRun("xray",1200,{box:xBox(list)},null,null);
   draw();
   echo(marks.length? ("X-ray on - "+marks.length+" stacked or duplicate object"+(marks.length===1?"":"s")+" glowing")
                    : "X-ray on - nothing stacked");
@@ -6262,7 +6324,8 @@ function xEarthquake(){
   const dangling=S.ents.filter(e=>e.t==="edge" && (!flowEnd(e.from)||!flowEnd(e.to))).length;
   XFX.marks.length=0;
   for(const q of fake) XFX.marks.push({kind:"crack",p:q});
-  xfxRun("shake",900,null,null,null);
+  xUiQuake();
+  xfxRun("shake",900,{box:xBox(list)},null,null);
   xBeep("thunk");
   if(!fake.length && !dangling) echo("Shook it - everything held. No false joints within "+fmt(tol)+".");
   else echo("Shook it - "+fake.length+" joint"+(fake.length===1?"":"s")+" that look connected are not"+
@@ -6406,6 +6469,7 @@ function xRepel(){
   snap();
   for(let i=0;i<list.length;i++) if(len(move[i])>1e-9) moveEnt(list[i],move[i]);
   flowInvalidateIndex(); draw(); updateProps();
+  xfxRun("repel",1000,{box:xBox(list)},null,null);
   xBeep("pop");
   echo("Pushed "+n+" label"+(n===1?"":"s")+" apart in "+iters+" pass"+(iters===1?"":"es"));
 }
@@ -6458,6 +6522,7 @@ function xSpring(){
     moveEnt(n, sub(target, n.p));
   });
   flowInvalidateIndex(); draw(); updateProps();
+  xfxRun("spring",1400,{nodes:nodes.map(n=>V(n.p.x,n.p.y)),edges},null,null);
   xBeep("sweep");
   echo("Relaxed "+nodes.length+" nodes and "+edges.length+" connectors over "+iters+" passes");
 }
@@ -6492,6 +6557,7 @@ function xShrinkWrap(){
   S.ents.push({t:"pline", li:S.cur, si:S.curStyle, closed:true, pts:grown});
   S.sel=new Set([S.ents.length-1]);
   flowInvalidateIndex(); draw(); updateProps();
+  xfxRun("wrap",1200,{pts:grown,c:V(c.x,c.y)},null,null);
   xBeep("pop");
   echo("Wrapped "+hull.length+" hull points at "+fmt(off)+" mm offset");
 }
@@ -6622,6 +6688,46 @@ function xPaint(){
       ctx.globalAlpha=1;
     }
   }
+  const xnow=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+  const xt=XFX.until>XFX.t0?Math.max(0,Math.min(1,(xnow-XFX.t0)/(XFX.until-XFX.t0))):0;
+  if(XFX.kind==="spin" && XFX.data && XFX.data.c){
+    const c=XFX.data.c, rr=22+42*xt;
+    ctx.strokeStyle="rgba(120,183,241,"+(1-xt)+")"; ctx.lineWidth=2;
+    for(let k=0;k<3;k++){
+      const a=xt*TAU*2+k*TAU/3;
+      ctx.beginPath(); ctx.arc(X(c.x),Y(c.y),rr+k*8,a,a+Math.PI*.72); ctx.stroke();
+    }
+  }
+  if(XFX.kind==="shake" && XFX.data && XFX.data.box){
+    const b=XFX.data.box, amp=(1-xt)*9; ctx.strokeStyle="rgba(239,129,120,"+(0.9-xt*.7)+")";
+    for(let k=0;k<5;k++){ const yy=Y(b.y0+(b.y1-b.y0)*(k+1)/6); ctx.beginPath();
+      for(let x=0;x<=W;x+=12){ const y=yy+Math.sin((x/24)+xt*24+k)*amp; if(x===0)ctx.moveTo(x,y);else ctx.lineTo(x,y); } ctx.stroke(); }
+  }
+  if((XFX.kind==="iron"||XFX.kind==="xray"||XFX.kind==="vacuum") && XFX.data && XFX.data.box){
+    const b=XFX.data.box, y=Y(b.y1)+(Y(b.y0)-Y(b.y1))*xt;
+    ctx.strokeStyle=XFX.kind==="iron"?"rgba(255,209,102,.9)":XFX.kind==="xray"?"rgba(143,208,255,.95)":"rgba(84,199,196,.9)";
+    ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(X(b.x0)-12,y); ctx.lineTo(X(b.x1)+12,y); ctx.stroke();
+    if(XFX.kind==="vacuum"){ const cx=X((b.x0+b.x1)/2), cy=Y((b.y0+b.y1)/2);
+      for(let k=0;k<12;k++){ const a=k/12*TAU+xt*8, r=(1-xt)*(22+Math.min(W,H)*.08); ctx.beginPath(); ctx.arc(cx+Math.cos(a)*r,cy+Math.sin(a)*r,2,0,TAU); ctx.fillStyle="rgba(84,199,196,.8)"; ctx.fill(); } }
+  }
+  if(XFX.kind==="level" && XFX.data && XFX.data.p){
+    const p=XFX.data.p, wob=Math.sin(xt*Math.PI*6)*(1-xt)*12;
+    ctx.strokeStyle="#54c7c4"; ctx.fillStyle="rgba(84,199,196,.18)";
+    ctx.strokeRect(X(p.x)-34,Y(p.y)-8,68,16); ctx.beginPath(); ctx.arc(X(p.x)+wob,Y(p.y),5,0,TAU); ctx.fill(); ctx.stroke();
+  }
+  if(XFX.kind==="repel" && XFX.data && XFX.data.box){
+    const b=XFX.data.box,cx=X((b.x0+b.x1)/2),cy=Y((b.y0+b.y1)/2),r=12+xt*90;
+    ctx.strokeStyle="rgba(255,209,102,"+(1-xt)+")"; for(let k=0;k<3;k++){ctx.beginPath();ctx.arc(cx,cy,r+k*16,0,TAU);ctx.stroke();}
+  }
+  if(XFX.kind==="spring" && XFX.data && XFX.data.nodes){
+    ctx.strokeStyle="rgba(120,183,241,"+(1-xt*.55)+")"; ctx.fillStyle="rgba(120,183,241,.22)";
+    for(const p of XFX.data.nodes){ const r=4+Math.abs(Math.sin((xt*8+p.x+p.y)*.25))*8*(1-xt); ctx.beginPath();ctx.arc(X(p.x),Y(p.y),r,0,TAU);ctx.stroke(); }
+  }
+  if(XFX.kind==="wrap" && XFX.data && XFX.data.pts){
+    const P=XFX.data.pts, n=Math.max(2,Math.floor(P.length*xt)+1); ctx.strokeStyle="rgba(84,199,196,"+(1-xt*.2)+")";ctx.lineWidth=2.4;
+    ctx.beginPath(); for(let i=0;i<n;i++) i?ctx.lineTo(X(P[i].x),Y(P[i].y)):ctx.moveTo(X(P[i].x),Y(P[i].y)); if(xt>.92)ctx.closePath();ctx.stroke();
+  }
+
   if(XFX.kind==="ants" && XFX.data && XFX.data.path){
     const P=XFX.data.path;
     const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
@@ -6919,6 +7025,7 @@ function itemOf(id){ return TOOLS[id] || ACTIONS[id]; }
 function activateRibbonItem(id){
   if(TOOLS[id]){
     setTool(id);
+    if(TOOLS[id].experimental) xUiReact(id,"armed");
     return;
   }
   const A=ACTIONS[id];
@@ -6936,6 +7043,7 @@ function activateRibbonItem(id){
      Selection is preserved by setTool("select"), but pending points, pick
      stages, measure graphics and pressed-state from the old tool are cleared. */
   if(S.tool!=="select") setTool("select");
+  if(XACTIONS.has(id)) xUiReact(id,"action");
   A.run();
   paintRibbon();
   paintOptbar();
