@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The app makes no network calls at all, so it can afford a strict policy.
+     img-src data: blob: is what stops a crafted drawing from beaconing home,
+     and the script-src directive below omits the dynamic-code keyword, which
+     disables the runtime code-compilation APIs. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src 'none'; connect-src 'none'; object-src 'none'; child-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <title>BackToTheDrawingBoard</title>
 <style>
   :root{
@@ -250,6 +256,73 @@
   #echo{color:#737d89;font-size:9.8px;white-space:nowrap;max-width:40%;overflow:hidden;text-overflow:ellipsis;text-align:right;font-family:var(--mono)}
   #echo.warn{color:var(--alert)}
 
+  /* ---------------- touch and mobile mode ----------------
+     touch-action:none is the load-bearing line: without it the browser eats
+     every drag as a page scroll and every pinch as a page zoom. */
+  #cv,#stage{touch-action:none}
+  html,body{overscroll-behavior:none}
+
+  #mact{
+    position:absolute;right:8px;bottom:8px;z-index:30;display:none;
+    grid-template-columns:repeat(2,44px);gap:6px;
+  }
+  #mact button{
+    width:44px;height:44px;border-radius:11px;border:1px solid var(--rule);
+    background:rgba(24,29,35,.92);color:var(--ink-dim);display:grid;place-items:center;
+    box-shadow:0 2px 10px rgba(0,0,0,.35);cursor:pointer;padding:0;
+  }
+  #mact button[aria-pressed="true"]{background:var(--pen);color:#0b0e12;border-color:var(--pen)}
+  #mact button:disabled{opacity:.32}
+  #msheet{
+    position:absolute;left:0;right:0;bottom:0;z-index:40;height:64%;
+    background:var(--panel-2);border-top:1px solid var(--rule);
+    transform:translateY(101%);transition:transform .18s ease;
+    display:flex;flex-direction:column;box-shadow:0 -10px 26px rgba(0,0,0,.4);
+  }
+  #msheet.open{transform:none}
+  #msheet .mgrab{
+    height:30px;flex:0 0 auto;border:0;background:transparent;color:var(--ink-faint);
+    font-size:18px;line-height:1;cursor:pointer;
+  }
+  #msheet .mbody{flex:1;min-height:0;overflow:auto;display:flex}
+  #msheet #right{display:flex!important;flex:1;border-left:0;box-shadow:none}
+
+  #app.mobile{--ribbon-h:138px;--optbar-h:40px;--status-h:0px;--cmd-h:44px}
+  #app.mobile #status{display:none}
+  #app.mobile #right{display:none}
+  #app.mobile #mact{display:grid}
+  #app.mobile .shell-resizer{display:none}
+  #app.mobile #rtabs{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;flex-wrap:nowrap}
+  #app.mobile .rtab{height:36px;min-width:0;padding:0 15px;font-size:12px;flex:0 0 auto}
+  #app.mobile #rpanels{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;flex-wrap:nowrap}
+  #app.mobile .rpanel{flex:0 0 auto}
+  #app.mobile .big{width:64px;min-height:62px;font-size:10px;padding:6px 3px 3px}
+  #app.mobile .big svg{width:24px;height:24px}
+  #app.mobile .small{
+    flex-direction:column;min-width:56px;min-height:50px;gap:3px;padding:5px 3px;
+    font-size:8.5px;text-align:center;line-height:1.05;
+  }
+  #app.mobile .small svg{width:20px;height:20px}
+  #app.mobile .tg{height:34px;min-width:52px}
+  #app.mobile #optbar{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  #app.mobile .chip{width:26px;height:26px}
+  #app.mobile .licon{min-width:30px;min-height:30px}
+  #app.mobile .layer,#app.mobile .style{min-height:38px}
+  /* 16px is the threshold below which iOS zooms the page on focus */
+  #app.mobile input,#app.mobile select,#app.mobile #cmdin{font-size:16px;min-height:34px}
+  #app.mobile .row{min-height:38px}
+  #app.mobile.asking #cmd{
+    position:fixed;left:0;right:0;top:0;z-index:70;
+    border-top:0;border-bottom:1px solid var(--pen);box-shadow:0 6px 18px rgba(0,0,0,.45);
+  }
+  @media (max-width:560px){
+    #app.mobile{--ribbon-h:126px}
+    #app.mobile .big{width:58px;min-height:58px}
+    #app.mobile .small{min-width:50px;min-height:46px}
+    #mact{grid-template-columns:44px;right:6px;bottom:6px;gap:5px}
+    #app.mobile #mact{grid-template-columns:repeat(2,44px)}
+  }
+
   @media (max-width:900px){
     #app{grid-template-columns:1fr;grid-template-areas:"top" "ribbon" "optbar" "canvas" "status" "cmd"}
     #right{display:none}.small{min-width:0}.workspace-tag{display:none}.doc-tab{min-width:140px}
@@ -273,6 +346,42 @@
   .rpanel .chips{padding:1px 0}
   canvas.inking{cursor:crosshair}
   canvas.erasing{cursor:cell}
+  /* ---- punch mode (Test Your Might) ---- */
+  #app.punch-armed #cv{ cursor:crosshair; }
+  #app.punch-armed #stage::after{
+    content:""; position:absolute; inset:0; pointer-events:none; z-index:3;
+    box-shadow:inset 0 0 0 2px rgba(220,38,38,.55), inset 0 0 40px rgba(220,38,38,.18);
+    animation:punch-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes punch-pulse{ 0%,100%{opacity:.55} 50%{opacity:.9} }
+  .punch-fx-host{ position:fixed; inset:0; pointer-events:none; z-index:9998; overflow:hidden; }
+  .punch-particle{ position:fixed; width:8px; height:8px; border-radius:2px; pointer-events:none;
+    animation:punch-fly .9s cubic-bezier(.2,.6,.4,1) forwards; }
+  @keyframes punch-fly{
+    0%{ transform:translate(0,0) rotate(0); opacity:1; }
+    100%{ transform:translate(var(--px),var(--py)) rotate(var(--pr)); opacity:0; } }
+  .punch-text{ position:fixed; pointer-events:none; z-index:9999; font-family:"Arial Black",Impact,sans-serif;
+    font-weight:900; font-size:34px; letter-spacing:1px; text-transform:uppercase; white-space:nowrap;
+    text-shadow:0 2px 0 #000,0 0 18px currentColor; animation:punch-pop 1s ease-out forwards; }
+  @keyframes punch-pop{
+    0%{ transform:translateY(0) scale(.4); opacity:0; }
+    18%{ transform:translateY(-8px) scale(1.25); opacity:1; }
+    100%{ transform:translateY(-64px) scale(1); opacity:0; } }
+  @keyframes punch-shake{
+    0%,100%{transform:translate(0,0)} 20%{transform:translate(-6px,4px)}
+    40%{transform:translate(7px,-5px)} 60%{transform:translate(-5px,-4px)} 80%{transform:translate(4px,5px)} }
+  .punch-shake{ animation:punch-shake .42s ease-in-out; }
+  #punch-fatality{
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    z-index:10000; pointer-events:none; opacity:0; }
+  #punch-fatality.show{ animation:punch-fatal 2s cubic-bezier(.36,.07,.19,.97) forwards; }
+  #punch-fatality span{
+    font-family:"Arial Black",Impact,sans-serif; font-weight:900; font-size:12vw; letter-spacing:6px;
+    color:#dc2626; text-transform:uppercase;
+    text-shadow:0 0 30px #dc2626,0 0 60px #7f1d1d,0 6px 0 #450a0a; }
+  @keyframes punch-fatal{
+    0%{opacity:0; transform:scale(2.4)} 12%{opacity:1; transform:scale(1)}
+    16%{transform:scale(1.06)} 20%{transform:scale(1)} 82%{opacity:1} 100%{opacity:0; transform:scale(1)} }
 </style>
 </head>
 <body>
@@ -331,6 +440,7 @@
 
 <input type="file" id="filein" accept=".dxf,.DXF" style="display:none">
 <input type="file" id="b2dbin" accept=".b2db,.json" style="display:none">
+<input type="file" id="pdfin" accept=".pdf" style="display:none">
 <input type="file" id="imagein" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" style="display:none">
 
 <script>
@@ -362,6 +472,7 @@ const S = {
   sel: new Set(),
   view: {cx:0, cy:0, s:2},
   tool: "select",
+  punch: false,        // Test Your Might: click canvas objects to destroy them
   ortho: false,
   gridShow: true,      // grid visibility, independent of grid snapping
   gridSnap: true,
@@ -625,6 +736,7 @@ function applyBlob(t){
   S.cur=Math.max(0,Math.min(d.c|0,S.layers.length-1));
   S.curStyle=Math.max(0,Math.min(d.cs|0,S.styles.length-1));
   restoreRef(d.r);
+  flowInvalidateIndex();
   if(S.flow && d.fs) S.flow.seq=d.fs;
   if(d.gs) S.groupSeq=d.gs;
   paintLayers(); paintStyles();
@@ -657,7 +769,7 @@ function gridPitch(){
 }
 function resolveSnap(w){
   S.snapHit=null;
-  const tol=px(11);
+  const tol=px(tolPx(11));
   if(S.osnap){
     let best=null, bestd=tol, bestk=0;
     const rank={end:4,center:3,quad:2,mid:1};
@@ -838,7 +950,7 @@ const ACTIONS={
   redo:{label:"Redo", alias:"REDO", svg:'<path d="M16 9H7.5a4 4 0 000 8H12"/><path d="M12.5 5.5L16 9l-3.5 3.5"/>', run:()=>redo()},
   zoomext:{label:"Extents", alias:"Z", svg:'<path d="M3 7V3h4M17 7V3h-4M3 13v4h4M17 13v4h-4"/><rect x="7" y="7" width="6" height="6"/>', run:()=>zoomExtents()},
   newdwg:{label:"New", alias:"NEW", svg:'<path d="M5 2.5h6l4 4v11H5z"/><path d="M11 2.5v4h4"/>', run:()=>newFile()},
-  opendxf:{label:"DXF", alias:"OPEN", svg:'<path d="M3 6.5h5l1.5 2H17v8H3z"/><path d="M3 6.5v-2h4"/>', run:()=>document.getElementById("filein").click()},
+  opendxf:{label:"DXF", alias:"OPENDXF", svg:'<path d="M3 6.5h5l1.5 2H17v8H3z"/><path d="M3 6.5v-2h4"/>', run:()=>document.getElementById("filein").click()},
   refimage:{label:"Reference Image", alias:"IMG", svg:'<rect x="3" y="4" width="14" height="12"/><circle cx="7" cy="8" r="1.5"/><path d="M4.5 14l4-4 2.5 2.5 2-2 2.5 3.5"/>', run:()=>document.getElementById("imagein").click()},
   imgtoggle:{label:"Show / Hide", alias:"IMGSHOW", svg:'<path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/>', run:()=>toggleReferenceImage()},
   imglock:{label:"Lock Image", alias:"IMGLOCK", svg:'<rect x="5" y="9" width="10" height="8" rx="1"/><path d="M7 9V6a3 3 0 016 0v3"/>', run:()=>toggleReferenceLock()},
@@ -853,6 +965,7 @@ const SELOPS=["move","copy","mirror","rotate","scale","array","explode"];
 // scale intentionally not pts:1 any more - see feed()/commit() for its own point-count logic
 const PICKTOOLS=["trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","pickLines"];
 function setTool(t){
+  if(S.touchUI) setTimeout(updateActionBar,0);
   S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; resetNudge();
   if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
   if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && S.refImage && S.refImage.locked){ echo("Reference image is locked","warn"); t="select"; }
@@ -907,11 +1020,13 @@ function askArray(){
 /* command-bar question: modals are blocked in sandboxed frames, so ask here */
 function requestString(label, initial, cb){
   S.ask={label,cb};
+  syncAskClass();
   document.getElementById("prompt").textContent=label+":";
   const el=document.getElementById("cmdin");
   el.value=initial||""; el.focus(); el.select();
 }
 function setPrompt(){
+  syncAskClass();
   if(S.ask){ document.getElementById("prompt").textContent=S.ask.label+":"; return; }
   if(S.op && S.op.prompt){ document.getElementById("prompt").textContent=S.op.prompt+":"; return; }
   const T=TOOLS[S.tool];
@@ -1586,7 +1701,7 @@ function draw(){
     if(!L.on) return;
     flowPaintEnt(e, S.sel.has(i), i===S.hover);
   });
-  const tol=px(6);
+  const tol=px(tolPx(6));
   S.ents.forEach((e,i)=>{
     const L=S.layers[e.li]||S.layers[0];
     if(!L.on) return;
@@ -1619,6 +1734,7 @@ function draw(){
   drawBand();
   drawSnapMarker();
   drawCross();
+  mobilePaint();
 }
 function drawReferenceImage(){
   const R=S.refImage;
@@ -1925,6 +2041,7 @@ function drawSnapMarker(){
   ctx.stroke();
 }
 function drawCross(){
+  if(S.touchUI && !ptrs.size && !downAt) return;
   const c=cursorPoint(), sx=Math.round(X(c.x))+.5, sy=Math.round(Y(c.y))+.5;
   ctx.strokeStyle="rgba(201,209,220,.28)"; ctx.lineWidth=1; ctx.beginPath();
   ctx.moveTo(sx,0);ctx.lineTo(sx,H);ctx.moveTo(0,sy);ctx.lineTo(W,sy);ctx.stroke();
@@ -1933,7 +2050,7 @@ function drawCross(){
 /* ============================================================ picking */
 function pickAt(w, additive){
   resetNudge();
-  const tol=px(7);
+  const tol=px(tolPx(7));
   for(let i=S.ents.length-1;i>=0;i--){
     const e=S.ents[i], L=S.layers[e.li];
     if(!L||!L.on||L.lock) continue;
@@ -1963,7 +2080,7 @@ function pickBox(a,b,additive){
 }
 
 function hitIndex(p){
-  const tol=px(7);
+  const tol=px(tolPx(7));
   for(let i=S.ents.length-1;i>=0;i--){
     const e=S.ents[i], L=S.layers[e.li];
     if(!L||!L.on||L.lock) continue;
@@ -2088,7 +2205,8 @@ cv.addEventListener("contextmenu",e=>e.preventDefault());
 cv.addEventListener("pointerdown",e=>{
   cv.setPointerCapture(e.pointerId);
   const r=cv.getBoundingClientRect();
-  S.mouse.sx=e.clientX-r.left; S.mouse.sy=e.clientY-r.top;
+  setMouseFrom(e,r);
+  if(touchDown(e)){ e.preventDefault(); draw(); return; }
   if(e.button===1 || (e.button===0&&e.altKey)){
     panning=true; panFrom={x:e.clientX,y:e.clientY,cx:S.view.cx,cy:S.view.cy};
     cv.classList.add("panning"); e.preventDefault(); return;
@@ -2100,15 +2218,22 @@ cv.addEventListener("pointerdown",e=>{
     return;
   }
   if(e.button!==0) return;
+  if(S.punch){
+    /* Deferred to the lift on touch: a pinch starts with one finger down, and
+       that finger must not land a hit before the second arrives. */
+    if(S.touchUI && e.pointerType && e.pointerType!=="mouse"){ punchTap=true; return; }
+    punchAt(e); return;
+  }
   if(mkIsTool(S.tool)){ mkPointerDown(e); return; }
   if(flowIsTool(S.tool)){ flowPointerDown(e); return; }
   if(gripBegin(S.mouse.sx,S.mouse.sy)) return;
-  downAt={sx:S.mouse.sx, sy:S.mouse.sy, w:cursorPoint(), shift:e.shiftKey};
+  downAt={sx:S.mouse.sx, sy:S.mouse.sy, w:cursorPoint(), shift:e.shiftKey||S.stickyShift};
   dragging=false;
 });
 window.addEventListener("pointermove",e=>{
   const r=cv.getBoundingClientRect();
-  S.mouse.sx=e.clientX-r.left; S.mouse.sy=e.clientY-r.top;
+  setMouseFrom(e,r);
+  if(touchMove(e)) return;
   if(panning&&panFrom){
     S.view.cx=panFrom.cx-(e.clientX-panFrom.x)/S.view.s;
     S.view.cy=panFrom.cy+(e.clientY-panFrom.y)/S.view.s;
@@ -2127,6 +2252,8 @@ window.addEventListener("pointermove",e=>{
   readout(); draw();
 });
 window.addEventListener("pointerup",e=>{
+  if(touchUp(e)){ panning=false; panFrom=null; cv.classList.remove("panning"); return; }
+  if(punchTap){ punchTap=false; punchAt(e); return; }
   if(panning){ panning=false; panFrom=null; cv.classList.remove("panning"); return; }
   if(mkDraw){ mkPointerUp(e); return; }
   if(gripDrag){ gripEnd(); return; }
@@ -2134,17 +2261,21 @@ window.addEventListener("pointerup",e=>{
   if(flowDraw){ flowPointerUp(e); return; }
   if(!downAt) return;
   const w=cursorPoint();
+  /* On touch, sliding to aim leaves dragging=true even though the user was
+     placing a point, not dragging. Honour the release in that case, and pick
+     from where the crosshair ended up rather than where the finger landed. */
+  const slid=touchAimDrag();
   if(S.tool==="select"){
     if(dragging && S.band){ pickBox(S.band.a,S.band.b,downAt.shift); S.band=null; }
     else pickAt(downAt.w, downAt.shift);
     updateProps();
   } else if(TOOLS[S.tool].pick){
-    if(!dragging){
+    if(!dragging || slid){
       if((S.tool==="offset"||S.tool==="pickLines") && S.op.stage==="side") offsetSide(w);
-      else doPick(hitIndex(downAt.w), w, e.shiftKey||downAt.shift);
+      else doPick(hitIndex(slid? w : downAt.w), w, e.shiftKey||downAt.shift);
     }
   } else {
-    if(!dragging) feed(w);
+    if(!dragging || slid) feed(w);
   }
   downAt=null; dragging=false; draw();
 });
@@ -2182,12 +2313,21 @@ function readout(){
 /* ============================================================ zoom helpers */
 function zoomExtents(){
   if(!S.ents.length){ S.view={cx:0,cy:0,s:2}; draw(); return; }
-  let x0=1e18,y0=1e18,x1=-1e18,y1=-1e18;
-  for(const e of S.ents){ const b=entBox(e);
-    x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1); }
+  let x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,any=false;
+  for(const e of S.ents){
+    const b=entBox(e);
+    if(!b || !isFinite(b.x0) || !isFinite(b.y0) || !isFinite(b.x1) || !isFinite(b.y1)) continue;
+    any=true;
+    x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);
+  }
+  /* One NaN coordinate used to make the scale NaN, and a NaN view cannot be
+     recovered from by any user action. Refuse rather than corrupt. */
+  if(!any){ S.view={cx:0,cy:0,s:2}; draw(); return; }
   const w=Math.max(x1-x0,1), h=Math.max(y1-y0,1);
-  S.view.s=Math.min(W/w, H/h)*0.86;
-  S.view.cx=(x0+x1)/2; S.view.cy=(y0+y1)/2;
+  const sc=Math.min(W/w, H/h)*0.86;
+  S.view.s = (isFinite(sc) && sc>1e-12) ? sc : 2;
+  S.view.cx = isFinite((x0+x1)/2) ? (x0+x1)/2 : 0;
+  S.view.cy = isFinite((y0+y1)/2) ? (y0+y1)/2 : 0;
   draw();
 }
 
@@ -2231,6 +2371,7 @@ function parsePoint(str){
 const ALIAS={};
 for(const [id,T] of Object.entries(TOOLS)){
   ALIAS[id]=id;
+  ALIAS[id.toLowerCase()]=id;      // handleCommand lowercases, so pickLines needs picklines
   if(T.alias) ALIAS[T.alias.toLowerCase()]=id;
 }
 Object.assign(ALIAS,{li:"line",p:"pline",rec:"rect",ci:"circle",dli:"dim",txt:"text",
@@ -2260,6 +2401,8 @@ function handleCommand(raw){
     case "redo": return redo();
     case "z": case "ze": case "zoom": return zoomExtents();
     case "ortho": return toggle("ortho");
+    case "mobile": case "touch": return setMobileUI(!S.touchUI);
+    case "desktop": return setMobileUI(false);
     case "restore": return offerRestore();
     case "clearautosave": return clearAutosave();
     case "grid": case "gridshow": case "showgrid": return toggle("gridShow");
@@ -2284,7 +2427,7 @@ function handleCommand(raw){
 
 /* ============================================================ toggles */
 const TGID={ortho:"tg-ortho",gridShow:"tg-gridshow",gridSnap:"tg-snap",osnap:"tg-osnap",edgeAssist:"tg-edge",weld:"tg-weld"};
-const TGNAME={ortho:"Ortho",gridShow:"Grid",gridSnap:"Grid snap",osnap:"Object snap",edgeAssist:"Reference edge assist",weld:"Weld"};
+const TGNAME={ortho:"Ortho",gridShow:"Grid",gridSnap:"Grid snap",osnap:"Object snap",edgeAssist:"Reference edge assist",weld:"Weld",punch:"Punch mode"};
 function toggle(k){
   S[k]=!S[k];
   syncToggles();
@@ -2685,7 +2828,7 @@ function mkPointerMove(e){
     const P=mkDraw.ent.pts, last=P[P.length-1];
     if(dist(last,p)*S.view.s > 1.6) P.push(p);
   } else if(mkDraw.kind==="shape"){
-    mkDraw.ent.b=mkConstrain(mkDraw.ent.a, p, e.shiftKey, mkDraw.ent.k);
+    mkDraw.ent.b=mkConstrain(mkDraw.ent.a, p, e.shiftKey||S.stickyShift, mkDraw.ent.k);
   } else if(mkDraw.kind==="erase"){
     mkEraseAt(p);
   } else {
@@ -2737,7 +2880,7 @@ function mkEraseAt(p){
   });
 }
 function mkHitMarkup(p){
-  const tol=px(8);
+  const tol=px(tolPx(8));
   for(let i=S.ents.length-1;i>=0;i--){
     const e=S.ents[i];
     if(!mkIsEnt(e)) continue;
@@ -3009,7 +3152,7 @@ function mkHeadPts(tip,from,e){
   return [tip, add(base,mul(n,o)), sub(base,mul(n,o)), tip];
 }
 function mkSVG(e){
-  const out=[], m=e.mk||{}, col=m.col||"#ff3b30";
+  const out=[], m=e.mk||{}, col=okColor(m.col,"#ff3b30");
   const op=(m.alpha==null?1:m.alpha).toFixed(3);
   const w=(m.w||0).toFixed(4);
   const P=p=>`${p.x} ${-p.y}`;
@@ -3025,14 +3168,13 @@ function mkSVG(e){
       out.push(`<rect x="${B.x0}" y="${-B.y1}" width="${B.x1-B.x0}" height="${B.y1-B.y0}" rx="${e.h*0.35}" fill="#ffffff" fill-opacity="0.86" stroke="${col}" stroke-width="${w}" opacity="${op}"/>`);
     B.lines.forEach((ln,i)=>{
       const y=-(e.p.y - i*B.lh);
-      out.push(`<text x="${e.p.x}" y="${y}" font-size="${e.h}" font-family="Arial, sans-serif" fill="${col}" stroke="none" opacity="${op}">${
-        String(ln).replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]))}</text>`);
+      out.push(`<text x="${e.p.x}" y="${y}" font-size="${e.h}" font-family="Arial, sans-serif" fill="${col}" stroke="none" opacity="${op}">${xmlText(ln)}</text>`);
     });
     return out;
   }
   const pts=mkFlatPts(e);
   if(pts.length>1){
-    const fill = (m.fill && mkClosed(e)) ? `fill="${m.fill}" fill-opacity="${(m.fillAlpha==null?.18:m.fillAlpha).toFixed(3)}"` : `fill="none"`;
+    const fill = (m.fill && mkClosed(e)) ? `fill="${okColor(m.fill,"none")}" fill-opacity="${(m.fillAlpha==null?.18:m.fillAlpha).toFixed(3)}"` : `fill="none"`;
     out.push(`<path d="M ${pts.map(P).join(" L ")}" ${fill} stroke="${col}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}"/>`);
   }
   if(e.t==="mshape"&&(e.k==="arrow"||e.k==="darrow")){
@@ -3055,7 +3197,7 @@ function mkDXF(e,ly,g,line,text){
     const B=mkTextBox(e);
     B.lines.forEach((ln,i)=>{
       g(0,"TEXT"); g(8,ly); g(62,aci);
-      g(10,e.p.x); g(20,e.p.y - i*B.lh); g(30,0.0); g(40,e.h); g(1,String(ln));
+      g(10,e.p.x); g(20,e.p.y - i*B.lh); g(30,0.0); g(40,e.h); g(1,dxfStr(ln));
     });
     if(e.box!==false) poly([V(B.x0,B.y0),V(B.x1,B.y0),V(B.x1,B.y1),V(B.x0,B.y1),V(B.x0,B.y0)]);
     if(e.lead){
@@ -3160,10 +3302,21 @@ function flowNewId(){
   do { id="N"+(S.flow.seq++); } while(S.ents.some(e=>e.t==="node"&&e.id===id));
   return id;
 }
+/* Every connector resolved its ends by scanning the whole entity list, once
+   per end, once per frame. On a large diagram that is quadratic and a crafted
+   file could turn it into a hang. Indexed, invalidated when the list changes. */
+let _nodeIdx=null, _nodeIdxSrc=null, _nodeIdxLen=-1;
+function flowInvalidateIndex(){ _nodeIdx=null; _nodeIdxSrc=null; _nodeIdxLen=-1; }
+function flowNodeIndex(){
+  if(_nodeIdx && _nodeIdxSrc===S.ents && _nodeIdxLen===S.ents.length) return _nodeIdx;
+  const m=new Map();
+  for(const e of S.ents) if(e && e.t==="node") m.set(e.id,e);
+  _nodeIdx=m; _nodeIdxSrc=S.ents; _nodeIdxLen=S.ents.length;
+  return m;
+}
 function flowFindNode(id){
   if(id==null) return null;
-  for(const e of S.ents) if(e.t==="node" && e.id===id) return e;
-  return null;
+  return flowNodeIndex().get(id)||null;
 }
 function flowNodeAt(p){
   for(let i=S.ents.length-1;i>=0;i--){
@@ -3215,6 +3368,7 @@ function flowEnd(end){
   return null;
 }
 function flowRoute(e){
+  if(!e) return null;
   if(e.wp && e.wp.length){
     const chain=edgeChain(e);
     if(chain) return e.route==="ortho" ? edgeElbows(chain) : chain;
@@ -3498,7 +3652,7 @@ function flowPointerUp(ev){
   draw();
 }
 function flowHitAt(p){
-  const tol=px(8);
+  const tol=px(tolPx(8));
   for(let i=S.ents.length-1;i>=0;i--){
     const e=S.ents[i];
     if(!flowIsEnt(e)) continue;
@@ -3549,7 +3703,7 @@ function flowGripAt(e,sx,sy){
   if(!e || e.t!=="node") return null;
   const c=[["nw",e.p.x-e.w/2,e.p.y+e.h/2],["ne",e.p.x+e.w/2,e.p.y+e.h/2],
            ["se",e.p.x+e.w/2,e.p.y-e.h/2],["sw",e.p.x-e.w/2,e.p.y-e.h/2]];
-  for(const [k,wx,wy] of c) if(Math.hypot(X(wx)-sx, Y(wy)-sy)<=7) return k;
+  for(const [k,wx,wy] of c) if(Math.hypot(X(wx)-sx, Y(wy)-sy)<=tolPx(9)) return k;
   return null;
 }
 function flowBeginResize(sx,sy){
@@ -3761,8 +3915,12 @@ function flowPropRows(e,H){
 
 /* ---- export ---------------------------------------------------------- */
 function flowSVG(e){
-  const out=[], m=e.mk||{}, P=p=>`${p.x} ${-p.y}`;
-  const esc=t=>String(t).replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  const out=[], P=p=>`${p.x} ${-p.y}`;
+  const raw=e.mk||{};
+  const m = e.t==="node"
+    ? {fill:okColor(raw.fill,"#f4f7fb"), line:okColor(raw.line,"#2d6fa8"), text:okColor(raw.text,"#16202b"), w:raw.w}
+    : {col:okColor(raw.col,"#8fb6d8"), w:raw.w};
+  const esc=t=>xmlText(t);
   if(e.t==="node"){
     const x0=e.p.x-e.w/2, y1=e.p.y+e.h/2, lw=(m.w||0).toFixed(4);
     if(e.k==="term")
@@ -3809,7 +3967,7 @@ function flowDXF(e,ly,g){
     g(0,"SEQEND"); g(8,ly);
   };
   const txt=(p,str,h,center)=>{
-    g(0,"TEXT"); g(8,ly); g(62,aci); g(10,p.x); g(20,p.y); g(30,0.0); g(40,h); g(1,String(str));
+    g(0,"TEXT"); g(8,ly); g(62,aci); g(10,p.x); g(20,p.y); g(30,0.0); g(40,h); g(1,dxfStr(str));
     if(center){ g(72,1); g(11,p.x); g(21,p.y); g(31,0.0); }
   };
   if(e.t==="node"){
@@ -3846,7 +4004,7 @@ let refImgEl=null;         // the live <img>, kept alive across undo
 let autoTimer=null, autoStamp="";
 
 function setDocName(n){
-  S.docName=String(n||"untitled").replace(/\.(b2db|json|dxf)$/i,"");
+  S.docName=safeFileName(String(n||"untitled").replace(/\.(b2db|json|dxf)$/i,""),"untitled");
   const el=document.getElementById("fname");
   if(el) el.textContent=S.docName+" \u00B7 units mm";
 }
@@ -3914,7 +4072,7 @@ function exportPNG(){
   const finish=bl=>{
     if(!bl) return echo("Could not encode that image","warn");
     const u=URL.createObjectURL(bl), a=document.createElement("a");
-    a.href=u; a.download=S.docName+".png"; a.click();
+    a.href=u; a.download=safeFileName(S.docName,"drawing")+".png"; a.click();
     setTimeout(()=>URL.revokeObjectURL(u),2000);
     echo("PNG exported  "+c.width+"\u00D7"+c.height);
   };
@@ -3964,8 +4122,9 @@ function serializeDrawing(withImage){
     ref: refDoc(withImage!==false)
   };
 }
-function applyDrawing(d,label){
-  if(!d || d.app!==FILE_TAG) { echo("That is not a BackToTheDrawingBoard file","warn"); return false; }
+function applyDrawing(raw,label){
+  const d=sanitizeDoc(raw);
+  if(!d){ echo("That is not a valid BackToTheDrawingBoard file","warn"); return false; }
   S.ents=Array.isArray(d.ents)? d.ents : [];
   if(Array.isArray(d.layers) && d.layers.length) S.layers=d.layers;
   if(Array.isArray(d.styles) && d.styles.length) S.styles=d.styles;
@@ -3974,10 +4133,9 @@ function applyDrawing(d,label){
   if(d.view && isFinite(d.view.s) && d.view.s>0) S.view={cx:d.view.cx,cy:d.view.cy,s:d.view.s};
   for(const k of ["gridStep","gridShow","gridSnap","ortho","osnap","weld","edgeAssist","textHeight","groupSeq"])
     if(d[k]!==undefined) S[k]=d[k];
-  if(d.flow) Object.assign(S.flow,d.flow);
-  if(d.mk)   Object.assign(S.mk,d.mk);
-  if(d.png)  Object.assign(S.png,d.png);
+  mergePlain(S.flow,d.flow); mergePlain(S.mk,d.mk); mergePlain(S.png,d.png);
   S.sel.clear(); S.undo.length=0; S.redo.length=0; S.op={}; S.pending=[]; S.base=null;
+  flowInvalidateIndex();
   S.refImage=null; refImgEl=null;
   setDocName(d.name||"untitled");
   if(d.ref && d.ref.src){
@@ -3999,7 +4157,7 @@ function applyDrawing(d,label){
 }
 function saveDrawing(){
   requestString("Save as", S.docName, n=>{
-    setDocName(n||S.docName);
+    setDocName(safeFileName(n||S.docName,"untitled"));
     let txt;
     try{ txt=JSON.stringify(serializeDrawing(true)); }
     catch(_){ setPrompt(); return echo("Could not serialise this drawing","warn"); }
@@ -4009,9 +4167,10 @@ function saveDrawing(){
   });
 }
 function openDrawingText(txt,name){
-  let d=null;
-  try{ d=JSON.parse(txt); }catch(_){ return echo("That file is not valid JSON","warn"); }
-  if(applyDrawing(d,"Opened") && name) setDocName(name);
+  if(typeof txt!=="string" || txt.length>SEC.MAX_DOC) return echo("That file is too large","warn");
+  const d=safeParse(txt);
+  if(!d) return echo("That file is not valid JSON","warn");
+  if(applyDrawing(d,"Opened") && name) setDocName(safeFileName(name,"untitled"));
 }
 
 /* ---- autosave --------------------------------------------------------- */
@@ -4033,8 +4192,8 @@ function autosaveDoc(){
   try{
     const t=localStorage.getItem(AUTOKEY);
     if(!t) return null;
-    const d=JSON.parse(t);
-    return (d && d.app===FILE_TAG && Array.isArray(d.ents) && d.ents.length) ? d : null;
+    const d=sanitizeDoc(safeParse(t));
+    return (d && d.ents.length) ? d : null;
   }catch(_){ return null; }
 }
 function offerRestore(){
@@ -4046,6 +4205,24 @@ function offerRestore(){
       applyDrawing(d,"Autosave restored");
       if(d.imageDropped) echo("Autosave restored - the reference image was too large to keep");
     } else echo("Starting fresh. The autosave stays until you draw something.");
+    setPrompt();
+  });
+}
+/* Everything this app persists, in one place, so it can all be removed in one
+   action. Relevant on a shared or kiosk machine where the browser profile is
+   not yours. */
+const LOCAL_KEYS=[AUTOKEY, CLIPKEY, "b2db.mobile.v1", "ortho.shell.v1", "b2db.shell.v1"];
+function wipeLocalData(){
+  requestString("Erase autosave, clipboard and saved preferences from this browser?  y/n","",v=>{
+    if(/^y/i.test(String(v||""))){
+      let n=0;
+      for(const k of LOCAL_KEYS){
+        try{ if(localStorage.getItem(k)!=null){ localStorage.removeItem(k); n++; } }catch(_){}
+      }
+      clipMem=null; autoStamp="";
+      draw();
+      echo("Wiped "+n+" stored item"+(n===1?"":"s")+" from this browser");
+    } else echo("Nothing wiped");
     setPrompt();
   });
 }
@@ -4072,7 +4249,11 @@ function clipRead(){
   if(clipMem) return clipMem;
   try{
     const t=localStorage.getItem(CLIPKEY);
-    if(t){ const d=JSON.parse(t); if(d && d.kind==="clip" && Array.isArray(d.ents)) return d; }
+    if(t && t.length<=SEC.MAX_DOC){
+      const d=safeParse(t);
+      if(d && d.kind==="clip" && Array.isArray(d.ents))
+        return {kind:"clip", ents:sanitizeEnts(d.ents,S.layers.length,S.styles.length)};
+    }
   }catch(_){}
   return null;
 }
@@ -4198,11 +4379,13 @@ function paintGrips(e){
     const x=Math.round(X(g.x)), y=Math.round(Y(g.y));
     if(g.ghost){
       ctx.strokeStyle=getCSS("--pen"); ctx.lineWidth=1; ctx.setLineDash([]);
-      ctx.beginPath(); ctx.moveTo(x,y-3.5); ctx.lineTo(x+3.5,y); ctx.lineTo(x,y+3.5); ctx.lineTo(x-3.5,y);
+      const gh=S.touchUI?6:3.5;
+      ctx.beginPath(); ctx.moveTo(x,y-gh); ctx.lineTo(x+gh,y); ctx.lineTo(x,y+gh); ctx.lineTo(x-gh,y);
       ctx.closePath(); ctx.stroke();
     } else {
+      const h=S.touchUI?5:3;
       ctx.fillStyle=getCSS("--pen");
-      ctx.fillRect(x-3,y-3,6,6);
+      ctx.fillRect(x-h,y-h,h*2,h*2);
     }
   }
   ctx.restore();
@@ -4215,7 +4398,7 @@ function gripHitAt(sx,sy){
     const L=S.layers[e.li];
     if(L && (!L.on || L.lock)) continue;
     for(const g of gripSet(e))
-      if(Math.hypot(X(g.x)-sx, Y(g.y)-sy)<=7) return {e,g,i};
+      if(Math.hypot(X(g.x)-sx, Y(g.y)-sy)<=tolPx(9)) return {e,g,i};
   }
   return null;
 }
@@ -4403,6 +4586,9 @@ Object.assign(ACTIONS,{
   savedwg:{label:"Save", alias:"SAVE",
     svg:'<path d="M3 4.6A1.6 1.6 0 014.6 3h8.6L17 6.8v8.6A1.6 1.6 0 0115.4 17H4.6A1.6 1.6 0 013 15.4z"/><path d="M6.4 3v5.2h7.2V3"/><rect x="6" y="11.4" width="8" height="5.6"/>',
     run:()=>saveDrawing()},
+  openpdf:{label:"Import PDF", alias:"PDF",
+    svg:'<path d="M4.4 2.6h7l4.2 4.2v10.6H4.4z"/><path d="M11.4 2.6v4.2h4.2"/><path d="M6.8 11h1.4a1.1 1.1 0 010 2.2H6.8v2M10.6 15.2V11h1a1.6 1.6 0 011.6 1.6v1a1.6 1.6 0 01-1.6 1.6z"/>',
+    run:()=>document.getElementById("pdfin").click()},
   opendwg:{label:"Open", alias:"OPEN",
     svg:'<path d="M2.6 15.4V5.2A1.6 1.6 0 014.2 3.6h3.6l2 2.4h6A1.6 1.6 0 0117.4 7.6v7.8A1.6 1.6 0 0115.8 17H4.2a1.6 1.6 0 01-1.6-1.6z"/><path d="M2.6 8.6h14.8"/>',
     run:()=>document.getElementById("b2dbin").click()},
@@ -4418,6 +4604,9 @@ Object.assign(ACTIONS,{
   fclearwp:{label:"Clear Waypoints", alias:"FCWP",
     svg:'<path d="M2.6 15.4h4.2v-6h6.4v-5h4.2"/><path d="M12.4 12.6l4.6 4.6M17 12.6l-4.6 4.6"/>',
     run:()=>flowClearWaypoints()},
+  wipelocal:{label:"Wipe Local Data", alias:"WIPE",
+    svg:'<path d="M3.4 5.6h13.2"/><path d="M5.6 5.6l.8 10.2a1.4 1.4 0 001.4 1.3h4.4a1.4 1.4 0 001.4-1.3l.8-10.2"/><path d="M8 5.6V3.4h4v2.2"/><path d="M8.6 8.8v5M11.4 8.8v5"/>',
+    run:()=>wipeLocalData()},
   dellayer:{label:"Delete Layer", alias:"LAYDEL",
     svg:'<path d="M10 2.6L17.4 6.4 10 10.2 2.6 6.4z"/><path d="M2.6 10.4L10 14.2l7.4-3.8"/><path d="M12.6 15.4h4.8"/>',
     run:()=>deleteLayer(S.cur)}
@@ -4431,6 +4620,618 @@ TOOLS.fnlane={label:"Swimlane", alias:"FLANE", svg:FLOW_TOOLS.fnlane.svg, pts:0,
 ALIAS["fnlane"]="fnlane"; ALIAS["flane"]="fnlane";
 S.mk.per.fnlane={size:2, alpha:1};
 
+/* ============================================================ MOBILE
+   Touch is not a mouse with fat fingers - it has no hover, no modifier keys,
+   no right click, and the thing you are aiming at is under your hand. This
+   block adds the missing input model rather than restyling the old one:
+
+     - two-finger pinch/pan, and a one-finger Pan mode for phones
+     - an aim offset so the point you are placing is above your fingertip
+     - a floating action cluster carrying Finish, Cancel, Undo and the
+       modifiers that used to live on the keyboard
+     - a bottom sheet for Layers / Styles / Properties
+     - touch-sized hit tolerances everywhere, via tolPx()
+
+   The drawing engine is untouched. Everything below is input and shell.     */
+
+S.touchUI=false;
+S.aimOffset=true;
+S.panMode=false;
+S.stickyShift=false;
+
+const AIM_PX=34;
+const ptrs=new Map();
+let gesture=null, swallowUntilLift=false;
+let aimFrom=null, aimSlid=false;
+let punchTap=false;
+
+function tolPx(n){ return S.touchUI ? n*2.6 : n; }
+function coarsePointer(){
+  try{
+    if(window.matchMedia && window.matchMedia("(pointer: coarse)").matches) return true;
+  }catch(_){}
+  return (navigator.maxTouchPoints||0)>1 && !window.matchMedia("(pointer: fine)").matches;
+}
+
+/* ---- pointer bookkeeping ---------------------------------------------- */
+/* The aim offset lifts the sample point above the fingertip so you can see
+   what you are placing. It must NOT apply to a plain tap: a tap is a pick, and
+   a pick has to land on what you actually touched. So the offset only engages
+   once the finger has travelled far enough for the crosshair to be visible and
+   steerable - press and slide to aim, tap to hit. */
+const AIM_ENGAGE_PX=10;
+/* Aim is only for tools that place a point on release. Tools that drag
+   natively - freehand markup, flow node sizing, grips, rubber-band select -
+   would jump 34px mid-drag the moment it engaged, so they are excluded. */
+function aimTool(){
+  return S.touchUI && !gripDrag && S.tool!=="select"
+      && !mkIsTool(S.tool) && !flowIsTool(S.tool);
+}
+function setMouseFrom(e,r){
+  const x=e.clientX-r.left, y=e.clientY-r.top;
+  const touch = S.touchUI && e.pointerType && e.pointerType!=="mouse";
+  if(e.type==="pointerdown"){
+    aimFrom = touch ? {x:e.clientX,y:e.clientY} : null;
+    aimSlid=false;
+  } else if(touch && aimFrom && !aimSlid && aimTool() &&
+            Math.hypot(e.clientX-aimFrom.x, e.clientY-aimFrom.y)>AIM_ENGAGE_PX){
+    aimSlid=true;
+  }
+  S.mouse.sx=x;
+  S.mouse.sy=y - ((touch && aimSlid && S.aimOffset) ? AIM_PX : 0);
+  S.mouse.rawY=y;
+}
+function aimActive(){ return S.touchUI && aimSlid && S.aimOffset; }
+/* True when the finger slid on a place-on-release tool. Desktop would discard
+   that as a stray drag; on touch it is how you aim, so the release still
+   commits - with or without the visual offset. */
+function touchAimDrag(){ return S.touchUI && aimSlid; }
+function cancelActiveDrag(){
+  downAt=null; dragging=false; S.band=null;
+  mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
+}
+function touchDown(e){
+  if(!S.touchUI || e.pointerType==="mouse") return false;
+  ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(ptrs.size>=2){
+    if(!gesture) beginGesture();
+    swallowUntilLift=true;
+    return true;
+  }
+  if(swallowUntilLift) return true;
+  if(S.panMode){
+    panning=true; panFrom={x:e.clientX,y:e.clientY,cx:S.view.cx,cy:S.view.cy};
+    return true;
+  }
+  return false;
+}
+function touchMove(e){
+  if(!S.touchUI || e.pointerType==="mouse") return false;
+  if(ptrs.has(e.pointerId)) ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(gesture){ updateGesture(); return true; }
+  return false;
+}
+function touchUp(e){
+  if(!S.touchUI || e.pointerType==="mouse") return false;
+  ptrs.delete(e.pointerId);
+  if(gesture && ptrs.size<2){ gesture=null; }
+  if(ptrs.size===0){
+    const wasSwallowing=swallowUntilLift;
+    swallowUntilLift=false; aimFrom=null;
+    /* aimEngaged is deliberately NOT cleared here: the pointerup handler runs
+       after this and needs to know whether the finger slid to aim. The next
+       pointerdown resets it. */
+    if(wasSwallowing){ punchTap=false; aimSlid=false; }
+    if(wasSwallowing){ updateActionBar(); draw(); return true; }
+  }
+  return swallowUntilLift;
+}
+function beginGesture(){
+  cancelActiveDrag();
+  punchTap=false;
+  panning=false; panFrom=null;
+  const v=[...ptrs.values()];
+  gesture={d0:Math.max(1,Math.hypot(v[0].x-v[1].x, v[0].y-v[1].y)),
+           c0:{x:(v[0].x+v[1].x)/2, y:(v[0].y+v[1].y)/2},
+           view:{cx:S.view.cx, cy:S.view.cy, s:S.view.s}};
+}
+function updateGesture(){
+  if(ptrs.size<2 || !gesture) return;
+  const v=[...ptrs.values()];
+  const d=Math.max(1,Math.hypot(v[0].x-v[1].x, v[0].y-v[1].y));
+  const c={x:(v[0].x+v[1].x)/2, y:(v[0].y+v[1].y)/2};
+  const r=cv.getBoundingClientRect();
+  const s=Math.max(2e-4, Math.min(2e4, gesture.view.s*(d/gesture.d0)));
+  /* keep the world point that started under the pinch centre under it now */
+  const g=gesture.view;
+  const anchor={ x:(gesture.c0.x-r.left-W/2)/g.s+g.cx,
+                 y:g.cy-(gesture.c0.y-r.top-H/2)/g.s };
+  S.view.s=s;
+  S.view.cx=anchor.x-((c.x-r.left)-W/2)/s;
+  S.view.cy=anchor.y+((c.y-r.top)-H/2)/s;
+  readout(); draw();
+}
+
+/* ---- the aim marker --------------------------------------------------- */
+function mobilePaint(){
+  if(!aimActive() || S.mouse.rawY==null) return;
+  if(S.mouse.rawY - (Y(cursorPoint().y)) < 1) return;
+  if(!ptrs.size && !downAt) return;
+  const c=cursorPoint(), x=Math.round(X(c.x))+.5, y=Math.round(Y(c.y))+.5;
+  const fy=S.mouse.rawY;
+  ctx.save();
+  ctx.strokeStyle=getCSS("--pen"); ctx.lineWidth=1;
+  ctx.globalAlpha=.55;
+  ctx.beginPath(); ctx.moveTo(x,y+6); ctx.lineTo(x,fy-10); ctx.stroke();
+  ctx.globalAlpha=.28;
+  ctx.beginPath(); ctx.arc(x,fy,13,0,TAU); ctx.stroke();
+  ctx.globalAlpha=1;
+  ctx.beginPath(); ctx.arc(x,y,7,0,TAU); ctx.stroke();
+  ctx.restore();
+}
+
+/* ---- shell ------------------------------------------------------------ */
+const MICON={
+  finish:'<path d="M4 11l4.6 4.6L17 5.6"/>',
+  cancel:'<path d="M5 5l10 10M15 5L5 15"/>',
+  undo:'<path d="M4.2 8.4h7.6a4 4 0 010 8H7"/><path d="M7.4 4.6L3.8 8.4l3.6 3.8"/>',
+  pan:'<path d="M10 2.6v14.8M2.6 10h14.8"/><path d="M7.4 5.2L10 2.6l2.6 2.6M7.4 14.8L10 17.4l2.6-2.6M5.2 7.4L2.6 10l2.6 2.6M14.8 7.4L17.4 10l-2.6 2.6"/>',
+  aim:'<circle cx="10" cy="10" r="6"/><path d="M10 1.6v3.2M10 15.2v3.2M1.6 10h3.2M15.2 10h3.2"/>',
+  ortho:'<path d="M3.4 16.6V6.2h10.4"/><path d="M3.4 16.6L16.6 3.4"/>',
+  shift:'<path d="M10 2.6l6 6h-3.4v8.8H7.4V8.6H4z"/>',
+  sheet:'<rect x="2.6" y="2.6" width="14.8" height="14.8" rx="1.6"/><path d="M2.6 12h14.8M7 12v5.4"/>',
+  punch:'<path d="M5 9.4V6.2a1.4 1.4 0 012.8 0V8.8"/><path d="M7.8 8.4V5.4a1.4 1.4 0 012.8 0V8.8"/><path d="M10.6 6a1.4 1.4 0 012.8 0v3"/><path d="M4.4 9.2q-1.2.4-1.2 2.2c0 2.6 1.6 5 4.6 5h2.8c2.8 0 4.8-2 4.8-4.8V8.6a1.4 1.4 0 00-2.8 0"/>'
+};
+function mBtn(id,title,svg,onclick){
+  const b=document.createElement("button");
+  b.type="button"; b.id="mb-"+id; b.title=title; b.setAttribute("aria-label",title);
+  b.innerHTML='<svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'+svg+'</svg>';
+  b.onclick=ev=>{ ev.preventDefault(); onclick(); };
+  return b;
+}
+function buildMobileShell(){
+  if(document.getElementById("mact")) return;
+  const stage=document.getElementById("stage");
+
+  const act=document.createElement("div"); act.id="mact";
+  act.append(
+    mBtn("finish","Finish the current tool",MICON.finish,()=>{
+      if(S.tool==="pline"||S.tool==="spline") finishPline();
+      else if(S.tool==="line"&&S.chain) finishChain();
+      else if(S.pending.length) cancel();
+      updateActionBar();
+    }),
+    mBtn("cancel","Cancel / clear selection",MICON.cancel,()=>{ cancel(); updateActionBar(); }),
+    mBtn("undo","Undo",MICON.undo,()=>{ undo(); updateActionBar(); }),
+    mBtn("pan","One-finger pan",MICON.pan,()=>{ S.panMode=!S.panMode; updateActionBar(); }),
+    mBtn("aim","Aim: press and slide to lift the crosshair above your fingertip. A plain tap always lands where you touched.",MICON.aim,()=>{ S.aimOffset=!S.aimOffset; updateActionBar(); draw(); }),
+    mBtn("ortho","Ortho",MICON.ortho,()=>{ toggle("ortho"); updateActionBar(); }),
+    mBtn("shift","Add to selection",MICON.shift,()=>{ S.stickyShift=!S.stickyShift; updateActionBar(); }),
+    mBtn("sheet","Layers, styles and properties",MICON.sheet,()=>toggleSheet())
+  );
+  /* Punch mode has a keyboard shortcut and a ribbon button, neither of which
+     is much use on a phone. Give it a thumb. */
+  if("punch" in S)
+    act.append(mBtn("punch","Test your might",MICON.punch,()=>{ toggle("punch"); updateActionBar(); }));
+  stage.append(act);
+
+  const sheet=document.createElement("div"); sheet.id="msheet";
+  const grab=document.createElement("button");
+  grab.className="mgrab"; grab.type="button"; grab.title="Close";
+  grab.textContent="\u2014";
+  grab.onclick=()=>toggleSheet(false);
+  const body=document.createElement("div"); body.className="mbody"; body.id="msheet-body";
+  sheet.append(grab,body);
+  stage.append(sheet);
+}
+function toggleSheet(force){
+  const sheet=document.getElementById("msheet");
+  if(!sheet) return;
+  const open = force==null ? !sheet.classList.contains("open") : !!force;
+  const body=document.getElementById("msheet-body");
+  const right=document.getElementById("right");
+  if(open && right && right.parentElement!==body) body.append(right);
+  if(!open && right && right.parentElement===body) document.getElementById("app").append(right);
+  sheet.classList.toggle("open",open);
+  const b=document.getElementById("mb-sheet");
+  if(b) b.setAttribute("aria-pressed",String(open));
+}
+function updateActionBar(){
+  if(!S.touchUI) return;
+  const set=(id,on,dis)=>{
+    const b=document.getElementById("mb-"+id);
+    if(!b) return;
+    b.setAttribute("aria-pressed",String(!!on));
+    b.disabled=!!dis;
+  };
+  /* Finish only lights up when there is genuinely something to finish. */
+  const mid = S.pending.length>0 || !!S.base
+    || (S.op && (S.op.first!=null || S.op.boundary!=null))
+    || (S.tool==="line" && S.chain && S.chainPrev!=null);
+  set("finish",false,!mid);
+  set("cancel",false,false);
+  set("undo",false,!S.undo.length);
+  set("pan",S.panMode,false);
+  set("aim",S.aimOffset,false);
+  set("ortho",S.ortho,false);
+  set("shift",S.stickyShift,false);
+  if("punch" in S) set("punch",S.punch,false);
+}
+function setMobileUI(on,quiet){
+  S.touchUI=!!on;
+  const app=document.getElementById("app");
+  if(S.touchUI){
+    buildMobileShell();
+    app.classList.add("mobile");
+    updateActionBar();
+  } else {
+    toggleSheet(false);
+    app.classList.remove("mobile");
+    S.panMode=false; S.stickyShift=false;
+  }
+  try{ localStorage.setItem("b2db.mobile.v1", S.touchUI?"1":"0"); }catch(_){}
+  resize(); paintRibbon(); paintOptbar(); updateProps(); draw();
+  if(!quiet) echo(S.touchUI? "Mobile mode on \u00B7 two fingers to pinch and pan" : "Desktop mode on");
+}
+/* When a prompt is open the soft keyboard eats the bottom half of the screen,
+   which is exactly where the command bar lives - so move it to the top. */
+function syncAskClass(){
+  const app=document.getElementById("app");
+  if(app) app.classList.toggle("asking", !!(S.touchUI && S.ask));
+}
+
+Object.assign(ACTIONS,{
+  mobileui:{label:"Mobile Mode", alias:"MOBILE",
+    svg:'<rect x="5.6" y="2.4" width="8.8" height="15.2" rx="1.8"/><path d="M8.8 4.8h2.4"/><path d="M10 14.6h.01"/>',
+    run:()=>setMobileUI(!S.touchUI)}
+});
+
+/* ============================================================ SECURITY
+   Threat model for a single-file offline app: everything dangerous arrives as
+   a FILE or as localStorage the user did not write. A .b2db, a DXF, an image
+   or a clipboard blob can all be crafted. The three things they could do
+   before this block existed:
+
+     1. break out of an attribute in exported SVG (`stroke="${col}"`) and land
+        script in a file the user then opens in a browser
+     2. point the reference image at a remote URL, giving a crafted drawing a
+        silent network beacon and tainting the canvas so PNG export dies
+     3. set __proto__ through JSON.parse + Object.assign
+
+   The rule below: nothing from a file is trusted until it has been through
+   sanitizeDoc/sanitizeEnts, and nothing reaches an SVG attribute without
+   okColor() or xmlAttr().                                                   */
+
+const SEC={
+  MAX_DOC:  48*1024*1024,
+  MAX_IMAGE:24*1024*1024,
+  MAX_DXF:  48*1024*1024,
+  MAX_ENTS: 60000,
+  MAX_PTS:  20000,
+  MAX_LAYERS: 512,
+  MAX_STYLES: 128,
+  MAX_TEXT: 4096,
+  MAX_COORD: 1e9,
+  MAX_PDF: 32*1024*1024,
+  MAX_INFLATE: 64*1024*1024,   // a 2 KB deflate stream can become gigabytes
+  MAX_SUBPATHS: 400000,
+  MAX_DEPTH: 8,
+  MAX_KEYS: 256
+};
+/* Every importer funnels through here so no single path can blow the document
+   out past the entity ceiling, however it got its geometry. */
+function capImport(list){
+  const room=Math.max(0, SEC.MAX_ENTS - S.ents.length);
+  if(list.length>room){
+    echo("Import truncated at "+room+" objects (document limit "+SEC.MAX_ENTS+")","warn");
+    return list.slice(0,room);
+  }
+  return list;
+}
+const BAD_KEYS=new Set(["__proto__","constructor","prototype"]);
+const HEX_RE=/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const RGB_RE=/^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*(?:0|1|0?\.\d+)\s*)?\)$/i;
+const NAMED_OK=new Set(["none","transparent","white","black","currentcolor"]);
+const DATA_IMG_RE=/^data:image\/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i;
+
+/* ---- primitives -------------------------------------------------------- */
+function okColor(v,fb){
+  fb=fb===undefined?"#000000":fb;
+  if(typeof v!=="string") return fb;
+  const s=v.trim();
+  if(s.length>64) return fb;
+  if(HEX_RE.test(s)) return s;
+  if(RGB_RE.test(s)) return s;
+  if(NAMED_OK.has(s.toLowerCase())) return s.toLowerCase();
+  return fb;
+}
+/* Labels can also be typed or pasted straight into the app, not only imported,
+   so the spoofing strip is repeated on the way out. Export is the last place
+   text can still be made to read as something it is not. */
+function xmlText(s){
+  return String(s==null?"":s).replace(SPOOF_RE,"")
+    .replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+}
+function xmlAttr(s){
+  return String(s==null?"":s)
+    .replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function dxfStr(s){
+  return String(s==null?"":s).replace(/[\r\n]+/g," ")
+    .replace(/[\u0000-\u001f]/g,"").replace(SPOOF_RE,"").slice(0,SEC.MAX_TEXT);
+}
+function safeNum(v,fb,lim){
+  const n=typeof v==="number"? v : parseFloat(v);
+  if(!Number.isFinite(n)) return fb===undefined?0:fb;
+  const L=lim===undefined?SEC.MAX_COORD:lim;
+  return Math.max(-L,Math.min(L,n));
+}
+function safeInt(v,fb,max){
+  const n=Math.trunc(safeNum(v,fb===undefined?0:fb));
+  if(max!=null && (n<0||n>max)) return fb===undefined?0:fb;
+  return n;
+}
+/* U+202A..202E and U+2066..2069 reorder text without being visible, which is
+   how a label or a filename gets to read as something it is not. Strip them,
+   along with zero-width joiners used for the same trick. */
+const SPOOF_RE=/[\u200b-\u200d\u202a-\u202e\u2066-\u2069\ufeff]/g;
+function safeStr(v,max){
+  if(typeof v!=="string") return "";
+  return v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,"")
+          .replace(SPOOF_RE,"")
+          .slice(0,max||SEC.MAX_TEXT);
+}
+function safeFileName(n,fb){
+  let s=String(n==null?"":n)
+    .replace(/[\u0000-\u001f\u007f]/g,"")
+    .replace(SPOOF_RE,"")
+    .replace(/[\u200e\u200f]/g,"")
+    .replace(/[\\/:*?"<>|]/g,"_")
+    .replace(/\.{2,}/g,".")
+    .replace(/^[.\s]+/,"")
+    .trim();
+  if(!s) s=fb||"untitled";
+  return s.slice(0,80);
+}
+/* JSON.parse alone is safe; JSON.parse feeding Object.assign is not, because
+   an own "__proto__" key goes through the inherited setter. Drop it at parse. */
+function safeParse(txt){
+  if(typeof txt!=="string") return null;
+  try{
+    return JSON.parse(txt,function(k,v){ return BAD_KEYS.has(k)? undefined : v; });
+  }catch(_){ return null; }
+}
+function mergePlain(target,src,allow,depth){
+  depth=depth||0;
+  if(depth>SEC.MAX_DEPTH) return;
+  if(!src || typeof src!=="object" || Array.isArray(src)) return;
+  for(const k of Object.keys(src).slice(0,SEC.MAX_KEYS)){
+    if(BAD_KEYS.has(k)) continue;
+    if(allow && !allow.has(k)) continue;
+    const v=src[k];
+    const t=typeof v;
+    if(t==="string"){ target[k]=safeStr(v,256); }
+    else if(t==="number"){ if(Number.isFinite(v)) target[k]=v; }
+    else if(t==="boolean"){ target[k]=v; }
+    else if(v && t==="object" && !Array.isArray(v)){
+      const sub={}; mergePlain(sub,v,null,depth+1); target[k]=sub;
+    }
+  }
+}
+
+/* ---- file gatekeeping -------------------------------------------------- */
+function checkUpload(f,extRe,maxBytes,label){
+  if(!f) return false;
+  if(typeof f.size==="number" && f.size>maxBytes){
+    echo(label+" is too large ("+(f.size/1048576).toFixed(1)+" MB, limit "+(maxBytes/1048576|0)+" MB)","warn");
+    return false;
+  }
+  if(!extRe.test(String(f.name||""))){
+    echo("Wrong file type for "+label,"warn");
+    return false;
+  }
+  return true;
+}
+/* The accept= attribute and file.type are both advisory - a renamed or
+   spoofed file passes either. Magic bytes are not advisory. */
+function sniffImage(buf){
+  const b=new Uint8Array(buf), at=(sig,off)=>sig.every((v,i)=>b[(off||0)+i]===v);
+  if(b.length<12) return null;
+  if(at([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a])) return "image/png";
+  if(at([0xff,0xd8,0xff]))                          return "image/jpeg";
+  if(at([0x52,0x49,0x46,0x46]) && at([0x57,0x45,0x42,0x50],8)) return "image/webp";
+  if(at([0x47,0x49,0x46,0x38]))                     return "image/gif";
+  return null;
+}
+function okImageSrc(s){
+  return typeof s==="string" && s.length<=SEC.MAX_IMAGE && DATA_IMG_RE.test(s);
+}
+
+/* ---- document sanitiser ------------------------------------------------ */
+function sanPt(v){
+  if(!v || typeof v!=="object") return null;
+  return V(safeNum(v.x,0), safeNum(v.y,0));
+}
+function sanPts(a){
+  if(!Array.isArray(a)) return [];
+  const out=[];
+  for(const p of a.slice(0,SEC.MAX_PTS)){ const q=sanPt(p); if(q) out.push(q); }
+  return out;
+}
+function sanMk(m,kind){
+  const o={};
+  if(!m || typeof m!=="object") m={};
+  if(kind==="node"){
+    o.fill=okColor(m.fill,"#f4f7fb"); o.line=okColor(m.line,"#2d6fa8");
+    o.text=okColor(m.text,"#16202b"); o.w=Math.abs(safeNum(m.w,1,1e6));
+    return o;
+  }
+  o.col=okColor(m.col,"#ff3b30");
+  o.w=Math.abs(safeNum(m.w,1,1e6));
+  o.alpha=Math.max(0,Math.min(1,safeNum(m.alpha,1,1)));
+  o.blend = m.blend==="multiply" ? "multiply" : null;
+  o.fill = m.fill ? okColor(m.fill,null) : null;
+  o.fillAlpha=Math.max(0,Math.min(1,safeNum(m.fillAlpha,.18,1)));
+  return o;
+}
+function sanEnd(v){
+  if(!v || typeof v!=="object") return null;
+  if(typeof v.id==="string") return {id:safeStr(v.id,64)};
+  const p=sanPt(v.pt);
+  return p? {pt:p} : null;
+}
+const NODE_KINDS=new Set(["proc","dec","term","data","note","lane"]);
+const SHAPE_KINDS=new Set(["line","arrow","darrow","rect","ellipse","cloud"]);
+function sanEnt(e,nLayers,nStyles){
+  if(!e || typeof e!=="object") return null;
+  /* Both ends of the range: a negative index passed the old upper-bound-only
+     check and produced entities pointing at S.layers[-1000000000]. */
+  const li=safeInt(e.li,0), si=safeInt(e.si,0);
+  const base={ li: (li>=0 && li<nLayers) ? li : 0 };
+  if(e.si!=null) base.si = (si>=0 && si<nStyles) ? si : 0;
+  if(typeof e.gid==="string") base.gid=safeStr(e.gid,64);
+  const P=k=>sanPt(e[k]);
+  switch(e.t){
+    case "line": { const a=P("a"), b=P("b"); return a&&b? Object.assign(base,{t:"line",a,b}) : null; }
+    case "pline": case "spline": {
+      const pts=sanPts(e.pts);
+      return pts.length>1? Object.assign(base,{t:e.t,pts,closed:!!e.closed}) : null;
+    }
+    case "circle": { const c=P("c"); return c? Object.assign(base,{t:"circle",c,r:Math.abs(safeNum(e.r,1))||1}) : null; }
+    case "arc": { const c=P("c"); return c? Object.assign(base,{t:"arc",c,r:Math.abs(safeNum(e.r,1))||1,
+      a0:safeNum(e.a0,0,1e4), a1:safeNum(e.a1,0,1e4)}) : null; }
+    case "ellipse": { const c=P("c"); return c? Object.assign(base,{t:"ellipse",c,
+      rx:Math.abs(safeNum(e.rx,1))||1, ry:Math.abs(safeNum(e.ry,1))||1,
+      rot:safeNum(e.rot,0,1e4), a0:safeNum(e.a0,0,1e4), sw:safeNum(e.sw,TAU,1e4)}) : null; }
+    case "text": { const p=P("p"); return p? Object.assign(base,{t:"text",p,
+      s:safeStr(e.s), h:Math.abs(safeNum(e.h,2.5))||2.5, rot:safeNum(e.rot,0,1e4)}) : null; }
+    case "dim": { const a=P("a"), b=P("b"); return a&&b? Object.assign(base,{t:"dim",a,b,
+      off:safeNum(e.off,0), h:Math.abs(safeNum(e.h,2.5))||2.5}) : null; }
+    case "ink": {
+      const pts=sanPts(e.pts);
+      return pts.length? Object.assign(base,{t:"ink",pts,closed:!!e.closed,cloud:!!e.cloud,
+        bump:Math.abs(safeNum(e.bump,0)), mk:sanMk(e.mk)}) : null;
+    }
+    case "mshape": {
+      const a=P("a"), b=P("b");
+      if(!a||!b||!SHAPE_KINDS.has(e.k)) return null;
+      return Object.assign(base,{t:"mshape",k:e.k,a,b,
+        hl:Math.abs(safeNum(e.hl,0)), bump:Math.abs(safeNum(e.bump,0)), mk:sanMk(e.mk)});
+    }
+    case "mtext": {
+      const p=P("p");
+      if(!p) return null;
+      const o=Object.assign(base,{t:"mtext",p,s:safeStr(e.s),
+        h:Math.abs(safeNum(e.h,2.5))||2.5, hl:Math.abs(safeNum(e.hl,0)),
+        box:e.box!==false, mk:sanMk(e.mk)});
+      const lead=P("lead"); o.lead=lead||null;
+      if(e.boxCol!=null) o.boxCol=okColor(e.boxCol,null);
+      return o;
+    }
+    case "node": {
+      const p=P("p");
+      if(!p || !NODE_KINDS.has(e.k)) return null;
+      const o=Object.assign(base,{t:"node",k:e.k,p,
+        id:safeStr(e.id,64)||("N"+Math.floor(Math.random()*1e9)),
+        w:Math.abs(safeNum(e.w,10))||10, h:Math.abs(safeNum(e.h,10))||10,
+        s:safeStr(e.s), fs:Math.abs(safeNum(e.fs,2))||2, mk:sanMk(e.mk,"node")});
+      if(e.k==="lane") o.dir = e.dir==="h" ? "h" : "v";
+      return o;
+    }
+    case "edge": {
+      const from=sanEnd(e.from), to=sanEnd(e.to);
+      if(!from||!to) return null;
+      const o=Object.assign(base,{t:"edge",from,to,
+        route: e.route==="ortho" ? "ortho" : "straight",
+        a0:!!e.a0, a1:e.a1!==false, s:safeStr(e.s),
+        fs:Math.abs(safeNum(e.fs,2))||2, hl:Math.abs(safeNum(e.hl,0)), mk:sanMk(e.mk)});
+      const wp=sanPts(e.wp);
+      if(wp.length) o.wp=wp.slice(0,256);
+      return o;
+    }
+  }
+  return null;                       // unknown type: dropped, never rendered
+}
+function sanitizeEnts(arr,nLayers,nStyles){
+  if(!Array.isArray(arr)) return [];
+  const out=[];
+  for(const e of arr.slice(0,SEC.MAX_ENTS)){
+    const q=sanEnt(e,nLayers||1,nStyles||1);
+    if(q) out.push(q);
+  }
+  return out;
+}
+function sanLayers(a){
+  const out=[];
+  if(Array.isArray(a)) for(const L of a.slice(0,SEC.MAX_LAYERS)){
+    if(!L || typeof L!=="object") continue;
+    out.push({name:safeStr(L.name,64)||"LAYER", aci:safeInt(L.aci,7,255),
+              on:L.on!==false, lock:!!L.lock});
+  }
+  return out.length? out : [{name:"0",aci:7,on:true,lock:false}];
+}
+function sanStyles(a){
+  const out=[];
+  if(Array.isArray(a)) for(const st of a.slice(0,SEC.MAX_STYLES)){
+    if(!st || typeof st!=="object") continue;
+    const pat=Array.isArray(st.pat)? st.pat.slice(0,16).map(v=>Math.abs(safeNum(v,1,1e4))) : null;
+    out.push({name:safeStr(st.name,64)||"STYLE", w:Math.abs(safeNum(st.w,0.25,1e3)),
+              pat: pat && pat.length? pat : null});
+  }
+  return out.length? out : [{name:"Continuous",w:0.25,pat:null}];
+}
+function sanRef(r){
+  if(!r || typeof r!=="object") return null;
+  if(!okImageSrc(r.src)) return null;         // data: raster only, never a URL
+  const crop = (r.crop && typeof r.crop==="object") ? {
+    sx:safeNum(r.crop.sx,0), sy:safeNum(r.crop.sy,0),
+    sw:Math.abs(safeNum(r.crop.sw,1))||1, sh:Math.abs(safeNum(r.crop.sh,1))||1
+  } : null;
+  return {
+    src:r.src, name:safeStr(r.name,120)||"image",
+    x:safeNum(r.x,0), y:safeNum(r.y,0),
+    w:Math.abs(safeNum(r.w,10))||10, h:Math.abs(safeNum(r.h,10))||10,
+    opacity:Math.max(0,Math.min(1,safeNum(r.opacity,.5,1))),
+    visible:r.visible!==false, locked:!!r.locked,
+    rot:safeNum(r.rot,0,1e4), crop, mode: r.mode==="edges"?"edges":"fade"
+  };
+}
+function sanitizeDoc(d){
+  if(!d || typeof d!=="object" || Array.isArray(d)) return null;
+  if(d.app!==FILE_TAG) return null;
+  const layers=sanLayers(d.layers), styles=sanStyles(d.styles);
+  const out={
+    app:FILE_TAG, version:1,
+    saved:safeStr(d.saved,40),
+    name:safeFileName(d.name,"untitled"),
+    layers, styles,
+    ents:sanitizeEnts(d.ents,layers.length,styles.length),
+    cur:safeInt(d.cur,0,layers.length-1),
+    curStyle:safeInt(d.curStyle,0,styles.length-1),
+    gridStep:Math.abs(safeNum(d.gridStep,10,1e6))||10,
+    gridShow:d.gridShow!==false, gridSnap:d.gridSnap!==false,
+    ortho:!!d.ortho, osnap:d.osnap!==false, weld:!!d.weld, edgeAssist:!!d.edgeAssist,
+    textHeight:Math.abs(safeNum(d.textHeight,2.5,1e5))||2.5,
+    groupSeq:Math.max(1,safeInt(d.groupSeq,1)),
+    imageDropped:!!d.imageDropped,
+    ref:sanRef(d.ref)
+  };
+  if(d.view && typeof d.view==="object"){
+    const s=safeNum(d.view.s,2,1e6);
+    out.view={cx:safeNum(d.view.cx,0), cy:safeNum(d.view.cy,0), s: s>1e-9? s : 2};
+  }
+  out.flow={}; mergePlain(out.flow,d.flow);
+  out.mk={};   mergePlain(out.mk,d.mk);
+  out.png={};  mergePlain(out.png,d.png);
+  if(out.png.bg!=null) out.png.bg = out.png.bg==="transparent" ? "transparent" : okColor(out.png.bg,"#ffffff");
+  if(out.flow.fill!=null) out.flow.fill=okColor(out.flow.fill,"#f4f7fb");
+  if(out.flow.line!=null) out.flow.line=okColor(out.flow.line,"#2d6fa8");
+  if(out.flow.text!=null) out.flow.text=okColor(out.flow.text,"#16202b");
+  if(out.flow.edgeCol!=null) out.flow.edgeCol=okColor(out.flow.edgeCol,"#8fb6d8");
+  if(out.mk.col!=null) out.mk.col=okColor(out.mk.col,"#ff3b30");
+  return out;
+}
+
 /* ============================================================ keyboard */
 window.addEventListener("keydown",e=>{
   const typing = !!S.ask || (document.activeElement===cmdin && cmdin.value.length>0);
@@ -4441,6 +5242,7 @@ window.addEventListener("keydown",e=>{
   if(e.key==="F3"){ e.preventDefault(); return toggle("osnap"); }
   if(e.key==="F4"){ e.preventDefault(); return toggle("weld"); }
   if(e.key==="F6"){ e.preventDefault(); return toggle("edgeAssist"); }
+  if(e.key==="F10"){ e.preventDefault(); return toggle("punch"); }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="z"){ e.preventDefault(); return e.shiftKey?redo():undo(); }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="y"){ e.preventDefault(); return redo(); }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="a"){ e.preventDefault(); S.sel=new Set(S.ents.map((_,i)=>i)); draw(); updateProps(); return; }
@@ -4467,10 +5269,10 @@ const RIBBON={
     {name:"Draw", big:"line",
       small:["pline","rect","circle","arc","ellipse","pellipse","polygon","arccenter","spline","pickLines"]},
     {name:"Modify", big:"move",
-      small:["copy","rotate","mirror","scale","trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","array","explode","erase","group","ungroup","clipcut","clipcopy","clippaste"]},
+      small:["select","copy","rotate","mirror","scale","trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","array","explode","erase","group","ungroup","clipcut","clipcopy","clippaste"]},
     {name:"Annotate", big:"dim", small:["text"]},
     {name:"Line Style", custom:"style"},
-    {name:"Layers", custom:"layers"}
+    {name:"Layers", custom:"layers", small:["dellayer"]}
   ],
   Markup:[
     {name:"Freehand", big:"mkpencil", small:["mkmarker","mkhighlight","mklasso","mkerase"]},
@@ -4487,16 +5289,17 @@ const RIBBON={
       small:["falignl","falignc","falignt","falignm","fdisth","fdistv","fautosize"]}
   ],
   Insert:[
-    {name:"Drawing", big:"savedwg", small:["opendwg","newdwg","undo","redo"]},
+    {name:"Drawing", big:"savedwg", small:["opendwg","newdwg","undo","redo","wipelocal"]},
     {name:"Reference", big:"refimage", small:["imgmove","imgcal","imgstraight","imgcrop","imglock","imgtoggle","imgresetcrop","imgremove"]},
-    {name:"Import", big:"opendxf"},
+    {name:"Import", big:"opendxf", small:["openpdf"]},
     {name:"Export", big:"exportpng", small:["copyimage","exportsvg","exportdxf"]},
     {name:"Image", custom:"png"}
   ],
   View:[
-    {name:"Navigate", big:"zoomext"},
+    {name:"Navigate", big:"zoomext", small:["mobileui"]},
     {name:"Drafting aids", custom:"toggles"},
-    {name:"Grid", custom:"grid"}
+    {name:"Grid", custom:"grid"},
+    {name:"Combat", custom:"punch"}
   ]
 };
 let ribbonTab="Home";
@@ -4544,6 +5347,7 @@ function paintRibbon(){
     if(P.custom==="layers")  body.append(layerWidget());
     if(P.custom==="style")   body.append(styleWidget());
     if(P.custom==="toggles") body.append(toggleWidget());
+    if(P.custom==="punch")   body.append(punchWidget());
     if(P.custom==="grid")    body.append(gridWidget());
     if(P.custom==="pen")     body.append(penWidget());
     if(P.custom==="flow")    body.append(flowWidget());
@@ -4606,6 +5410,139 @@ function toggleWidget(){
   });
   wrap.append(col,col2); return wrap;
 }
+function punchWidget(){
+  const wrap=document.createElement("div"); wrap.className="rstack";
+  const b=document.createElement("button"); b.className="big"; b.dataset.tg="punch";
+  b.setAttribute("aria-pressed",String(S.punch));
+  b.title="Punch mode: click an object on the canvas to hit it. Four hits destroys it. (F10)  \u2014  purely for stress relief; undo brings anything back";
+  b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true">'+
+    '<path d="M5 9.4V6.2a1.4 1.4 0 012.8 0V8.8"/>'+
+    '<path d="M7.8 8.4V5.4a1.4 1.4 0 012.8 0V8.8"/>'+
+    '<path d="M10.6 6a1.4 1.4 0 012.8 0v3"/>'+
+    '<path d="M4.4 9.2q-1.2.4-1.2 2.2c0 2.6 1.6 5 4.6 5h2.8c2.8 0 4.8-2 4.8-4.8V8.6a1.4 1.4 0 00-2.8 0"/>'+
+    '<path d="M15.6 4.2l1.8-1.4M16.4 6.6l2.2-.4M14 3l.4-2.2"/>'+
+    '</svg><span>Test your might</span>';
+  b.onclick=()=>toggle("punch");
+  const l=document.createElement("div"); l.style.cssText="font-size:10px;color:var(--ink-faint);text-align:center";
+  l.textContent="F10";
+  wrap.append(b,l); return wrap;
+}
+/* ============================================================ punch mode
+   Test Your Might. When S.punch is on, a left-click on the canvas hits the
+   object under the cursor. Four hits destroys it. Destruction goes through
+   snap() so undo (Ctrl+Z) brings the object straight back. Pure stress relief,
+   nothing here mutates geometry except the final removal. */
+const PUNCH_PALETTE=["#f87171","#fbbf24","#fb923c","#dc2626","#ffffff"];
+const PUNCH_TEXT=[
+  {hp:1,text:"Crack!",color:"#fbbf24"},
+  {hp:2,text:"Wallop!",color:"#fb923c"},
+  {hp:3,text:"Critical!",color:"#f87171"},
+  {hp:4,text:"K.O.!",color:"#dc2626"}
+];
+let punchKills=0;
+const punchFX=(function(){
+  let host=null, banner=null, ac=null;
+  function fxHost(){
+    if(!host){ host=document.createElement("div"); host.className="punch-fx-host";
+      host.id="punch-particles"; document.body.appendChild(host); }
+    return host;
+  }
+  function fatalityHost(){
+    if(!banner){ banner=document.createElement("div"); banner.id="punch-fatality";
+      banner.innerHTML="<span>Fatality</span>"; document.body.appendChild(banner); }
+    return banner;
+  }
+  function ctx(){
+    if(!ac){ try{ ac=new (window.AudioContext||window.webkitAudioContext)(); }catch(_){ return null; } }
+    if(ac.state==="suspended") ac.resume();
+    return ac;
+  }
+  function hitTone(level){
+    const c=ctx(); if(!c) return; const now=c.currentTime;
+    const o=c.createOscillator(), g=c.createGain(); o.type="square";
+    const f=220-level*30;
+    o.frequency.setValueAtTime(f*2,now); o.frequency.exponentialRampToValueAtTime(f*0.5,now+0.15);
+    g.gain.setValueAtTime(0.14,now); g.gain.exponentialRampToValueAtTime(0.001,now+0.2);
+    o.connect(g).connect(c.destination); o.start(now); o.stop(now+0.2);
+  }
+  function boom(){
+    const c=ctx(); if(!c) return; const now=c.currentTime;
+    const n=c.sampleRate*0.4, buf=c.createBuffer(1,n,c.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/n,2);
+    const src=c.createBufferSource(); src.buffer=buf;
+    const ng=c.createGain(); ng.gain.setValueAtTime(0.3,now); ng.gain.exponentialRampToValueAtTime(0.001,now+0.4);
+    const fl=c.createBiquadFilter(); fl.type="lowpass";
+    fl.frequency.setValueAtTime(2000,now); fl.frequency.exponentialRampToValueAtTime(100,now+0.4);
+    src.connect(fl).connect(ng).connect(c.destination); src.start(now);
+    const o=c.createOscillator(), og=c.createGain(); o.type="sawtooth";
+    o.frequency.setValueAtTime(80,now); o.frequency.exponentialRampToValueAtTime(30,now+0.4);
+    og.gain.setValueAtTime(0.24,now); og.gain.exponentialRampToValueAtTime(0.001,now+0.5);
+    o.connect(og).connect(c.destination); o.start(now); o.stop(now+0.5);
+  }
+  function fatalChord(){
+    const c=ctx(); if(!c) return; const now=c.currentTime;
+    [110,138.6,164.8].forEach(fr=>{
+      const o=c.createOscillator(), g=c.createGain(); o.type="sawtooth";
+      o.frequency.setValueAtTime(fr,now); o.frequency.exponentialRampToValueAtTime(fr*0.5,now+1.5);
+      g.gain.setValueAtTime(0,now); g.gain.linearRampToValueAtTime(0.07,now+0.1);
+      g.gain.linearRampToValueAtTime(0.07,now+1.0); g.gain.exponentialRampToValueAtTime(0.001,now+1.6);
+      o.connect(g).connect(c.destination); o.start(now); o.stop(now+1.6);
+    });
+  }
+  function particles(x,y,count){
+    const h=fxHost();
+    for(let i=0;i<count;i++){
+      const p=document.createElement("div"); p.className="punch-particle";
+      p.style.left=x+"px"; p.style.top=y+"px";
+      p.style.background=PUNCH_PALETTE[(Math.random()*PUNCH_PALETTE.length)|0];
+      const a=Math.random()*Math.PI*2, sp=80+Math.random()*220;
+      p.style.setProperty("--px",Math.cos(a)*sp+"px");
+      p.style.setProperty("--py",(Math.sin(a)*sp+60)+"px");
+      p.style.setProperty("--pr",(Math.random()*720-360)+"deg");
+      const sz=4+Math.random()*8; p.style.width=p.style.height=sz+"px";
+      if(Math.random()<0.3) p.style.borderRadius="50%";
+      h.appendChild(p); setTimeout(()=>p.remove(),950);
+    }
+  }
+  function floater(x,y,hp){
+    const cfg=PUNCH_TEXT.find(t=>t.hp===Math.min(hp,4))||PUNCH_TEXT[0];
+    const t=document.createElement("div"); t.className="punch-text";
+    t.textContent=cfg.text; t.style.color=cfg.color;
+    t.style.left=(x-70)+"px"; t.style.top=(y-30)+"px";
+    document.body.appendChild(t); setTimeout(()=>t.remove(),1000);
+  }
+  function shake(){
+    const app=document.getElementById("app");
+    app.classList.remove("punch-shake"); void app.offsetWidth; app.classList.add("punch-shake");
+    setTimeout(()=>app.classList.remove("punch-shake"),450);
+  }
+  return {
+    hit(x,y,hp){ floater(x,y,hp); particles(x,y,8+hp*6); hitTone(hp); },
+    destroy(x,y){ particles(x,y,42); boom(); shake(); },
+    fatality(){ const b=fatalityHost(); b.classList.remove("show"); void b.offsetWidth;
+      b.classList.add("show"); fatalChord(); setTimeout(()=>b.classList.remove("show"),2000); }
+  };
+})();
+function punchAt(e){
+  const p=cursorPoint();
+  const i=hitIndex(p);
+  const x=e.clientX, y=e.clientY;
+  if(i<0){ punchFX.hit(x,y,1); echo("Whiff \u2014 nothing to hit there","warn"); return; }
+  const ent=S.ents[i];
+  ent._hp=(ent._hp||0)+1;
+  punchFX.hit(x,y,ent._hp);
+  if(ent._hp>=4){
+    snap();                         // undoable removal
+    const idx=S.ents.indexOf(ent);
+    if(idx>=0) S.ents.splice(idx,1);
+    S.sel.clear(); resetNudge();
+    const orphans=flowPrune();
+    punchFX.destroy(x,y);
+    if(++punchKills%3===0) punchFX.fatality();
+    echo("Object destroyed"+(orphans?"  ("+orphans+" connector"+(orphans>1?"s":"")+" dropped)":"")+"  \u2014  Ctrl+Z to revive");
+  }
+  draw();
+}
 function gridWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
   const i=document.createElement("input"); i.type="number"; i.step="any"; i.value=S.gridStep;
@@ -4621,6 +5558,8 @@ function syncToggles(){
   }
   document.querySelectorAll("[data-tg]").forEach(b=>
     b.setAttribute("aria-pressed",String(S[b.dataset.tg])));
+  const app=document.getElementById("app");
+  if(app) app.classList.toggle("punch-armed", !!S.punch);
 }
 
 /* ============================================================ options bar
@@ -4783,7 +5722,8 @@ function paintStyles(){
     w.onclick=ev=>ev.stopPropagation();
     w.onchange=()=>{ const v=parseFloat(w.value); if(isFinite(v)&&v>0) st.w=v; else w.value=st.w; draw(); };
     const pat=document.createElement("button"); pat.className="spat"; pat.title="Click to cycle the dash pattern";
-    pat.innerHTML='<svg viewBox="0 0 28 14"><line x1="2" y1="7" x2="26" y2="7" stroke-dasharray="'+(st.pat?st.pat.join(","):"")+'"/></svg>';
+    const dash=(st.pat||[]).map(v=>{ const n=Math.abs(Number(v)); return isFinite(n)? n : 1; }).join(",");
+    pat.innerHTML='<svg viewBox="0 0 28 14"><line x1="2" y1="7" x2="26" y2="7" stroke-dasharray="'+dash+'"/></svg>';
     pat.onclick=ev=>{ ev.stopPropagation(); st.pat=nextPattern(st.pat); paintStyles(); draw(); };
     d.append(sw,nm,w,pat); host.append(d);
   });
@@ -4884,6 +5824,8 @@ function updateProps(){
     const h=document.createElement("div"); h.className="hint";
     h.innerHTML=
       "<kbd>MMB</kbd> or <kbd>Alt</kbd>+drag pan &middot; wheel zoom &middot; <kbd>Z</kbd> extents<br>"+
+      "<b style=\"color:#8fd0a8\">Touch</b>: two fingers pinch and pan &middot; <kbd>MOBILE</kbd> toggles the touch shell<br>"+
+      "Mobile buttons: Finish, Cancel, Undo, one-finger Pan, Aim offset, Ortho, sticky Shift, panel sheet<br>"+
       "<kbd>&larr;&uarr;&rarr;&darr;</kbd> nudge selection &middot; <kbd>Shift</kbd> &times;10 &middot; <kbd>Ctrl</kbd> &divide;10<br>"+
       "<b style=\"color:var(--snap)\">Weld</b> on: points sharing a corner move together, so<br>"+
       "attached walls and their dimensions follow. <kbd>F4</kbd> toggles.<br>"+
@@ -4897,6 +5839,7 @@ function updateProps(){
       "Select anything and drag its square handles to reshape it &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd>/<kbd>X</kbd>/<kbd>V</kbd> clipboard<br>"+
       "<kbd>Ctrl</kbd>+<kbd>S</kbd> save a .b2db &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open one &middot; <kbd>PNG</kbd> export &middot; <kbd>CPIMG</kbd> copy image<br>"+
       "Work autosaves to this browser &middot; <kbd>RESTORE</kbd> brings it back &middot; layers have an \u2715 to delete<br>"+
+      "Imported files are sanitised before they touch the drawing &middot; the app makes no network calls<br>"+
       "<kbd>F7</kbd> show grid &middot; <kbd>F8</kbd> ortho &middot; <kbd>F9</kbd> grid snap &middot; <kbd>F3</kbd> osnap &middot; <kbd>F6</kbd> image-edge snap<br>"+
       "Type <kbd>x,y</kbd> <kbd>@dx,dy</kbd> <kbd>len&lt;ang</kbd> or a bare length<br>"+
       "Drag right = window, drag left = crossing<br>"+
@@ -5042,6 +5985,7 @@ function exportDXF(){
 
 /* ============================================================ DXF import */
 function importDXF(txt){
+  if(typeof txt!=="string" || txt.length>SEC.MAX_DXF) return echo("That DXF is too large","warn");
   const lines=txt.split(/\r\n|\r|\n/);
   const pairs=[];
   for(let i=0;i+1<lines.length;i+=2){
@@ -5052,10 +5996,13 @@ function importDXF(txt){
   const ents=[], layerNames=[];
   let i=0, inEnt=false;
   const layerIndex=n=>{
-    const N=(n||"0").toUpperCase();
+    const N=safeStr(String(n||"0"),64).toUpperCase()||"0";
     let k=S.layers.findIndex(l=>l.name.toUpperCase()===N);
-    if(k<0){ S.layers.push({name:N,aci:ACI[S.layers.length%ACI.length].i,on:true,lock:false});
-             k=S.layers.length-1; }
+    if(k<0){
+      if(S.layers.length>=SEC.MAX_LAYERS) return 0;
+      S.layers.push({name:N,aci:ACI[S.layers.length%ACI.length].i,on:true,lock:false});
+      k=S.layers.length-1;
+    }
     return k;
   };
   // locate ENTITIES section
@@ -5118,11 +6065,16 @@ function importDXF(txt){
   if(verts && verts.pts.length>1) ents.push({t:"pline",li:plineLayer,closed:plineClosed,pts:verts.pts});
   for(const e of ents) delete e._lw;
   const good=ents.filter(e=> e.t!=="pline" || e.pts.length>1);
-  if(!good.length){ echo("No supported entities found in that DXF","warn"); paintLayers(); return; }
+  /* The DXF parser trusts its input by construction, so everything it builds
+     goes through the same sanitiser a .b2db does before it joins the drawing. */
+  const clean=capImport(sanitizeEnts(good, S.layers.length, S.styles.length));
+  if(!clean.length){ echo("No supported entities found in that DXF","warn"); paintLayers(); return; }
   snap();
-  S.ents.push(...good);
+  S.ents.push(...clean);
+  flowInvalidateIndex();
   paintLayers(); zoomExtents(); updateProps();
-  echo("Imported "+good.length+" objects");
+  echo("Imported "+clean.length+" objects"+
+       (clean.length<good.length? "  ("+(good.length-clean.length)+" rejected)":""));
 }
 
 /* ============================================================ SVG export */
@@ -5143,7 +6095,7 @@ function exportSVG(){
     const L=S.layers[e.li]||S.layers[0]; if(!L.on) continue;
     if(flowIsEnt(e)){ o.push(...flowSVG(e)); continue; }
     if(mkIsEnt(e)){ o.push(...mkSVG(e)); continue; }
-    const col=aciColor(L.aci)==="#e8edf4"?"#000000":aciColor(L.aci);
+    const col=okColor(aciColor(L.aci)==="#e8edf4"?"#000000":aciColor(L.aci),"#000000");
     const st=`stroke="${col}"`;
     if(e.t==="line") o.push(`<line x1="${e.a.x}" y1="${-e.a.y}" x2="${e.b.x}" y2="${-e.b.y}" ${st}/>`);
     if(e.t==="circle") o.push(`<circle cx="${e.c.x}" cy="${-e.c.y}" r="${e.r}" ${st}/>`);
@@ -5162,9 +6114,9 @@ function exportSVG(){
     }
   }
   o.push("</g></svg>");
-  download(o.join("\n"),"drawing.svg","image/svg+xml");
+  download(o.join("\n"),safeFileName(S.docName,"drawing")+".svg","image/svg+xml");
   echo("Exported SVG");
-  function esc(s){return String(s).replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]))}
+  function esc(s){return xmlText(s)}
 }
 
 
@@ -5179,13 +6131,30 @@ function latin1(bytes){
   for(let i=0;i<bytes.length;i+=CH) out+=String.fromCharCode.apply(null,bytes.subarray(i,i+CH));
   return out;
 }
+/* Read the inflated stream in chunks and abort past the ceiling. Buffering it
+   whole first (the old Response.arrayBuffer path) means a decompression bomb
+   has already won by the time you could check its size. */
 async function inflate(bytes){
   if(typeof DecompressionStream==="undefined") return null;
   for(const fmt of ["deflate","deflate-raw"]){
     try{
       const st=new Blob([bytes]).stream().pipeThrough(new DecompressionStream(fmt));
-      return new Uint8Array(await new Response(st).arrayBuffer());
-    }catch(err){}
+      const rd=st.getReader();
+      const chunks=[]; let total=0;
+      for(;;){
+        const r=await rd.read();
+        if(r.done) break;
+        total+=r.value.length;
+        if(total>SEC.MAX_INFLATE){
+          try{ await rd.cancel(); }catch(_){}
+          throw new Error("BOMB");
+        }
+        chunks.push(r.value);
+      }
+      const out=new Uint8Array(total); let o=0;
+      for(const c of chunks){ out.set(c,o); o+=c.length; }
+      return out;
+    }catch(err){ if(err && err.message==="BOMB") throw new Error("a compressed stream expands past the safe limit"); }
   }
   return null;
 }
@@ -5194,6 +6163,7 @@ function a85(str){
   if(end>=0) str=str.slice(0,end);
   const out=[]; let i=0;
   while(i<str.length){
+    if(out.length>SEC.MAX_INFLATE) break;
     if(str[i]==="z"){ out.push(0,0,0,0); i++; continue; }
     const chunk=str.slice(i,i+5); i+=5;
     const pad=5-chunk.length;
@@ -5220,6 +6190,7 @@ function lzw(data, early){
       else if(prev) entry=prev.concat(prev[0]);
       else continue;
       for(const b of entry) out.push(b);
+      if(out.length>SEC.MAX_INFLATE) return new Uint8Array(out.slice(0,SEC.MAX_INFLATE));
       if(prev) dict.push(prev.concat(entry[0]));
       prev=entry;
       if(dict.length>=(1<<codeLen)-(early?1:0) && codeLen<12) codeLen++;
@@ -5563,7 +6534,8 @@ return {read, toACI, latin1, lex, parseVal, mmul, mapp};
 
 const MAX_PDF_ENTS=40000;
 async function importPDF(file){
-  echo("Reading "+file.name+" ...");
+  if(!checkUpload(file,/\.pdf$/i,SEC.MAX_PDF,"that PDF")) return;
+  echo("Reading "+safeFileName(file.name,"file")+" ...");
   let data;
   try{ data=new Uint8Array(await file.arrayBuffer()); }
   catch(err){ return echo("Could not read that file","warn"); }
@@ -5574,6 +6546,8 @@ async function importPDF(file){
   try{ res=await PDFIN.read(data, m=>echo(m)); }
   catch(err){ console.error(err); return echo("Could not parse that PDF: "+err.message,"warn"); }
 
+  if(res.subpaths.length>SEC.MAX_SUBPATHS)
+    return echo("That PDF contains an implausible amount of geometry ("+res.subpaths.length+" paths)","warn");
   if(!res.subpaths.length){
     if(res.undecoded)
       return echo("Could not decode "+res.undecoded+" stream(s) using "+
@@ -5602,7 +6576,7 @@ function placePDF(scale){
     if(i<0){ S.layers.push({name:nm,aci,on:true,lock:false}); i=S.layers.length-1; }
     return i;
   };
-  snap();
+  const built=[];
   let made=0, skipped=0;
   for(const sp of res.subpaths){
     if(made>=MAX_PDF_ENTS){ skipped++; continue; }
@@ -5613,8 +6587,8 @@ function placePDF(scale){
         ded.push(pts[i]);
     if(ded.length<2) continue;
     const li=layerFor(PDFIN.toACI(sp.col));
-    if(ded.length===2) S.ents.push({t:"line",li,a:ded[0],b:ded[1]});
-    else S.ents.push({t:"pline",li,closed:!!sp.closed,pts:ded});
+    if(ded.length===2) built.push({t:"line",li,a:ded[0],b:ded[1]});
+    else built.push({t:"pline",li,closed:!!sp.closed,pts:ded});
     made++;
   }
   let txt=0;
@@ -5623,9 +6597,15 @@ function placePDF(scale){
     if(made+txt>=MAX_PDF_ENTS) break;
     const h=t.h*K;
     if(!(h>0)||!isFinite(h)) continue;
-    S.ents.push({t:"text",li:tli,p:T(t.p),h,s:t.s,rot:t.rot||0});
+    built.push({t:"text",li:tli,p:T(t.p),h,s:t.s,rot:t.rot||0});
     txt++;
   }
+  /* Same rule as DXF: a parser's output is untrusted input. */
+  const clean=capImport(sanitizeEnts(built, S.layers.length, S.styles.length));
+  if(!clean.length){ paintLayers(); return echo("Nothing usable came out of that PDF","warn"); }
+  snap();
+  S.ents.push(...clean);
+  flowInvalidateIndex();
   S.sel.clear(); paintLayers(); zoomExtents(); updateProps();
   echo(name+": "+made+" objects, "+txt+" labels at 1:"+scale+
        (skipped?"  ("+skipped+" over the "+MAX_PDF_ENTS+" cap)":"")+
@@ -5635,13 +6615,20 @@ function placePDF(scale){
 /* ============================================================ file io */
 function download(text,name,mime){
   const b=new Blob([text],{type:mime}), u=URL.createObjectURL(b);
-  const a=document.createElement("a"); a.href=u; a.download=name; a.click();
+  const a=document.createElement("a"); a.href=u; a.download=safeFileName(name,"drawing"); a.click();
   setTimeout(()=>URL.revokeObjectURL(u),2000);
 }
 function loadReferenceImage(file){
-  if(!file||!(/^image\/(png|jpeg|webp)$/i.test(file.type)||/\.(png|jpe?g|webp)$/i.test(file.name))) return echo("Use a PNG, JPG or WebP image","warn");
+  if(!checkUpload(file,/\.(png|jpe?g|webp|gif)$/i,SEC.MAX_IMAGE,"that image")) return;
   const reader=new FileReader();
+  reader.onerror=()=>echo("Could not read that file","warn");
   reader.onload=()=>{
+    /* Decide what this file IS from its bytes, not from its name or the MIME
+       the browser was handed. Anything that is not a raster image we accept
+       never reaches an <img>. */
+    const mime=sniffImage(reader.result);
+    if(!mime) return echo("That file is not a PNG, JPG, WebP or GIF","warn");
+    const url=URL.createObjectURL(new Blob([reader.result],{type:mime}));
     const img=new Image();
     img.onload=()=>{
       const viewW=W/S.view.s, viewH=H/S.view.s;
@@ -5653,10 +6640,10 @@ function loadReferenceImage(file){
       draw(); updateProps(); paintRibbon();
       echo("Reference loaded. Calibrate: click two known points, then enter their real distance in mm.");
     };
-    img.onerror=()=>echo("Could not decode that image","warn");
-    img.src=String(reader.result);
+    img.onerror=()=>{ URL.revokeObjectURL(url); echo("Could not decode that image","warn"); };
+    img.src=url;
   };
-  reader.readAsDataURL(file);
+  reader.readAsArrayBuffer(file);
 }
 function toggleReferenceImage(){
   if(!S.refImage) return echo("No reference image loaded","warn");
@@ -5679,10 +6666,15 @@ function removeReferenceImage(){
   snap();
   S.refImage=null; draw(); updateProps(); paintRibbon(); echo("Reference image removed");
 }
+document.getElementById("pdfin").onchange=e=>{
+  const f=e.target.files[0]; e.target.value="";
+  if(f) importPDF(f);
+};
 document.getElementById("b2dbin").onchange=e=>{
   const f=e.target.files[0]; e.target.value="";
-  if(!f) return;
+  if(!checkUpload(f,/\.(b2db|json)$/i,SEC.MAX_DOC,"that drawing")) return;
   const r=new FileReader();
+  r.onerror=()=>echo("Could not read that file","warn");
   r.onload=()=>openDrawingText(String(r.result), f.name);
   r.readAsText(f);
 };
@@ -5692,11 +6684,12 @@ document.getElementById("imagein").onchange=e=>{
   if(f) loadReferenceImage(f);
 };
 document.getElementById("filein").onchange=e=>{
-  const f=e.target.files[0]; if(!f) return;
+  const f=e.target.files[0]; e.target.value="";
+  if(!checkUpload(f,/\.dxf$/i,SEC.MAX_DXF,"that DXF")) return;
   const r=new FileReader();
-  r.onload=()=>{ importDXF(String(r.result)); setDocName(f.name); };
+  r.onerror=()=>echo("Could not read that file","warn");
+  r.onload=()=>{ importDXF(String(r.result)); setDocName(safeFileName(f.name,"untitled")); };
   r.readAsText(f);
-  e.target.value="";
 };
 function newDrawing(){
   snap(); S.ents=[]; S.sel.clear(); S.refImage=null; refImgEl=null; S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
@@ -5712,10 +6705,25 @@ function newFile(){
 window.addEventListener("dragover",e=>e.preventDefault());
 window.addEventListener("drop",e=>{
   e.preventDefault();
-  const f=e.dataTransfer.files[0]; if(!f) return;
-  if(/^image\/(png|jpeg|webp)$/i.test(f.type)||/\.(png|jpe?g|webp)$/i.test(f.name)) return loadReferenceImage(f);
-  if(/\.dxf$/i.test(f.name)){ const r=new FileReader(); r.onload=()=>importDXF(String(r.result)); r.readAsText(f); return; }
-  echo("Drop a PNG/JPG/WebP reference image or DXF","warn");
+  const f=e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if(!f) return;
+  if(/\.(png|jpe?g|webp|gif)$/i.test(f.name)) return loadReferenceImage(f);
+  if(/\.(b2db|json)$/i.test(f.name)){
+    if(!checkUpload(f,/\.(b2db|json)$/i,SEC.MAX_DOC,"that drawing")) return;
+    const r=new FileReader();
+    r.onerror=()=>echo("Could not read that file","warn");
+    r.onload=()=>openDrawingText(String(r.result), f.name);
+    r.readAsText(f); return;
+  }
+  if(/\.pdf$/i.test(f.name)) return importPDF(f);
+  if(/\.dxf$/i.test(f.name)){
+    if(!checkUpload(f,/\.dxf$/i,SEC.MAX_DXF,"that DXF")) return;
+    const r=new FileReader();
+    r.onerror=()=>echo("Could not read that file","warn");
+    r.onload=()=>{ importDXF(String(r.result)); setDocName(safeFileName(f.name,"untitled")); };
+    r.readAsText(f); return;
+  }
+  echo("Drop a PNG, JPG, WebP, PDF, DXF or .b2db file","warn");
 });
 
 /* ============================================================ shell preferences + resizable chrome */
@@ -5837,6 +6845,12 @@ paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPr
 resize(); readout();
 cmdin.focus();
 setDocName(S.docName);
+(function initMobile(){
+  let pref=null;
+  try{ pref=localStorage.getItem("b2db.mobile.v1"); }catch(_){}
+  const on = pref!=null ? pref==="1" : coarsePointer();
+  if(on) setMobileUI(true,true);
+})();
 offerRestore();
 </script>
 </body>
