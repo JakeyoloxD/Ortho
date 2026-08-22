@@ -531,7 +531,8 @@ const S = {
   osnap: true,
   gridStep: 10,
   textHeight: 2.5,
-  refImage: null,      // tracing underlay; transform/crop metadata lives on the object
+  refs: [],            // tracing underlays, back to front; see REFERENCES
+  refActive: null,     // rid of the reference the image tools act on
   edgeAssist: true,
   edgeThreshold: 62,
   /* Revit 2016 Measure state is temporary and never saved as drawing geometry. */
@@ -834,7 +835,7 @@ const px = n => n/S.view.s;   // pixels -> world units
    Undo used to snapshot entities only, so calibrating or cropping a reference
    image - or renaming a layer - could not be taken back. The snapshot now
    covers layers, styles and the image placement too. The <img> itself stays
-   out of JSON and is held in refImgEl so a removed image can come back.
+   out of JSON and is held in refImgEls so a removed image can come back.
 
    Three costs of the plain snapshot model are handled here:
 
@@ -858,18 +859,33 @@ const px = n => n/S.view.s;   // pixels -> world units
    nudging something and pressing Ctrl+Z leaves it still selected.           */
 const HIST={ BYTES: 64*1024*1024, RECORDS: 200, COALESCE_MS: 700 };
 let histBytes=0, blobCache=null, coalesceTag=null, coalesceAt=0;
+/* Reference placement is part of the snapshot, but the decoded <img> is not:
+   it stays in refImgEls keyed by rid, so undoing a removal brings the pixels
+   back without ever putting an image object through JSON. */
 function refState(){
-  const R=S.refImage;
-  if(!R) return null;
-  refImgEl=R.img||refImgEl;
-  return {name:R.name,x:R.x,y:R.y,w:R.w,h:R.h,opacity:R.opacity,visible:R.visible,
-          locked:R.locked,rot:R.rot||0,crop:R.crop||null,mode:R.mode||"fade"};
+  for(const R of S.refs) if(R.img) refImgEls.set(R.rid,R.img);
+  return {
+    active:S.refActive,
+    list:S.refs.map(R=>({rid:R.rid,name:R.name,li:R.li==null?0:R.li,
+      x:R.x,y:R.y,w:R.w,h:R.h,opacity:R.opacity,visible:R.visible,
+      locked:R.locked,rot:R.rot||0,crop:R.crop||null,mode:R.mode||"fade",
+      cal:R.cal? {a:{x:R.cal.a.x,y:R.cal.a.y},b:{x:R.cal.b.x,y:R.cal.b.y},mm:R.cal.mm,at:R.cal.at||null} : null}))
+  };
 }
 function restoreRef(o){
-  if(!o){ S.refImage=null; return; }
-  if(!refImgEl) return;
-  S.refImage=Object.assign({},o,{img:refImgEl});
-  try{ prepareReferenceEdges(S.refImage); }catch(_){}
+  /* Older snapshots in a live session hold a single ref object. */
+  const list = !o ? [] : (Array.isArray(o.list)? o.list : [o]);
+  const out=[];
+  for(const r of list){
+    const img=refImgEls.get(r.rid);
+    if(!img) continue;
+    const R=Object.assign({},r,{img});
+    if(R.li==null) R.li=0;
+    try{ prepareReferenceEdges(R); }catch(_){}
+    out.push(R);
+  }
+  S.refs=out;
+  S.refActive = (o && o.active && refFind(o.active)) ? o.active : (out.length? out[out.length-1].rid : null);
 }
 function stateBlob(){
   /* Stamp here rather than at every push site: this is the choke point every
@@ -1105,6 +1121,122 @@ function resolveImageEdgeSnap(w){
   return best?refPixelToWorld(R,best[0],best[1]):null;
 }
 
+/* ============================================================ REFERENCES
+   A drawing carries a list of underlays, not one. Revision overlay needs two
+   loaded at once and a sheet set needs one per page, so the singular
+   S.refImage became S.refs[] plus S.refActive, the rid of the one the image
+   tools point at. S.refImage survives as a read-only accessor for the active
+   reference, which is what most of the file wants anyway.
+
+   Each reference owns its own image->world transform (x, y, w, h, rot, crop).
+   World units stay millimetres everywhere - per-reference calibration means
+   each underlay maps its own pixels into the one shared world, never that two
+   references disagree about what a millimetre is. Measuring across them has
+   to keep working.
+
+   R.cal is the evidence for that mapping, and it is stored in IMAGE PIXEL
+   space on purpose. Calibrating used to compute a scale factor, bake it into
+   w/h and throw the factor away, so a calibrated drawing had no record of how
+   it got that way. Pixel coordinates are intrinsic to the image and survive
+   every move, rotate, scale and crop that follows:
+
+     R.cal = {a:{x,y}, b:{x,y}, mm, at}       a,b in image pixels
+
+   Two registered points per reference is exactly what a similarity transform
+   between two references needs, which is what revision overlay will be built
+   on. Nothing consumes it yet; it is stored now so drawings calibrated from
+   here on do not have to be re-registered later.                            */
+let refSeq=1;
+const refNewId=()=>"R"+(refSeq++)+"-"+Math.floor(Math.random()*1e6).toString(36);
+function refAll(){ return S.refs; }
+function refCount(){ return S.refs.length; }
+function refFind(rid){ return S.refs.find(r=>r.rid===rid) || null; }
+function refIndex(rid){ return S.refs.findIndex(r=>r.rid===rid); }
+function refActiveRef(){
+  if(!S.refs.length) return null;
+  const r=refFind(S.refActive);
+  if(r) return r;
+  S.refActive=S.refs[S.refs.length-1].rid;
+  return S.refs[S.refs.length-1];
+}
+/* Read-only accessor. Every existing S.refImage read keeps working and means
+   "the active reference". Writes are a mistake - they go through refAdd /
+   refRemove / refSetActive instead - so the setter says so out loud rather
+   than failing silently the way a getter-only property would. */
+Object.defineProperty(S,"refImage",{
+  configurable:true,
+  get(){ return refActiveRef(); },
+  set(v){
+    console.error("S.refImage is read-only - use refAdd / refRemove / refSetActive");
+    if(v==null) refRemove(S.refActive); else refAdd(v);
+  }
+});
+function refSetActive(rid){
+  if(rid!=null && !refFind(rid)) return null;
+  S.refActive=rid;
+  const R=refActiveRef();
+  if(R && !R.edge) try{ prepareReferenceEdges(R); }catch(_){}
+  return R;
+}
+function refAdd(R){
+  if(!R) return null;
+  if(!R.rid) R.rid=refNewId();
+  if(R.li==null) R.li=0;
+  if(R.img) refImgEls.set(R.rid,R.img);
+  S.refs.push(R);
+  S.refActive=R.rid;
+  return R;
+}
+function refRemove(rid){
+  const i=refIndex(rid);
+  if(i<0) return false;
+  S.refs.splice(i,1);
+  if(S.refActive===rid) S.refActive = S.refs.length? S.refs[Math.min(i,S.refs.length-1)].rid : null;
+  return true;
+}
+/* Cycle which reference the image tools point at. */
+function refCycle(dir){
+  if(S.refs.length<2) return refActiveRef();
+  const i=Math.max(0,refIndex(S.refActive));
+  return refSetActive(S.refs[(i+(dir<0?-1:1)+S.refs.length)%S.refs.length].rid);
+}
+/* A reference is drawn when it is visible AND its layer is on. Putting each
+   reference on a layer means overlay visibility is the layer panel you
+   already have, rather than a second parallel show/hide mechanism. */
+function refShown(R){
+  if(!R || !R.visible || !R.img || !R.img.complete) return false;
+  const L=S.layers[R.li==null?0:R.li];
+  return !L || L.on!==false;
+}
+/* Millimetres per image pixel, from the stored registration where there is
+   one and from the current placement otherwise. These agree unless something
+   has rescaled the reference since it was calibrated. */
+function refScale(R){
+  if(!R || !R.img || !R.img.naturalWidth) return null;
+  return R.w / R.img.naturalWidth;
+}
+function refCalScale(R){
+  if(!R || !R.cal) return null;
+  const d=Math.hypot(R.cal.b.x-R.cal.a.x, R.cal.b.y-R.cal.a.y);
+  return d>1e-9 ? R.cal.mm/d : null;
+}
+/* The registered points back in world space, wherever the reference is now. */
+function refCalWorld(R){
+  if(!R || !R.cal || !R.img) return null;
+  return {a:refPixelToWorld(R,R.cal.a.x,R.cal.a.y), b:refPixelToWorld(R,R.cal.b.x,R.cal.b.y), mm:R.cal.mm};
+}
+function refDrift(R){
+  const now=refScale(R), was=refCalScale(R);
+  if(now==null || was==null) return null;
+  return now/was;
+}
+function refLabel(R,i){
+  return (i==null? "" : (i+1)+". ")+(R.name||"image")+
+         (R.cal? "" : "  (uncalibrated)")+
+         (R.locked? "  locked":"")+
+         (R.visible? "" : "  hidden");
+}
+
 /* ============================================================ tools */
 const TOOLS={
   select:{label:"Select", pts:0, alias:"S", hot:"S", prompts:["Select objects"],
@@ -1196,6 +1328,9 @@ const ACTIONS={
   newdwg:{label:"New", alias:"NEW", svg:'<path d="M5 2.5h6l4 4v11H5z"/><path d="M11 2.5v4h4"/>', run:()=>newFile()},
   opendxf:{label:"DXF", alias:"OPENDXF", svg:'<path d="M3 6.5h5l1.5 2H17v8H3z"/><path d="M3 6.5v-2h4"/>', run:()=>document.getElementById("filein").click()},
   refimage:{label:"Reference Image", alias:"IMG", svg:'<rect x="3" y="4" width="14" height="12"/><circle cx="7" cy="8" r="1.5"/><path d="M4.5 14l4-4 2.5 2.5 2-2 2.5 3.5"/>', run:()=>document.getElementById("imagein").click()},
+  imgnext:{label:"Next Reference", alias:"IMGNEXT",
+    svg:'<rect x="2.5" y="4" width="10" height="9"/><path d="M4.5 11l2.4-2.5 1.8 1.8 1.8-2.6 2 3.3"/><path d="M14 6.5h3.5v9H8v-2.2"/>',
+    run:()=>cycleReference(1)},
   imgtoggle:{label:"Show / Hide", alias:"IMGSHOW", svg:'<path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/>', run:()=>toggleReferenceImage()},
   imglock:{label:"Lock Image", alias:"IMGLOCK", svg:'<rect x="5" y="9" width="10" height="8" rx="1"/><path d="M7 9V6a3 3 0 016 0v3"/>', run:()=>toggleReferenceLock()},
   imgresetcrop:{label:"Reset Crop", alias:"IMGCROPRESET", svg:'<path d="M5 2v11a2 2 0 002 2h11"/><path d="M15 18V7a2 2 0 00-2-2H2"/><path d="M3 3l-1 2 2 1"/>', run:()=>resetReferenceCrop()},
@@ -1440,9 +1575,16 @@ function commit(){
         if(!(actual>0)){ echo("Known distance must be greater than zero","warn"); setTool("select"); return; }
         const k=actual/measured, R=S.refImage;
         snap();
+        /* Record the registration before moving anything: the two points are
+           converted to image pixels, which is the one coordinate space that
+           survives the rescale about to happen and every edit after it. */
+        const pa=refWorldToPixel(R,a), pb=refWorldToPixel(R,b);
         R.x=a.x+(R.x-a.x)*k; R.y=a.y+(R.y-a.y)*k;
         R.w*=k; R.h*=k;
-        echo("Reference calibrated: "+fmt(measured)+" -> "+fmt(actual)+" mm");
+        if(pa&&pb) R.cal={a:{x:pa.x,y:pa.y}, b:{x:pb.x,y:pb.y}, mm:actual, at:new Date().toISOString()};
+        try{ prepareReferenceEdges(R); }catch(_){}
+        echo("Reference calibrated: "+fmt(measured)+" -> "+fmt(actual)+" mm"+
+             (pa&&pb? "  \u00B7 registration stored":"  \u00B7 registration not stored"));
         setTool("select"); updateProps(); draw();
       });
       return;
@@ -2131,7 +2273,8 @@ function draw(){
   if(!S.exporting){
     const cnt=document.getElementById("counts");
     if(cnt) cnt.textContent=S.ents.length+" objects \u00B7 "+S.layers.length+" layers"
-      +(S.refImage?(" \u00B7 reference"+(S.refImage.locked?" locked":"")):"")
+      +(S.refs.length?(" \u00B7 "+S.refs.length+" reference"+(S.refs.length>1?"s":"")+
+          ((refActiveRef()&&refActiveRef().locked)?" (active locked)":"")):"")
       +(autoStamp?(" \u00B7 "+autoStamp):"");
   }
   ctx.clearRect(0,0,W,H);
@@ -2191,9 +2334,12 @@ function draw(){
   xPaint();
   if(textEdit) positionInlineEditor();
 }
+/* Back to front in array order, each obeying its own layer. */
 function drawReferenceImage(){
-  const R=S.refImage;
-  if(!R||!R.visible||!R.img||!R.img.complete) return;
+  for(const R of S.refs) paintReference(R);
+}
+function paintReference(R){
+  if(!refShown(R)) return;
   ctx.save();
   ctx.globalAlpha=Math.max(0.05,Math.min(1,R.opacity));
   ctx.imageSmoothingEnabled=true;
@@ -3015,8 +3161,11 @@ function handleCommand(raw){
     case "snaps": ribbonTab="View"; paintRibbon(); return echo("Snap settings are in View \u203A Snaps");
     case "experimental": case "labs": xSetExperimental(!S.experimental); return;
     case "hist": case "history": return echo(histStats());
+    case "refs": return listReferences();
+    case "ref": case "nextref": return cycleReference(1);
+    case "prevref": return cycleReference(-1);
     case "audit": {
-      const p=auditEntityTypes();
+      const p=auditEntityTypes().concat(auditReferences());
       return echo(p.length? (p.length+" entity type problem(s) - see the console") : "Entity types clean \u00B7 "+Object.keys(ENTITY_TYPES).length+" registered");
     }
     case "restore": return offerRestore();
@@ -3030,6 +3179,13 @@ function handleCommand(raw){
     case "imgdel": return removeReferenceImage();
     case "dxf": return exportDXF();
     case "svg": return exportSVG();
+  }
+  if(/^ref\s+\d+$/.test(s)){
+    const n=parseInt(s.split(/\s+/)[1],10);
+    const R=S.refs[n-1];
+    if(!R) return echo("No reference "+n,"warn");
+    refSetActive(R.rid); draw(); updateProps(); paintRibbon();
+    return echo("Active reference: "+refLabel(R,n-1));
   }
   if(/^grid\s+[\d.]+$/.test(s)){ S.gridStep=parseFloat(s.split(/\s+/)[1])||10; draw(); return echo("Grid "+S.gridStep+"mm"); }
   if(/^layer\s+/.test(s)){
@@ -4690,7 +4846,8 @@ S.docName="untitled";
 S.png={width:2000, bg:"#ffffff", grid:false, margin:5};
 S.flow.laneW=280; S.flow.laneH=560; S.flow.laneDir="v";
 
-let refImgEl=null;         // the live <img>, kept alive across undo
+/* Decoded images by rid, kept alive across undo and never serialised. */
+const refImgEls=new Map();
 let autoTimer=null, autoStamp="", autoDBPromise=null;
 
 function setDocName(n){
@@ -4708,8 +4865,8 @@ function contentBounds(){
     const q=entBox(e);
     if(q && isFinite(q.x0) && isFinite(q.y1)) grow(q.x0,q.y0,q.x1,q.y1);
   });
-  const R=S.refImage;
-  if(R && R.visible && R.img){ const h=Math.hypot(R.w,R.h)/2; grow(R.x-h,R.y-h,R.x+h,R.y+h); }
+  for(const R of S.refs)
+    if(refShown(R)){ const h=Math.hypot(R.w,R.h)/2; grow(R.x-h,R.y-h,R.x+h,R.y+h); }
   if(!any || !isFinite(x0) || !isFinite(y0) || !isFinite(x1) || !isFinite(y1)) return null;
   return {x0,y0,x1,y1};
 }
@@ -4783,11 +4940,15 @@ function copyImage(){
 }
 
 /* ---- save / open ------------------------------------------------------ */
-function refDoc(withSrc){
-  const R=S.refImage;
+function refDocs(withSrc){
+  return S.refs.map(R=>refDoc(R,withSrc)).filter(Boolean);
+}
+function refDoc(R,withSrc){
   if(!R) return null;
-  const o={name:R.name,x:R.x,y:R.y,w:R.w,h:R.h,opacity:R.opacity,visible:R.visible,
-           locked:R.locked,rot:R.rot||0,crop:R.crop||null,mode:R.mode||"fade"};
+  const o={rid:R.rid,name:R.name,li:R.li==null?0:R.li,
+           x:R.x,y:R.y,w:R.w,h:R.h,opacity:R.opacity,visible:R.visible,
+           locked:R.locked,rot:R.rot||0,crop:R.crop||null,mode:R.mode||"fade",
+           cal:R.cal? {a:{x:R.cal.a.x,y:R.cal.a.y},b:{x:R.cal.b.x,y:R.cal.b.y},mm:R.cal.mm,at:R.cal.at||null} : null};
   if(withSrc && R.img){
     try{
       o.src = String(R.img.src||"").slice(0,5)==="data:" ? R.img.src : null;
@@ -4812,7 +4973,7 @@ function serializeDrawing(withImage){
        corridor:S.x.corridor, sonarRays:S.x.sonarRays, stampWord:S.x.stampWord},
     textHeight:S.textHeight, groupSeq:S.groupSeq,
     flow:S.flow, mk:S.mk, png:S.png,
-    ref: refDoc(withImage!==false)
+    refs: refDocs(withImage!==false), refActive: S.refActive
   };
 }
 function applyDrawing(raw,label){
@@ -4836,18 +4997,37 @@ function applyDrawing(raw,label){
   S.sel.clear(); histReset(); S.op={}; S.pending=[]; S.base=null;
   entSeq=1; reseedEntSeq();
   flowInvalidateIndex();
-  S.refImage=null; refImgEl=null;
+  S.refs=[]; S.refActive=null; refImgEls.clear();
   setDocName(d.name||"untitled");
-  if(d.ref && d.ref.src){
-    const img=new Image();
-    img.onload=()=>{
-      const o=Object.assign({},d.ref); delete o.src;
-      S.refImage=Object.assign(o,{img});
-      refImgEl=img;
-      try{ prepareReferenceEdges(S.refImage); }catch(_){}
-      draw(); updateProps(); paintRibbon();
-    };
-    img.src=d.ref.src;
+  /* Each reference decodes independently, so one bad image does not cost you
+     the rest of the set. Order is preserved by pre-allocating the slots. */
+  if(Array.isArray(d.refs) && d.refs.length){
+    const slots=d.refs.map(()=>null);
+    let pending=d.refs.length;
+    d.refs.forEach((rd,i)=>{
+      if(!rd || !rd.src){ pending--; return; }
+      const img=new Image();
+      const settle=()=>{
+        if(--pending) return;
+        S.refs=slots.filter(Boolean);
+        for(const R of S.refs) refImgEls.set(R.rid,R.img);
+        S.refActive = (d.refActive && refFind(d.refActive)) ? d.refActive
+                    : (S.refs.length? S.refs[S.refs.length-1].rid : null);
+        draw(); updateProps(); paintRibbon(); paintLayers();
+      };
+      img.onload=()=>{
+        const o=Object.assign({},rd); delete o.src;
+        const R=Object.assign(o,{img});
+        if(!R.rid) R.rid=refNewId();
+        if(R.li==null) R.li=0;
+        try{ prepareReferenceEdges(R); }catch(_){}
+        slots[i]=R;
+        settle();
+      };
+      img.onerror=()=>{ console.warn("Reference image failed to decode:",rd.name); settle(); };
+      img.src=rd.src;
+    });
+    if(!pending){ draw(); updateProps(); paintRibbon(); }
   }
   syncToggles();
   paintLayers(); paintStyles(); paintRibbon(); paintOptbar(); setPrompt();
@@ -5025,16 +5205,20 @@ function deleteLayer(i){
   if(!S.layers[i]) return;
   if(S.layers.length<2) return echo("A drawing needs at least one layer","warn");
   const nm=S.layers[i].name, n=S.ents.filter(e=>e.li===i).length;
+  const nRefs=S.refs.filter(R=>R.li===i).length;
   const go=()=>{
     snap();
     entKeep(e=>e.li!==i);
     for(const e of S.ents) if(e.li>i) e.li--;
+    /* References live on layers too, so their indices shift the same way. */
+    for(const R of S.refs){ if(R.li===i) R.li=0; else if(R.li>i) R.li--; }
     S.layers.splice(i,1);
     if(S.cur>i) S.cur--;
     if(S.cur>=S.layers.length) S.cur=S.layers.length-1;
     S.sel.clear(); flowPrune(); resetNudge();
     paintLayers(); draw(); updateProps();
-    echo("Deleted layer "+nm+(n?" and "+n+" object"+(n>1?"s":""):""));
+    echo("Deleted layer "+nm+(n?" and "+n+" object"+(n>1?"s":""):"")+
+         (nRefs?("  \u00B7 "+nRefs+" reference"+(nRefs>1?"s":"")+" moved to layer "+S.layers[0].name):""));
   };
   if(n) requestString("Delete layer "+nm+" and its "+n+" object"+(n>1?"s":"")+"?  y/n","",v=>{
     if(/^y/i.test(String(v||""))) go(); else echo("Layer kept");
@@ -5696,6 +5880,7 @@ const SEC={
   MAX_ENTS: 60000,
   MAX_PTS:  20000,
   MAX_LAYERS: 512,
+  MAX_REFS: 24,
   MAX_STYLES: 128,
   MAX_TEXT: 4096,
   MAX_COORD: 1e9,
@@ -6017,21 +6202,49 @@ function sanSnapOn(o){
     out[k] = (o && typeof o==="object" && typeof o[k]==="boolean") ? o[k] : true;
   return out;
 }
-function sanRef(r){
+/* Calibration comes out of a file as two pixel coordinates and a distance,
+   which is arithmetic the app will divide by - so it is clamped like every
+   other number, and a degenerate pair is dropped rather than stored. */
+function sanCal(c,r){
+  if(!c || typeof c!=="object" || !c.a || !c.b) return null;
+  const a={x:safeNum(c.a.x,0,1e9), y:safeNum(c.a.y,0,1e9)};
+  const b={x:safeNum(c.b.x,0,1e9), y:safeNum(c.b.y,0,1e9)};
+  const mm=Math.abs(safeNum(c.mm,0,1e9));
+  if(!(mm>0) || Math.hypot(b.x-a.x,b.y-a.y)<1e-6) return null;
+  return {a,b,mm,at:safeStr(c.at,40)||null};
+}
+function sanRef(r,nLayers){
   if(!r || typeof r!=="object") return null;
   if(!okImageSrc(r.src)) return null;         // data: raster only, never a URL
   const crop = (r.crop && typeof r.crop==="object") ? {
     sx:safeNum(r.crop.sx,0), sy:safeNum(r.crop.sy,0),
     sw:Math.abs(safeNum(r.crop.sw,1))||1, sh:Math.abs(safeNum(r.crop.sh,1))||1
   } : null;
+  const li=safeInt(r.li,0);
   return {
-    src:r.src, name:safeStr(r.name,120)||"image",
+    src:r.src, rid:safeStr(r.rid,64)||refNewId(), name:safeStr(r.name,120)||"image",
+    li:(li>=0 && li<(nLayers||1)) ? li : 0,
     x:safeNum(r.x,0), y:safeNum(r.y,0),
     w:Math.abs(safeNum(r.w,10))||10, h:Math.abs(safeNum(r.h,10))||10,
     opacity:Math.max(0,Math.min(1,safeNum(r.opacity,.5,1))),
     visible:r.visible!==false, locked:!!r.locked,
-    rot:safeNum(r.rot,0,1e4), crop, mode: r.mode==="edges"?"edges":"fade"
+    rot:safeNum(r.rot,0,1e4), crop, mode: r.mode==="edges"?"edges":"fade",
+    cal:sanCal(r.cal,r)
   };
+}
+/* Accepts the plural refs[] this version writes and the singular ref this
+   file used to write, so every drawing saved before now still opens. */
+function sanRefs(d,nLayers){
+  const raw = Array.isArray(d.refs) ? d.refs : (d.ref ? [d.ref] : []);
+  const out=[], seen=new Set();
+  for(const r of raw.slice(0,SEC.MAX_REFS)){
+    const q=sanRef(r,nLayers);
+    if(!q) continue;
+    while(seen.has(q.rid)) q.rid=refNewId();
+    seen.add(q.rid);
+    out.push(q);
+  }
+  return out;
 }
 function sanitizeDoc(d){
   if(!d || typeof d!=="object" || Array.isArray(d)) return null;
@@ -6057,7 +6270,8 @@ function sanitizeDoc(d){
     dimSnap:!!d.dimSnap,
     dimSnapLen:Math.max(0,Math.min(1e6,safeNum(d.dimSnapLen,0))),
     dimSnapAng:Math.max(0,Math.min(180,safeNum(d.dimSnapAng,0))),
-    ref:sanRef(d.ref)
+    refs:sanRefs(d,layers.length),
+    refActive:safeStr(d.refActive,64)||null
   };
   if(d.view && typeof d.view==="object"){
     const s=safeNum(d.view.s,2,1e6);
@@ -8465,7 +8679,7 @@ const RIBBON={
   ],
   Insert:[
     {name:"Drawing", big:"savedwg", small:["opendwg","newdwg","undo","redo","wipelocal"]},
-    {name:"Reference", big:"refimage", small:["imgmove","imgcal","imgstraight","imgcrop","imglock","imgtoggle","imgresetcrop","imgremove"]},
+    {name:"Reference", big:"refimage", small:["imgnext","imgmove","imgcal","imgstraight","imgcrop","imglock","imgtoggle","imgresetcrop","imgremove"]},
     {name:"Import", big:"opendxf", small:["openpdf"]},
     {name:"Export", big:"exportpng", small:["copyimage","exportsvg","exportdxf"]},
     {name:"Image", custom:"png"}
@@ -9092,10 +9306,35 @@ function updateProps(){
     host.append(info("Objects",String(S.ents.length)));
     host.append(num("Grid step",S.gridStep,v=>{S.gridStep=Math.max(.001,v)}));
     host.append(num("Text height",S.textHeight,v=>{S.textHeight=Math.max(.1,v)}));
-    if(S.refImage){
+    if(S.refs.length){
       const R=S.refImage;
-      host.append(info("Reference",R.name||"Image"));
+      if(S.refs.length>1){
+        const list=document.createElement("div"); list.className="hint";
+        list.innerHTML=S.refs.map((r,i)=>
+          '<button class="small" type="button" data-rid="'+xmlAttr(r.rid)+'"'+
+          (r.rid===S.refActive?' aria-pressed="true"':'')+'>'+
+          (i+1)+'. '+xmlText(String(r.name||"image").slice(0,22))+'</button>').join(" ");
+        host.append(list);
+        setTimeout(()=>{
+          for(const b of list.querySelectorAll("button[data-rid]"))
+            b.onclick=()=>{ refSetActive(b.dataset.rid); draw(); updateProps(); paintRibbon(); };
+        },0);
+      }
+      host.append(info("Reference",(S.refs.length>1?("("+(refIndex(R.rid)+1)+" of "+S.refs.length+")  "):"")+(R.name||"Image")));
       host.append(info("State",R.locked?"Locked":"Editable"));
+      host.append(choice("Layer",String(R.li==null?0:R.li),
+        S.layers.map((L,i)=>[String(i),L.name]),
+        v=>{ R.li=Math.max(0,Math.min(S.layers.length-1,parseInt(v,10)||0)); draw(); }));
+      /* Calibration is shown as what was actually registered, not as a scale
+         factor, because the numbers you can check against the drawing are the
+         two points and the distance you typed. */
+      if(R.cal){
+        const drift=refDrift(R);
+        host.append(info("Calibrated",fmt(R.cal.mm)+" mm over "+
+          fmt(Math.hypot(R.cal.b.x-R.cal.a.x,R.cal.b.y-R.cal.a.y))+" px"));
+        host.append(info("Scale",fmt(refScale(R)*1000)+" mm/1000px"+
+          (drift!=null && Math.abs(drift-1)>1e-4 ? ("  \u00B7 rescaled \u00D7"+fmt(drift)+" since"):"")));
+      } else host.append(info("Calibrated","No \u2014 measurements on this reference are unscaled"));
       host.append(num("Opacity %",Math.round(R.opacity*100),v=>{R.opacity=Math.max(5,Math.min(100,v))/100}));
       host.append(num("Image X",R.x,v=>{if(!R.locked)R.x=v}));
       host.append(num("Image Y",R.y,v=>{if(!R.locked)R.y=v}));
@@ -9105,10 +9344,15 @@ function updateProps(){
       host.append(num("Edge threshold",S.edgeThreshold,v=>{S.edgeThreshold=Math.max(15,Math.min(220,v))}));
       host.append(info("Crop",R.crop?"Active":"Full image"));
       const controls=document.createElement("div"); controls.className="hint";
-      controls.innerHTML='<button class="small" type="button" id="prop-imgcal">Calibrate</button> <button class="small" type="button" id="prop-imgstraight">Straighten</button> <button class="small" type="button" id="prop-imgcrop">Crop</button> <button class="small" type="button" id="prop-imgmove">Move</button> <button class="small" type="button" id="prop-imglock">'+(R.locked?'Unlock':'Lock')+'</button> <button class="small" type="button" id="prop-imgvis">'+(R.visible?'Hide':'Show')+'</button>';
+      controls.innerHTML='<button class="small" type="button" id="prop-imgcal">Calibrate</button> <button class="small" type="button" id="prop-imgstraight">Straighten</button> <button class="small" type="button" id="prop-imgcrop">Crop</button> <button class="small" type="button" id="prop-imgmove">Move</button> <button class="small" type="button" id="prop-imglock">'+(R.locked?'Unlock':'Lock')+'</button> <button class="small" type="button" id="prop-imgvis">'+(R.visible?'Hide':'Show')+'</button>'+(S.refs.length>1?' <button class="small" type="button" id="prop-imgsolo">Solo</button>':'');
       host.append(controls);
       setTimeout(()=>{
         const by=id=>document.getElementById(id);
+        if(by("prop-imgsolo"))by("prop-imgsolo").onclick=()=>{
+          const only=S.refs.some(r=>r.rid!==R.rid && r.visible);
+          for(const r of S.refs) r.visible = only ? (r.rid===R.rid) : true;
+          draw(); updateProps(); echo(only?"Showing the active reference only":"Showing all references");
+        };
         if(by("prop-imgcal"))by("prop-imgcal").onclick=()=>setTool("imgcal");
         if(by("prop-imgstraight"))by("prop-imgstraight").onclick=()=>setTool("imgstraight");
         if(by("prop-imgcrop"))by("prop-imgcrop").onclick=()=>setTool("imgcrop");
@@ -9947,10 +10191,17 @@ function loadReferenceImage(file){
       const maxW=Math.max(10,viewW*0.72), maxH=Math.max(10,viewH*0.72);
       let w=maxW, h=w*(img.naturalHeight/img.naturalWidth);
       if(h>maxH){ h=maxH; w=h*(img.naturalWidth/img.naturalHeight); }
-      S.refImage={img,name:file.name,x:S.view.cx,y:S.view.cy,w,h,opacity:0.48,visible:true,locked:false,rot:0,crop:null,mode:"fade"};
-      prepareReferenceEdges(S.refImage);
+      /* Loading now ADDS a reference rather than replacing the one there.
+         Two underlays at once is the point of the plural model. */
+      snap();
+      const R=refAdd({img,rid:refNewId(),name:file.name,li:S.cur,
+        x:S.view.cx,y:S.view.cy,w,h,opacity:0.48,visible:true,locked:false,
+        rot:0,crop:null,mode:"fade",cal:null});
+      prepareReferenceEdges(R);
       draw(); updateProps(); paintRibbon();
-      echo("Reference loaded. Calibrate: click two known points, then enter their real distance in mm.");
+      echo(S.refs.length>1
+        ? ("Reference "+S.refs.length+" added on layer "+(S.layers[R.li]||{name:"0"}).name+" and made active. Calibrate it: click two known points, then enter their real distance in mm.")
+        : "Reference loaded. Calibrate: click two known points, then enter their real distance in mm.");
     };
     img.onerror=()=>{ URL.revokeObjectURL(url); echo("Could not decode that image","warn"); };
     img.src=url;
@@ -9958,8 +10209,21 @@ function loadReferenceImage(file){
   reader.readAsArrayBuffer(file);
 }
 function toggleReferenceImage(){
-  if(!S.refImage) return echo("No reference image loaded","warn");
-  S.refImage.visible=!S.refImage.visible; draw(); updateProps(); echo("Reference image "+(S.refImage.visible?"shown":"hidden"));
+  const R=S.refImage;
+  if(!R) return echo("No reference image loaded","warn");
+  R.visible=!R.visible; draw(); updateProps();
+  echo((R.name||"Reference")+" "+(R.visible?"shown":"hidden"));
+}
+function cycleReference(dir){
+  if(!S.refs.length) return echo("No reference images loaded","warn");
+  if(S.refs.length<2) return echo("Only one reference loaded","warn");
+  const R=refCycle(dir);
+  draw(); updateProps(); paintRibbon();
+  echo("Active reference: "+refLabel(R,refIndex(R.rid)));
+}
+function listReferences(){
+  if(!S.refs.length) return echo("No reference images loaded","warn");
+  echo(S.refs.map((R,i)=>(R.rid===S.refActive?"\u25B8 ":"  ")+refLabel(R,i)).join("   "));
 }
 function toggleReferenceLock(){
   if(!S.refImage) return echo("No reference image loaded","warn");
@@ -9974,9 +10238,13 @@ function resetReferenceCrop(){
   S.refImage.crop=null; draw(); updateProps(); echo("Reference crop reset");
 }
 function removeReferenceImage(){
-  if(!S.refImage) return echo("No reference image loaded","warn");
+  const R=S.refImage;
+  if(!R) return echo("No reference image loaded","warn");
   snap();
-  S.refImage=null; draw(); updateProps(); paintRibbon(); echo("Reference image removed");
+  const nm=R.name||"Reference";
+  refRemove(R.rid);
+  draw(); updateProps(); paintRibbon();
+  echo(nm+" removed"+(S.refs.length? ("  \u00B7 "+S.refs.length+" left"):""));
 }
 document.getElementById("pdfin").onchange=e=>{
   const f=e.target.files[0]; e.target.value="";
@@ -10004,7 +10272,7 @@ document.getElementById("filein").onchange=e=>{
   r.readAsText(f);
 };
 function newDrawing(){
-  snap(); S.ents=[]; S.sel.clear(); S.hover=-1; S.refImage=null; refImgEl=null; S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
+  snap(); S.ents=[]; S.sel.clear(); S.hover=-1; S.refs=[]; S.refActive=null; refImgEls.clear(); S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
   setDocName("untitled");
   draw(); updateProps(); echo("New drawing");
 }
@@ -10169,11 +10437,31 @@ function auditRibbonButtons(){
   return true;
 }
 
+/* References are the one collection that is not entities, so it gets its own
+   integrity pass: duplicate ids, layer indices left over from a smaller layer
+   set, and calibration that no longer matches the placement. */
+function auditReferences(){
+  const problems=[], seen=new Set();
+  for(const R of S.refs){
+    if(!R.rid) problems.push((R.name||"reference")+": no rid");
+    else if(seen.has(R.rid)) problems.push(R.rid+": duplicate rid");
+    else seen.add(R.rid);
+    if(R.li==null || R.li<0 || R.li>=S.layers.length) problems.push((R.name||R.rid)+": layer index out of range");
+    const drift=refDrift(R);
+    if(drift!=null && Math.abs(drift-1)>0.01)
+      problems.push((R.name||R.rid)+": placement is \u00D7"+drift.toFixed(3)+" its calibrated scale");
+  }
+  if(S.refActive && !refFind(S.refActive)) problems.push("active rid points at nothing");
+  if(problems.length) console.warn("Reference audit:\n  "+problems.join("\n  "));
+  return problems;
+}
+
 /* ============================================================ boot */
 if(window.ResizeObserver) new ResizeObserver(resize).observe(document.getElementById("stage"));
 else window.addEventListener("resize",resize);
 auditRibbonButtons();
 auditEntityTypes();
+auditReferences();
 reseedEntSeq();
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
 setWorkspaceMode("whiteboard");
