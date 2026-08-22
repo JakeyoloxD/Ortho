@@ -2183,22 +2183,48 @@ function drawBand(){
 function drawAlignmentGuide(){
   const g=S.alignGuide; if(!g) return;
   ctx.save();
-  ctx.strokeStyle=getCSS("--snap"); ctx.lineWidth=1; ctx.globalAlpha=.7;
-  ctx.setLineDash([7,5]);
+  ctx.strokeStyle=getCSS("--snap"); ctx.fillStyle=getCSS("--snap");
+  ctx.lineWidth=1; ctx.globalAlpha=.8; ctx.setLineDash([7,5]);
+  const infiniteRay=(a,d)=>{
+    d=norm(d); if(!isFinite(d.x)) return;
+    const far=px(Math.hypot(W,H)+120);
+    const p0=sub(a,mul(d,far)), p1=add(a,mul(d,far));
+    ctx.beginPath(); ctx.moveTo(X(p0.x),Y(p0.y)); ctx.lineTo(X(p1.x),Y(p1.y)); ctx.stroke();
+  };
+
   if(g.kind==="v"){
     const sx=X(g.x); ctx.beginPath(); ctx.moveTo(sx,0); ctx.lineTo(sx,H); ctx.stroke();
   } else if(g.kind==="h"){
     const sy=Y(g.y); ctx.beginPath(); ctx.moveTo(0,sy); ctx.lineTo(W,sy); ctx.stroke();
-  } else if(g.kind==="parallel" && g.a && g.b){
+  } else if(g.kind==="cross"){
+    const sx=X(g.x), sy=Y(g.y);
+    ctx.beginPath(); ctx.moveTo(sx,0);ctx.lineTo(sx,H);ctx.moveTo(0,sy);ctx.lineTo(W,sy);ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha=1; ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.arc(sx,sy,6,0,TAU);ctx.stroke();
+  } else if((g.kind==="parallel"||g.kind==="angle"||g.kind==="perpendicular") && g.a && g.dir){
+    infiniteRay(g.a,g.dir);
+  } else if(g.kind==="extension" && g.a && g.b){
     const d=norm(sub(g.b,g.a));
-    if(isFinite(d.x)){
-      const far=px(Math.hypot(W,H)+80);
-      const a=sub(g.a,mul(d,far)), b=add(g.a,mul(d,far));
-      ctx.beginPath(); ctx.moveTo(X(a.x),Y(a.y)); ctx.lineTo(X(b.x),Y(b.y)); ctx.stroke();
-    }
+    infiniteRay(g.a,d);
+    /* Solid source segment makes it obvious which line is being extended. */
+    ctx.setLineDash([]); ctx.globalAlpha=.45; ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(X(g.a.x),Y(g.a.y));ctx.lineTo(X(g.b.x),Y(g.b.y));ctx.stroke();
+  }
+
+  ctx.setLineDash([]);
+  if(g.src && (g.sourceKind==="mid" || g.sourceKind==="center")){
+    const sx=X(g.src.x), sy=Y(g.src.y), r=5;
+    ctx.lineWidth=1.5; ctx.beginPath();
+    if(g.sourceKind==="mid"){
+      ctx.moveTo(sx-r,sy+r);ctx.lineTo(sx,sy-r);ctx.lineTo(sx+r,sy+r);ctx.closePath();
+    }else ctx.arc(sx,sy,r,0,TAU);
+    ctx.stroke();
+    ctx.font='600 10px '+getCSS("--ui"); ctx.textAlign="left"; ctx.textBaseline="middle";
+    ctx.fillText(g.label||"Aligned",sx+9,sy-9);
   }
   ctx.restore();
 }
+
 function drawSnapMarker(){
   if(!S.snapHit) return;
   const {p,kind}=S.snapHit, sx=X(p.x), sy=Y(p.y), r=5;
@@ -2206,7 +2232,7 @@ function drawSnapMarker(){
   ctx.strokeStyle=getCSS("--snap"); ctx.lineWidth=1.4; ctx.setLineDash([]);
   ctx.beginPath();
   if(kind==="end") ctx.rect(sx-r,sy-r,r*2,r*2);
-  else if(kind==="mid"){ctx.moveTo(sx-r,sy+r);ctx.lineTo(sx,sy-r);ctx.lineTo(sx+r,sy+r);ctx.closePath();}
+  else if(kind==="mid"||kind==="midalign"){ctx.moveTo(sx-r,sy+r);ctx.lineTo(sx,sy-r);ctx.lineTo(sx+r,sy+r);ctx.closePath();}
   else if(kind==="center") ctx.arc(sx,sy,r,0,TAU);
   else if(kind==="int"||kind==="edge"){ctx.moveTo(sx-r,sy-r);ctx.lineTo(sx+r,sy+r);ctx.moveTo(sx+r,sy-r);ctx.lineTo(sx-r,sy+r);}
   else if(kind==="near"){ctx.moveTo(sx-r,sy-r);ctx.lineTo(sx+r,sy-r);ctx.lineTo(sx-r,sy+r);ctx.lineTo(sx+r,sy+r);ctx.closePath();}
@@ -5856,54 +5882,131 @@ function alignmentSnap(p,from){
   if(!from || !S.osnap || S.snapSuspend) return p;
   if(!(S.tool==="line" || S.tool==="pline" || S.tool==="spline")) return p;
 
-  const tolPxA=7, tolW=px(tolPxA);
-  let best=null, bestPx=1e9;
-  const consider=(q,guide,label,src)=>{
+  const tolPxA=7, tolWorld=px(tolPxA);
+  let best=null, bestPx=1e9, bestPri=-1;
+  const consider=(q,guide,label,src,pri=0)=>{
     if(!q||!isFinite(q.x)||!isFinite(q.y)) return;
     const dpx=Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy);
-    if(dpx>tolPxA || dpx>=bestPx) return;
-    bestPx=dpx; best={p:q,guide,label,src};
+    if(dpx>tolPxA) return;
+    if(dpx>bestPx+.75 || (Math.abs(dpx-bestPx)<=.75 && pri<=bestPri)) return;
+    bestPx=dpx; bestPri=pri; best={p:q,guide:Object.assign({src,label},guide),label,src};
+  };
+  const projLine=(q,a,u)=>{
+    const uu=norm(u), t=sub(q,a).x*uu.x+sub(q,a).y*uu.y;
+    return add(a,mul(uu,t));
+  };
+  const lineIntersection=(a,u,b,v)=>{
+    const den=u.x*v.y-u.y*v.x;
+    if(Math.abs(den)<1e-9) return null;
+    const ab=sub(b,a), t=(ab.x*v.y-ab.y*v.x)/den;
+    return add(a,mul(u,t));
   };
 
-  /* Datum alignment to meaningful existing points.  The guide can extend far
-     beyond the point itself, which is what makes 'line these two things up'
-     usable without having to hover over the source endpoint. */
+  /* Gather meaningful reference points once.  These are also used for
+     two-reference guide intersections below. */
+  const refs=[];
   let seen=0;
   for(let i=S.ents.length-1;i>=0 && seen<700;i--){
     const e=S.ents[i], L=S.layers[e.li]; if(L && !L.on) continue;
     seen++;
-    const pts=[];
-    try{ pts.push(...entPoints(e),...entMids(e),...entCenters(e)); }catch(_){ }
-    for(const q of pts){
-      const dx=Math.abs(X(p.x)-X(q.x)), dy=Math.abs(Y(p.y)-Y(q.y));
-      if(dx<=tolPxA) consider(V(q.x,p.y),{kind:"v",x:q.x,src:q},"Aligned",q);
-      if(dy<=tolPxA) consider(V(p.x,q.y),{kind:"h",y:q.y,src:q},"Aligned",q);
+    const groups=[];
+    try{
+      groups.push([entPoints(e),"Aligned",1,"datum"]);
+      groups.push([entCenters(e),"CENTER ALIGN",2,"center"]);
+      groups.push([entMids(e),"MID ALIGN",3,"mid"]);
+    }catch(_){ }
+    for(const [pts,label,pri,sourceKind] of groups){
+      for(const q of pts||[]){
+        refs.push({p:q,label,pri,sourceKind});
+        const dx=Math.abs(X(p.x)-X(q.x)), dy=Math.abs(Y(p.y)-Y(q.y));
+        if(dx<=tolPxA) consider(V(q.x,p.y),{kind:"v",x:q.x,sourceKind},label,q,pri);
+        if(dy<=tolPxA) consider(V(p.x,q.y),{kind:"h",y:q.y,sourceKind},label,q,pri);
+      }
     }
   }
 
-  /* Parallel inference. Project the cursor onto a ray through the active point
-     with the same direction as nearby straight geometry. This gives the classic
-     temporary parallel guide instead of forcing Ortho. */
+  /* Two-reference intersection.  If the cursor is simultaneously aligned to
+     the X of one reference and Y of another, their temporary guides become a
+     real snap candidate. This replaces a lot of construction-line busywork. */
+  const xRefs=[], yRefs=[];
+  for(const r of refs){
+    if(Math.abs(X(p.x)-X(r.p.x))<=tolPxA) xRefs.push(r);
+    if(Math.abs(Y(p.y)-Y(r.p.y))<=tolPxA) yRefs.push(r);
+  }
+  for(const xr of xRefs.slice(0,8)){
+    for(const yr of yRefs.slice(0,8)){
+      if(xr===yr) continue;
+      const q=V(xr.p.x,yr.p.y);
+      const pri=6+Math.max(xr.pri,yr.pri);
+      consider(q,{kind:"cross",x:xr.p.x,y:yr.p.y,srcX:xr.p,srcY:yr.p,
+                  sourceKind:"guideint"},"GUIDE INTERSECTION",q,pri);
+    }
+  }
+
   let segCount=0;
-  for(let i=S.ents.length-1;i>=0 && segCount<500;i--){
+  for(let i=S.ents.length-1;i>=0 && segCount<650;i--){
     const e=S.ents[i], L=S.layers[e.li]; if(L && !L.on) continue;
     let cs=[]; try{ cs=curvesOf(e); }catch(_){ continue; }
     for(const c of cs){
-      if(c.k!=="seg") continue; segCount++;
+      if(c.k!=="seg") continue;
+      segCount++;
       const d=sub(c.b,c.a), dl=len(d); if(!(dl>1e-9)) continue;
       const u=mul(d,1/dl);
-      let t=sub(p,from).x*u.x+sub(p,from).y*u.y;
-      let q=add(from,mul(u,t));
+
+      /* Parallel / acquired-angle tracking.  The preview ray through the active
+         point inherits the exact direction of existing straight geometry. */
+      let q=projLine(p,from,u);
       let dpx=Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy);
-      /* Also test the opposite orientation; geometrically identical, but this
-         keeps the inferred travel direction intuitive around 180-degree lines. */
-      if(dpx<=tolPxA) consider(q,{kind:"parallel",a:from,b:q,dir:u},"Parallel",c);
+      if(dpx<=tolPxA){
+        const a=((deg(Math.atan2(u.y,u.x))%180)+180)%180;
+        consider(q,{kind:"angle",a:from,b:q,dir:u,source:c,sourceKind:"angle"},
+                 "ANGLE "+a.toFixed(a%1?.1:0)+"°",c,2);
+      }
+
+      /* Proactive perpendicular inference.  Unlike the regular perpendicular
+         osnap this does not require the cursor to be directly over the target
+         element; it infers a 90-degree ray through the active point. */
+      const n=perp(u);
+      q=projLine(p,from,n);
+      dpx=Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy);
+      if(dpx<=tolPxA)
+        consider(q,{kind:"perpendicular",a:from,b:q,dir:n,source:c,sourceKind:"perpinf"},
+                 "PERPENDICULAR",c,4);
+
+      /* Extension tracking. Project onto the infinite line supporting an
+         existing segment, but only advertise EXTENSION when the projected
+         point lies beyond one of that segment's endpoints. */
+      q=projLine(p,c.a,u);
+      const tc=sub(q,c.a).x*u.x+sub(q,c.a).y*u.y;
+      if(tc < -tolWorld || tc > dl+tolWorld){
+        dpx=Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy);
+        if(dpx<=tolPxA)
+          consider(q,{kind:"extension",a:c.a,b:c.b,dir:u,source:c,sourceKind:"extension"},
+                   "EXTENSION",c,5);
+      }
     }
+  }
+
+  /* Standard architectural angle tracking. These rays are always available,
+     while exact acquired angles above win when equally close. */
+  const baseAngles=[0,30,45,60,90,120,135,150];
+  for(const ad of baseAngles){
+    const th=rad(ad), u=V(Math.cos(th),Math.sin(th));
+    const q=projLine(p,from,u);
+    const dpx=Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy);
+    if(dpx<=tolPxA)
+      consider(q,{kind:"angle",a:from,b:q,dir:u,sourceKind:"angle"},
+               "ANGLE "+ad+"°",from,1);
   }
 
   if(!best) return p;
   S.alignGuide=best.guide;
-  S.snapHit={p:best.p,kind:"align",label:best.label};
+  let kind="align";
+  if(best.guide.sourceKind==="mid") kind="midalign";
+  else if(best.guide.sourceKind==="guideint") kind="int";
+  else if(best.guide.sourceKind==="perpinf") kind="perp";
+  else if(best.guide.sourceKind==="extension") kind="align";
+  S.snapHit={p:best.p,kind,label:best.label};
   return best.p;
 }
 
