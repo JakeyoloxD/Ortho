@@ -1060,7 +1060,7 @@ function measureAlongPick(i){
 function setTool(t){
   if(S.touchUI) setTimeout(updateActionBar,0);
   if(TOOLS[t] && TOOLS[t].experimental && !S.experimental){
-    echo("Experimental Features is off - turn it on in View \u203A Labs, or type LABS","warn");
+    echo("Command unavailable","warn");
     return;
   }
   const prev=S.tool; if(isMeasureTool(prev)&&prev!==t) clearMeasurement(false);
@@ -2598,7 +2598,7 @@ function handleCommand(raw){
   for(const [id,A] of Object.entries(ACTIONS)){
     if(s===id.toLowerCase() || (A.alias&&s===A.alias.toLowerCase())){
       if(XACTIONS.has(id) && !S.experimental)
-        return echo("Experimental Features is off - turn it on in View \u203A Labs, or type LABS","warn");
+        return echo("Command unavailable","warn");
       return A.run();
     }
   }
@@ -7737,7 +7737,7 @@ function xExperimentalToggle(){
 }
 function xSetExperimental(on){
   S.experimental=!!on;
-  try{ localStorage.setItem("b2db.experimental.v1", S.experimental?"1":"0"); }catch(_){}
+  try{ localStorage.removeItem("b2db.experimental.v1"); }catch(_){}
   if(!S.experimental){
     xfxStop();
     xCurrentLoopStop();
@@ -7754,7 +7754,7 @@ function xVisibleTabs(){
 
 /* ============================================================ keyboard */
 window.addEventListener("keydown",e=>{
-  const typing = !!S.ask || (document.activeElement===cmdin && cmdin.value.length>0);
+  const typing = !!S.ask || document.activeElement===cmdin;
   if(e.key==="Escape"){ cmdin.value=""; cancel(); return; }
   if(!typing && e.key==="Tab" && S.tool!=="measurealong" && S.snapList.length>1){
     e.preventDefault(); snapCycleNext(); return;
@@ -7827,8 +7827,7 @@ const RIBBON={
     {name:"Navigate", big:"zoomext", small:["mobileui"]},
     {name:"Drafting aids", custom:"toggles"},
     {name:"Snaps", custom:"snaps"},
-    {name:"Grid", custom:"grid"},
-    {name:"Labs", custom:"xtoggle"}
+    {name:"Grid", custom:"grid"}
   ],
   "Experimental Features":[
     {name:"Arcade",       big:"xsurfer",   small:["xpac","xgremlins","xtermites"]},
@@ -8454,8 +8453,6 @@ function updateProps(){
       "<b style=\"color:#ffd166\">Snaps</b>: endpoint, intersection, midpoint, centre, quadrant, perpendicular, tangent, point, nearest &middot; View &rsaquo; Snaps<br>"+
       "<kbd>Tab</kbd> cycles the snaps under the cursor &middot; midpoints keep halving the half you hover &middot; <kbd>SS</kbd> suspends, <kbd>SO</kbd> clears an override<br>"+
       "While picking a point type <kbd>SE SM SN SI SC SQ SP ST SX</kbd> to force one snap for that pick<br>"+
-      "<b style=\"color:#c9a0ff\">Experimental Features</b> is hidden until you opt in from View &rsaquo; Labs (or type <kbd>LABS</kbd>)<br>"+
-      "Physics-driven cleanup, diagnostics, layout and presentation &middot; all undoable, none of it appears in an export<br>"+
       "<kbd>F7</kbd> show grid &middot; <kbd>F8</kbd> ortho &middot; <kbd>F9</kbd> grid snap &middot; <kbd>F3</kbd> osnap &middot; <kbd>F6</kbd> image-edge snap<br>"+
       "Type <kbd>x,y</kbd> <kbd>@dx,dy</kbd> <kbd>len&lt;ang</kbd> or a bare length<br>"+
       "Drag right = window, drag left = crossing<br>"+
@@ -9493,9 +9490,12 @@ resize(); readout();
 cmdin.focus();
 setDocName(S.docName);
 (function initExperimental(){
-  let pref=null;
-  try{ pref=localStorage.getItem("b2db.experimental.v1"); }catch(_){}
-  if(pref==="1"){ S.experimental=true; paintRibbon(); }
+  /* Hidden easter egg: always start disabled, regardless of any older build's preference.
+     There is deliberately no visible ribbon control or help text advertising it. */
+  S.experimental=false;
+  try{ localStorage.removeItem("b2db.experimental.v1"); }catch(_){}
+  if(ribbonTab==="Experimental Features") ribbonTab="Home";
+  paintRibbon();
 })();
 (function initMobile(){
   let pref=null;
