@@ -783,11 +783,11 @@ function finishInlineTextEdit(commit=true){
     e.s=inlineEditor.value;
     if(e.t==="node" && e.autoSize!==false) flowFitTight(e);
     if(T.emptyDeletes && !String(e.s||"").trim()){
-      const i=textEntityIndex(e); if(i>=0) S.ents.splice(i,1);
+      const i=textEntityIndex(e); if(i>=0) entRemove([i]);
     }
     echo(e.t==="edge"?"Connector label set":e.t==="node"?"Node text set":e.t==="text"?"Text set":"Markup text set");
   } else {
-    if(T.fresh){ const i=textEntityIndex(e); if(i>=0) S.ents.splice(i,1); }
+    if(T.fresh){ const i=textEntityIndex(e); if(i>=0) entRemove([i]); }
     else e.s=T.before;
   }
   textEdit=null; inlineEditor.style.display="none"; inlineEditor.className=""; inlineEditor.value="";
@@ -830,11 +830,34 @@ const wX = sx => (sx - W/2)/S.view.s + S.view.cx;
 const wY = sy => S.view.cy - (sy - H/2)/S.view.s;
 const px = n => n/S.view.s;   // pixels -> world units
 
-/* ============================================================ history */
-/* Undo used to snapshot entities only, so calibrating or cropping a reference
+/* ============================================================ history
+   Undo used to snapshot entities only, so calibrating or cropping a reference
    image - or renaming a layer - could not be taken back. The snapshot now
    covers layers, styles and the image placement too. The <img> itself stays
-   out of JSON and is held in refImgEl so a removed image can come back. */
+   out of JSON and is held in refImgEl so a removed image can come back.
+
+   Three costs of the plain snapshot model are handled here:
+
+   1. Memory. The stack used to be 120 records regardless of document size, so
+      a 20k-entity drawing could sit on several hundred MB of JSON. It is now
+      budgeted in bytes as well as records (HIST.BYTES / HIST.RECORDS) and
+      trims oldest-first, staying deep on small drawings and shallow on big.
+   2. Wasted records. Several operations snap() and then bail out. A blob that
+      is byte-identical to the one below it is dropped instead of pushed.
+   3. Full serialisation per edit. Operations that only change existing
+      entities in place - grip drags, restyles, flow arrange - record a patch
+      of just those entities through snapEnts()/snapEntList() rather than
+      stringifying the whole document.
+
+   snap() remains the safe default and every old call site still works.
+   Reach for snapEnts() only when the operation cannot add, remove or reorder
+   entities and cannot touch layers, styles or the reference image. If there
+   is any doubt, snap().
+
+   Selection now survives undo and redo: entities are matched back by eid, so
+   nudging something and pressing Ctrl+Z leaves it still selected.           */
+const HIST={ BYTES: 64*1024*1024, RECORDS: 200, COALESCE_MS: 700 };
+let histBytes=0, blobCache=null, coalesceTag=null, coalesceAt=0;
 function refState(){
   const R=S.refImage;
   if(!R) return null;
@@ -849,8 +872,12 @@ function restoreRef(o){
   try{ prepareReferenceEdges(S.refImage); }catch(_){}
 }
 function stateBlob(){
+  /* Stamp here rather than at every push site: this is the choke point every
+     snapshot and every save goes through, so ids land in the blob and
+     selection can be matched back after an undo. */
+  entStampAll(S.ents);
   return JSON.stringify({e:S.ents, l:S.layers, y:S.styles, c:S.cur, cs:S.curStyle,
-                         r:refState(), fs:S.flow?S.flow.seq:1, gs:S.groupSeq});
+                         r:refState(), fs:S.flow?S.flow.seq:1, gs:S.groupSeq, es:entSeq});
 }
 function applyBlob(t){
   const d=JSON.parse(t);
@@ -863,25 +890,113 @@ function applyBlob(t){
   flowInvalidateIndex();
   if(S.flow && d.fs) S.flow.seq=d.fs;
   if(d.gs) S.groupSeq=d.gs;
+  if(d.es) entSeq=Math.max(entSeq, d.es|0);
+  reseedEntSeq();
   paintLayers(); paintStyles();
 }
-function snap(){
-  S.undo.push(stateBlob());
-  if(S.undo.length>120) S.undo.shift();
+function recBytes(r){
+  if(r.k==="full") return r.blob.length;
+  let n=64; for(const s of r.before) n+=s.length; return n;
+}
+function histTrim(){
+  while(S.undo.length>1 && (S.undo.length>HIST.RECORDS || histBytes>HIST.BYTES)){
+    histBytes-=recBytes(S.undo[0]); S.undo.shift();
+  }
+  while(S.redo.length>HIST.RECORDS) S.redo.shift();
+}
+function histReset(){
+  S.undo.length=0; S.redo.length=0;
+  histBytes=0; blobCache=null; coalesceTag=null; coalesceAt=0;
+}
+/* Drop the record an aborted operation just pushed. */
+function snapCancel(){
+  const r=S.undo.pop();
+  if(r) histBytes-=recBytes(r);
+  blobCache=null; coalesceTag=null;
+}
+function histCoalesced(tag){
+  const now=Date.now();
+  if(tag && tag===coalesceTag && now-coalesceAt<HIST.COALESCE_MS){
+    coalesceAt=now; blobCache=null; markDirty(); return true;
+  }
+  coalesceTag=tag||null; coalesceAt=now;
+  return false;
+}
+function snap(tag){
+  if(histCoalesced(tag)) return;
+  const blob = blobCache!=null ? blobCache : stateBlob();
+  const top=S.undo[S.undo.length-1];
+  if(!(top && top.k==="full" && top.blob===blob)){
+    S.undo.push({k:"full",blob}); histBytes+=blob.length; histTrim();
+  }
   S.redo.length=0;
+  blobCache=null;
   markDirty();
 }
-function undo(){
-  if(!S.undo.length) return echo("Nothing to undo","warn");
-  S.redo.push(stateBlob());
-  applyBlob(S.undo.pop());
-  S.sel.clear(); resetNudge(); markDirty(); draw(); updateProps(); paintRibbon(); echo("Undo");
+/* Patch record. Only legal for in-place edits to existing entities. */
+function snapEnts(indices,tag){
+  const list=[...new Set(indices||[])].filter(i=>i>=0 && i<S.ents.length);
+  if(!list.length) return snap(tag);
+  if(histCoalesced(tag)) return;
+  const rec={k:"ents", ids:[], idx:[], before:[]};
+  for(const i of list){
+    const e=entStamp(S.ents[i]);
+    rec.ids.push(e.eid); rec.idx.push(i); rec.before.push(JSON.stringify(e));
+  }
+  S.undo.push(rec); histBytes+=recBytes(rec); histTrim();
+  S.redo.length=0;
+  blobCache=null;
+  markDirty();
 }
-function redo(){
-  if(!S.redo.length) return echo("Nothing to redo","warn");
-  S.undo.push(stateBlob());
-  applyBlob(S.redo.pop());
-  S.sel.clear(); resetNudge(); markDirty(); draw(); updateProps(); paintRibbon(); echo("Redo");
+const snapEntList=(list,tag)=>snapEnts(entIndicesOf(list),tag);
+/* Current values of the same entities, so the opposite stack can go back. */
+function histCapture(rec){
+  const out={k:"ents", ids:rec.ids.slice(), idx:[], before:[]};
+  for(let n=0;n<rec.ids.length;n++){
+    let i=entIndexOfId(rec.ids[n]); if(i<0) i=rec.idx[n];
+    const e=S.ents[i];
+    out.idx.push(i);
+    out.before.push(e? JSON.stringify(e) : "null");
+  }
+  return out;
+}
+function histApply(rec){
+  if(rec.k==="full"){ applyBlob(rec.blob); return; }
+  for(let n=0;n<rec.ids.length;n++){
+    let i=entIndexOfId(rec.ids[n]); if(i<0) i=rec.idx[n];
+    const tgt=S.ents[i], before=rec.before[n];
+    if(!tgt || before==="null") continue;
+    const was=JSON.parse(before);
+    for(const k of Object.keys(tgt)) if(!(k in was)) delete tgt[k];
+    Object.assign(tgt,was);
+  }
+  flowInvalidateIndex();
+}
+function histStep(from,to,word){
+  if(!from.length) return echo("Nothing to "+word,"warn");
+  const rec=from.pop();
+  if(from===S.undo) histBytes-=recBytes(rec);
+  const keep=selIds();
+  const back = rec.k==="full"
+    ? {k:"full", blob:(blobCache!=null? blobCache : stateBlob())}
+    : histCapture(rec);
+  to.push(back);
+  if(to===S.undo) histBytes+=recBytes(back);
+  histApply(rec);
+  blobCache = rec.k==="full" ? rec.blob : null;
+  histTrim();
+  selectByIds(keep);
+  resetNudge(); markDirty(); draw(); updateProps(); paintRibbon();
+  echo(word==="undo"?"Undo":"Redo");
+}
+function undo(){ coalesceTag=null; histStep(S.undo,S.redo,"undo"); }
+function redo(){ coalesceTag=null; histStep(S.redo,S.undo,"redo"); }
+function histStats(){
+  const patch=S.undo.filter(r=>r.k==="ents").length;
+  return S.undo.length+" undo record"+(S.undo.length===1?"":"s")+
+         " \u00B7 "+(histBytes/1048576).toFixed(2)+" MB of "+(HIST.BYTES/1048576|0)+" MB"+
+         " \u00B7 "+patch+" patch / "+(S.undo.length-patch)+" full"+
+         " \u00B7 "+S.redo.length+" redo";
 }
 
 /* ============================================================ snapping */
@@ -1408,7 +1523,7 @@ function commit(){
       const src=[...S.sel].map(i=>S.ents[i]);
       const made=(S.copyMirror?cloneEntitiesFreshGroups(src):src.map(clone)).map(e=>mirEnt(e,A,B));
       if(S.copyMirror) S.ents.push(...made);
-      else { const keep=S.ents.filter((_,i)=>!S.sel.has(i)); S.ents=keep.concat(made); }
+      else { const doomed=new Set(S.sel); entKeep((_,i)=>!doomed.has(i)); entAdd(made); selectEntities(made); }
       S.pending=[]; setTool("select"); draw(); updateProps();
       echo((S.copyMirror?"Mirrored a copy of ":"Mirrored ")+made.length+" object(s)");
       return;
@@ -1475,8 +1590,10 @@ function cancel(){
 function eraseSel(){
   if(!S.sel.size) return;
   snap();
-  const keep=S.ents.filter((_,i)=>!S.sel.has(i));
-  const n=S.sel.size; S.ents=keep; S.sel.clear(); resetNudge();
+  const n=S.sel.size;
+  const doomed=new Set(S.sel);
+  entKeep((_,i)=>!doomed.has(i));
+  S.sel.clear(); resetNudge();
   const orphans=flowPrune();
   draw();
   echo("Erased "+n+" object(s)"+(orphans?"  ("+orphans+" connector"+(orphans>1?"s":"")+" dropped)":""));
@@ -1570,6 +1687,128 @@ function drawingSpan(){
 }
 function others(idx){
   return S.ents.map((e,j)=>({e,j})).filter(o=>o.j!==idx && (S.layers[o.e.li]||{on:true}).on);
+}
+
+/* ============================================================ ENTITY TABLE
+   S.ents is index-addressed and S.sel holds indices into it, so any splice or
+   filter silently repoints the selection at whatever slid into the gap - and
+   the same is true of S.hover and a live grip drag. Every removal now goes
+   through entKeep/entRemove, which remap all three in one place.
+
+   Entities also carry a stable eid. Nothing depends on it for rendering; it
+   exists so anything that has to survive a reorder - selection across undo,
+   history patch records - can hold an identity instead of a slot number.    */
+let entSeq=1;
+function entStamp(e){ if(e && !e.eid) e.eid=entSeq++; return e; }
+function entStampAll(list){ if(list) for(const e of list) entStamp(e); return list; }
+function reseedEntSeq(){
+  let m=0;
+  for(const e of S.ents) if(e && e.eid>m) m=e.eid;
+  entSeq=m+1;
+  entStampAll(S.ents);
+}
+function entIndexOfId(id){
+  if(id==null) return -1;
+  for(let i=0;i<S.ents.length;i++) if(S.ents[i].eid===id) return i;
+  return -1;
+}
+function selIds(){
+  const out=[];
+  for(const i of S.sel){ const e=S.ents[i]; if(e) out.push(entStamp(e).eid); }
+  return out;
+}
+function selectByIds(ids){
+  const want=new Set(ids||[]);
+  S.sel.clear();
+  if(want.size) S.ents.forEach((e,i)=>{ if(want.has(e.eid)) S.sel.add(i); });
+  return S.sel.size;
+}
+function selectEntities(list){
+  const want=new Set(list||[]);
+  S.sel.clear();
+  if(want.size) S.ents.forEach((e,i)=>{ if(want.has(e)) S.sel.add(i); });
+  return S.sel.size;
+}
+function entIndicesOf(list){
+  const want=new Set(list||[]), out=[];
+  if(want.size) S.ents.forEach((e,i)=>{ if(want.has(e)) out.push(i); });
+  return out;
+}
+/* The one place entities leave the array. pred(e,i) true = keep. */
+function entKeep(pred){
+  const srcArr=S.ents, out=[], map=new Map();
+  for(let i=0;i<srcArr.length;i++) if(pred(srcArr[i],i)){ map.set(i,out.length); out.push(srcArr[i]); }
+  const gone=srcArr.length-out.length;
+  if(!gone) return 0;
+  const sel=new Set();
+  for(const i of S.sel) if(map.has(i)) sel.add(map.get(i));
+  S.ents=out; S.sel=sel;
+  S.hover = map.has(S.hover) ? map.get(S.hover) : -1;
+  if(gripDrag && gripDrag.i!=null){
+    if(map.has(gripDrag.i)) gripDrag.i=map.get(gripDrag.i); else gripDrag=null;
+  }
+  flowInvalidateIndex();
+  return gone;
+}
+function entRemove(indices){
+  const kill=new Set();
+  for(const i of (indices||[])) if(i>=0 && i<S.ents.length) kill.add(i);
+  if(!kill.size) return 0;
+  return entKeep((_,i)=>!kill.has(i));
+}
+function entAdd(list){
+  const arr=Array.isArray(list)? list : [list];
+  entStampAll(arr);
+  S.ents.push(...arr);
+  return arr;
+}
+
+/* ============================================================ ENTITY TYPES
+   A new entity type has to be taught five separate functions, and the one
+   that bites is sanEnt: miss it and the type renders perfectly all session,
+   then vanishes on reload with no error at all. ENTITY_TYPES declares the set
+   once, and auditEntityTypes() checks the dispatch switches at boot, so a
+   missing handler is a console error on day one rather than a lost drawing
+   three weeks later. The check reads function source, which is exact here
+   because nothing in this file is ever minified.                            */
+const ENTITY_TYPES={
+  line:   {family:"cad",    label:"Line",         grips:true},
+  pline:  {family:"cad",    label:"Polyline",     grips:true},
+  spline: {family:"cad",    label:"Spline",       grips:true},
+  circle: {family:"cad",    label:"Circle",       grips:true},
+  arc:    {family:"cad",    label:"Arc",          grips:true},
+  ellipse:{family:"cad",    label:"Ellipse",      grips:true},
+  text:   {family:"cad",    label:"Text",         grips:true},
+  dim:    {family:"cad",    label:"Dimension",    grips:true},
+  ink:    {family:"markup", label:"Freehand",     grips:true},
+  mshape: {family:"markup", label:"Markup shape", grips:true},
+  mtext:  {family:"markup", label:"Markup text",  grips:true},
+  node:   {family:"flow",   label:"Flow node",    grips:true},
+  edge:   {family:"flow",   label:"Connector",    grips:true}
+};
+const entFamily=t=>(ENTITY_TYPES[t]||{}).family||"unknown";
+const entTypeLabel=t=>(ENTITY_TYPES[t]||{}).label||String(t);
+function auditEntityTypes(){
+  const handles=(fn,t)=>{ try{ return fn.toString().indexOf('case "'+t+'"')>=0; }catch(_){ return true; } };
+  const problems=[];
+  for(const t of Object.keys(ENTITY_TYPES)){
+    const spec=ENTITY_TYPES[t];
+    if(!handles(sanEnt,t))    problems.push(t+": sanEnt - would be silently dropped on reload");
+    if(!handles(entPoints,t)) problems.push(t+": entPoints");
+    if(spec.grips && !handles(gripSet,t)) problems.push(t+": gripSet");
+    /* draw() routes by family predicate, not by a switch, so test the router. */
+    const probe={t};
+    if(spec.family==="markup" && !mkIsEnt(probe))   problems.push(t+": mkIsEnt does not claim it");
+    if(spec.family==="flow"   && !flowIsEnt(probe)) problems.push(t+": flowIsEnt does not claim it");
+    if(spec.family==="cad"){
+      if(mkIsEnt(probe)||flowIsEnt(probe)) problems.push(t+": claimed by a markup/flow predicate");
+      else if(!handles(paintEnt,t))        problems.push(t+": paintEnt");
+    }
+  }
+  for(const t of new Set(S.ents.map(e=>e.t)))
+    if(!ENTITY_TYPES[t]) problems.push(t+": present in the drawing but not registered");
+  if(problems.length) console.error("Entity type audit:\n  "+problems.join("\n  "));
+  return problems;
 }
 
 /* ============================================================ welding */
@@ -1856,7 +2095,7 @@ function explodeSel(){
       n++;
     } else out.push(e);
   });
-  S.ents=out; S.sel.clear(); draw(); updateProps();
+  S.ents=entStampAll(out); S.sel.clear(); S.hover=-1; flowInvalidateIndex(); draw(); updateProps();
   echo(n?("Exploded "+n+" object(s)"):"Nothing there to explode");
 }
 
@@ -1876,7 +2115,9 @@ function nudge(dx,dy,e){
   if(!live.length) return echo("Selection is on a locked layer","warn");
   const st=nudgeStep(e), d=V(dx*st, dy*st);
   const now=Date.now();
-  if(now-nudgeAt>700 || !nudgeSum){ snap(); nudgeSum=V(0,0); }   // one undo per burst
+  /* One undo per burst. Weld can pull in entities outside the selection,
+     which a patch record would not cover, so that case takes a full snapshot. */
+  if(now-nudgeAt>700 || !nudgeSum){ if(S.weld) snap(); else snapEnts(live); nudgeSum=V(0,0); }
   nudgeAt=now;
   const w=applyDelta(live, d, true);
   nudgeSum=add(nudgeSum,d);
@@ -2773,6 +3014,11 @@ function handleCommand(raw){
     case "sr": S.osnap=!S.osnap; syncToggles(); draw(); return echo("Object snap "+(S.osnap?"on":"off"));
     case "snaps": ribbonTab="View"; paintRibbon(); return echo("Snap settings are in View \u203A Snaps");
     case "experimental": case "labs": xSetExperimental(!S.experimental); return;
+    case "hist": case "history": return echo(histStats());
+    case "audit": {
+      const p=auditEntityTypes();
+      return echo(p.length? (p.length+" entity type problem(s) - see the console") : "Entity types clean \u00B7 "+Object.keys(ENTITY_TYPES).length+" registered");
+    }
     case "restore": return offerRestore();
     case "clearautosave": return clearAutosave();
     case "grid": case "gridshow": case "showgrid": return S.workspaceMode!=="drafting"?setWorkspaceMode("drafting"):toggle("gridShow");
@@ -3251,7 +3497,7 @@ function mkPointerUp(e){
     if(D.doomed.size){
       snap();
       const kill=D.doomed, n=kill.size;
-      S.ents=S.ents.filter((_,i)=>!kill.has(i));
+      entKeep((_,i)=>!kill.has(i));
       S.sel.clear(); resetNudge();
       echo("Erased "+n+" markup object"+(n>1?"s":""));
     }
@@ -3333,9 +3579,11 @@ function mkApplyStyle(p){
 }
 function mkRestyleSelection(){
   let n=0;
-  for(const i of S.sel){
+  const hit=[...S.sel].filter(i=>mkIsEnt(S.ents[i]));
+  if(!hit.length) return 0;
+  snapEnts(hit);
+  for(const i of hit){
     const e=S.ents[i];
-    if(!mkIsEnt(e)) continue;
     e.mk.col=S.mk.col;
     e.mk.fill=S.mk.fill? S.mk.col : null;
     n++;
@@ -3389,7 +3637,7 @@ function mkClearAll(){
   requestString("Delete all "+n+" markup objects? y/n","",v=>{
     if(/^y/i.test(v)){
       snap();
-      S.ents=S.ents.filter(e=>!mkIsEnt(e));
+      entKeep(e=>!mkIsEnt(e));
       S.sel.clear(); resetNudge(); draw(); updateProps();
       echo("Cleared "+n+" markup object"+(n>1?"s":""));
     } else echo("Kept");
@@ -4153,7 +4401,7 @@ function flowSelNodes(){ return [...S.sel].map(i=>S.ents[i]).filter(e=>e&&e.t===
 function flowAlign(kind){
   const N=flowSelNodes();
   if(N.length<2) return echo("Select two or more nodes first","warn");
-  snap();
+  snapEntList(N);
   if(kind==="left"){   const x=Math.min(...N.map(n=>n.p.x-n.w/2)); N.forEach(n=>n.p.x=x+n.w/2); }
   if(kind==="centre"){ const x=N.reduce((a,n)=>a+n.p.x,0)/N.length; N.forEach(n=>n.p.x=x); }
   if(kind==="top"){    const y=Math.max(...N.map(n=>n.p.y+n.h/2)); N.forEach(n=>n.p.y=y-n.h/2); }
@@ -4163,7 +4411,7 @@ function flowAlign(kind){
 function flowDistribute(axis){
   const N=flowSelNodes();
   if(N.length<3) return echo("Select three or more nodes first","warn");
-  snap();
+  snapEntList(N);
   N.sort((a,b)=> axis==="x" ? a.p.x-b.p.x : a.p.y-b.p.y);
   const first=N[0], lastN=N[N.length-1];
   const span=(axis==="x"? lastN.p.x-first.p.x : lastN.p.y-first.p.y);
@@ -4175,7 +4423,7 @@ function flowTidy(){
   const sel=flowSelNodes();
   const N=sel.length? sel : S.ents.filter(e=>e.t==="node");
   if(!N.length) return echo("No nodes to tidy","warn");
-  snap();
+  snapEntList(N);
   const g=gridPitch();
   N.forEach(n=>{ n.p.x=Math.round(n.p.x/g)*g; n.p.y=Math.round(n.p.y/g)*g; });
   draw(); updateProps(); echo("Snapped "+N.length+" node"+(N.length>1?"s":"")+" to the grid");
@@ -4184,14 +4432,14 @@ function flowAutoSize(){
   const sel=flowSelNodes();
   const N=sel.length? sel : S.ents.filter(e=>e.t==="node");
   if(!N.length) return echo("No nodes to resize","warn");
-  snap();
+  snapEntList(N);
   N.forEach(flowFitTight);
   draw(); updateProps(); echo("Shrank "+N.length+" node"+(N.length>1?"s":"")+" to its text");
 }
 function flowFitText(){
   const sel=flowSelNodes();
   if(!sel.length) return echo("Select one or more Flow nodes first","warn");
-  snap();
+  snapEntList(sel);
   for(const e of sel){
     let guard=80;
     while(guard-- && e.fs>px(5)){
@@ -4207,12 +4455,7 @@ function flowFitText(){
 }
 /* an edge whose node is gone is meaningless - drop it with the node */
 function flowPrune(){
-  const before=S.ents.length;
-  S.ents=S.ents.filter(e=>{
-    if(e.t!=="edge") return true;
-    return !!flowEnd(e.from) && !!flowEnd(e.to);
-  });
-  return before-S.ents.length;
+  return entKeep(e=> e.t!=="edge" || (!!flowEnd(e.from) && !!flowEnd(e.to)) );
 }
 
 /* ---- options bar ----------------------------------------------------- */
@@ -4242,9 +4485,11 @@ function flowColorField(label,get,set){
 }
 function flowRestyleSelection(){
   let n=0;
-  for(const i of S.sel){
+  const hit=[...S.sel].filter(i=>S.ents[i] && S.ents[i].t==="node");
+  if(!hit.length) return 0;
+  snapEnts(hit);
+  for(const i of hit){
     const e=S.ents[i];
-    if(!e || e.t!=="node") continue;
     e.mk.fill=S.flow.fill; e.mk.line=S.flow.line; e.mk.text=S.flow.text;
     n++;
   }
@@ -4588,7 +4833,8 @@ function applyDrawing(raw,label){
   if(d.dimSnapLen!=null) S.dimSnapLen=Math.max(0,Math.min(1e6,safeNum(d.dimSnapLen,0)));
   if(d.dimSnapAng!=null) S.dimSnapAng=Math.max(0,Math.min(180,safeNum(d.dimSnapAng,0)));
   mergePlain(S.flow,d.flow); mergePlain(S.mk,d.mk); mergePlain(S.png,d.png);
-  S.sel.clear(); S.undo.length=0; S.redo.length=0; S.op={}; S.pending=[]; S.base=null;
+  S.sel.clear(); histReset(); S.op={}; S.pending=[]; S.base=null;
+  entSeq=1; reseedEntSeq();
   flowInvalidateIndex();
   S.refImage=null; refImgEl=null;
   setDocName(d.name||"untitled");
@@ -4781,7 +5027,7 @@ function deleteLayer(i){
   const nm=S.layers[i].name, n=S.ents.filter(e=>e.li===i).length;
   const go=()=>{
     snap();
-    S.ents=S.ents.filter(e=>e.li!==i);
+    entKeep(e=>e.li!==i);
     for(const e of S.ents) if(e.li>i) e.li--;
     S.layers.splice(i,1);
     if(S.cur>i) S.cur--;
@@ -4899,7 +5145,8 @@ function gripHitAt(sx,sy){
 function gripBegin(sx,sy){
   const h=gripHitAt(sx,sy);
   if(!h) return false;
-  snap();
+  /* A grip drag only ever edits the one entity it is holding. */
+  snapEnts([h.i]);
   gripDrag=h;
   return true;
 }
@@ -5702,12 +5949,30 @@ function sanEnt(e,nLayers,nStyles){
   }
   return null;                       // unknown type: dropped, never rendered
 }
+/* An entity the sanitiser rejects used to disappear without a word, which is
+   indistinguishable from a bug in the loader. Drops are now counted by type
+   and reported, so a file that loses geometry says so. */
+let lastImportDrops=null;
 function sanitizeEnts(arr,nLayers,nStyles){
+  lastImportDrops=null;
   if(!Array.isArray(arr)) return [];
-  const out=[];
+  const out=[], drops={};
+  const seen=arr.length, capped=Math.max(0,seen-SEC.MAX_ENTS);
   for(const e of arr.slice(0,SEC.MAX_ENTS)){
     const q=sanEnt(e,nLayers||1,nStyles||1);
     if(q) out.push(q);
+    else {
+      const t=(e && typeof e==="object" && typeof e.t==="string") ? e.t : "malformed";
+      drops[t]=(drops[t]||0)+1;
+    }
+  }
+  if(capped) drops["over the "+SEC.MAX_ENTS+" entity cap"]=capped;
+  const keys=Object.keys(drops);
+  if(keys.length){
+    lastImportDrops={total:keys.reduce((n,k)=>n+drops[k],0), by:drops};
+    const detail=keys.map(k=>drops[k]+" "+(ENTITY_TYPES[k]? entTypeLabel(k).toLowerCase() : k)).join(", ");
+    console.warn("Import dropped "+lastImportDrops.total+" entit"+(lastImportDrops.total===1?"y":"ies")+": "+detail);
+    try{ echo("Import dropped "+lastImportDrops.total+" entit"+(lastImportDrops.total===1?"y":"ies")+"  \u2014  "+detail,"warn"); }catch(_){}
   }
   return out;
 }
@@ -6623,7 +6888,7 @@ function xVacuum(){
     const victims=sel.map(i=>S.ents[i]);
     const box=xBox(victims), c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
     snap();
-    for(const i of sel) S.ents.splice(i,1);
+    entRemove(sel);
     S.sel.clear(); resetNudge(); flowPrune(); flowInvalidateIndex(); updateProps();
     xUiSweep();
     xfxRun("vacuumEat",1500,{box,c,victims:victims.map(e=>JSON.parse(JSON.stringify(e)))},(t)=>{
@@ -6640,7 +6905,7 @@ function xVacuum(){
   const keyOf=e=>{ try{ return e.t+"|"+JSON.stringify(entPoints(e))+"|"+(e.r||"")+"|"+(e.s||""); }catch(_){ return null; } };
   const seen=new Set(), junk={zero:0,dupe:0,empty:0,orphan:0};
   snap();
-  S.ents=S.ents.filter(e=>{
+  entKeep(e=>{
     if(e.t==="line" && dist(e.a,e.b)<1e-9){ junk.zero++; return false; }
     if(e.t==="circle" && !(e.r>1e-9)){ junk.zero++; return false; }
     if((e.t==="pline"||e.t==="spline") && (!e.pts||e.pts.length<2)){ junk.empty++; return false; }
@@ -6651,7 +6916,7 @@ function xVacuum(){
   });
   junk.orphan=flowPrune();
   const gone=before-S.ents.length;
-  if(!gone){ S.undo.pop(); xfxRun("vacuumEmpty",850,{c:cursorPoint()},null,null); return echo("Vacuum found nothing. It is now aggressively disappointed."); }
+  if(!gone){ snapCancel(); xfxRun("vacuumEmpty",850,{c:cursorPoint()},null,null); return echo("Vacuum found nothing. It is now aggressively disappointed."); }
   S.sel.clear(); resetNudge(); flowInvalidateIndex(); updateProps();
   xUiSweep(); xfxRun("vacuum",1200,{box:xBox(xEnts())},null,null); xBeep("sweep"); draw();
   echo("Vacuumed "+gone+": "+junk.dupe+" duplicate, "+junk.zero+" zero-length, "+junk.empty+" empty, "+junk.orphan+" orphaned connector"+(junk.orphan===1?"":"s"));
@@ -6882,7 +7147,7 @@ function xBulldozer(a,b){
   }
   if(!hitIdx.length){ XFX.marks.length=0; XFX.marks.push({kind:"corridor",quad}); xfxRun("dozer",1100,{a,b,quad,hits:[]},null,null); return echo("Bulldozer charged through. Miraculously, nothing was in the way."); }
   const victims=hitIdx.map(i=>S.ents[i]);
-  snap(); for(const i of hitIdx.sort((x,y)=>y-x)) S.ents.splice(i,1);
+  snap(); entRemove(hitIdx);
   S.sel.clear(); resetNudge(); flowPrune(); flowInvalidateIndex(); updateProps();
   XFX.marks.length=0; XFX.marks.push({kind:"corridor",quad});
   xfxRun("dozer",1700,{a,b,quad,hits:victims.map(e=>JSON.parse(JSON.stringify(e)))},(t)=>{
@@ -6984,7 +7249,7 @@ function xBlackHole(p){
     const ni=xNearestIndex(p); if(ni>=0) ids=[ni];
   }
   const victims=ids.map(i=>S.ents[i]).filter(Boolean);
-  snap(); for(const i of ids.sort((a,b)=>b-a))S.ents.splice(i,1);
+  snap(); entRemove(ids);
   S.sel.clear();flowPrune();flowInvalidateIndex();updateProps();
   xfxRun("blackhole",2200,{p,r,count:victims.length},(t)=>{for(let k=0;k<5;k++){const a=Math.random()*TAU,rr=r*(.4+Math.random());xPart(p.x+Math.cos(a)*rr,p.y+Math.sin(a)*rr,-Math.cos(a)*rr*4,-Math.sin(a)*rr*4,700,"#b47cff",1.8);}xKickParticles(.016);},null);
   xBeep("sweep");draw();echo("BLACK HOLE consumed "+victims.length+" object"+(victims.length===1?"":"s")+". Event horizon says undo is still allowed.");
@@ -6994,7 +7259,7 @@ function xWreckingBall(p){
   if(first<0){xfxRun("wreck",1500,{p,count:0},null,null);xBeep("thunk");return echo("WRECKING BALL missed everything and still looked excellent.");}
   const c=xEntityCenter(S.ents[first]), radius=Math.max(px(55),drawingSpan()*.07);
   const ids=S.ents.map((e,i)=>({e,i})).filter(o=>o.e&&xEnts().includes(o.e)&&dist(xEntityCenter(o.e),c)<=radius).map(o=>o.i);
-  snap();for(const i of ids.sort((a,b)=>b-a))S.ents.splice(i,1);S.sel.clear();flowPrune();flowInvalidateIndex();updateProps();
+  snap();entRemove(ids);S.sel.clear();flowPrune();flowInvalidateIndex();updateProps();
   xfxRun("wreck",1900,{p:c,count:ids.length},(t)=>{if(Math.random()<.9)xBurstAt(c,"#ff7a59",3,px(220));xKickParticles(.016);},null);
   xBeep("thunk");draw();echo("WRECKING BALL smashed "+ids.length+" object"+(ids.length===1?"":"s")+" into conceptual rubble.");
 }
@@ -7376,7 +7641,7 @@ function xPacEater(){
   snap();
   xfxRun("pacEater",4300,{P,L:xPathLength(P),idx},(t)=>{if(Math.random()<.16){const q=P[Math.min(P.length-1,Math.floor(t*(P.length-1)))];if(q)xBurstAt(q,"#ffd166",1,px(50));}xKickParticles(.016);},()=>{
     const target=S.ents[idx];
-    if(target===e){S.ents.splice(idx,1);S.sel.clear();flowInvalidateIndex();updateProps();draw();}
+    if(target===e){entRemove([idx]);S.sel.clear();flowInvalidateIndex();updateProps();draw();}
     echo("LINE MUNCHER: burp. One piece of geometry eaten completely.");
   });
   xBeep("tick");echo("LINE MUNCHER: NOM NOM NOM.");
@@ -7409,11 +7674,11 @@ function xTermites(){
 
 /* ====================== PRESENTATION =================================== */
 function xTimelapse(){
-  if(!S.undo.length){
+  if(!S.undo.some(r=>r.k==="full")){
     const b=xEffectBox(xEnts()),c=V((b.x0+b.x1)/2,(b.y0+b.y1)/2);
     xfxRun("rewind",1800,{c,empty:true},null,null);xBeep("sweep");return echo("TIME-LAPSE spun the clock backwards, found no history, and returned embarrassed.");
   }
-  const frames=S.undo.slice(-80).concat([stateBlob()]),hold=stateBlob(),per=Math.max(45,Math.min(180,5000/frames.length));let i=-1;
+  const frames=S.undo.filter(r=>r.k==="full").slice(-80).map(r=>r.blob).concat([stateBlob()]),hold=stateBlob(),per=Math.max(45,Math.min(180,5000/frames.length));let i=-1;
   xfxRun("rewind",Math.min(XCAP.MS,per*frames.length),{c:V(S.view.cx,S.view.cy),frames},
     ()=>{const want=Math.min(frames.length-1,Math.floor((((typeof performance!=="undefined"&&performance.now)?performance.now():Date.now())-XFX.t0)/per));if(want!==i){i=want;try{applyBlob(frames[i]);}catch(_){}}},
     ()=>{try{applyBlob(hold);}catch(_){}S.sel.clear();updateProps();echo("TIME-LAPSE finished. Reality restored.");});
@@ -8522,8 +8787,7 @@ function punchAt(e){
   punchFX.hit(x,y,ent._hp);
   if(ent._hp>=4){
     snap();                         // undoable removal
-    const idx=S.ents.indexOf(ent);
-    if(idx>=0) S.ents.splice(idx,1);
+    entRemove([S.ents.indexOf(ent)]);
     S.sel.clear(); resetNudge();
     const orphans=flowPrune();
     punchFX.destroy(x,y);
@@ -9740,7 +10004,7 @@ document.getElementById("filein").onchange=e=>{
   r.readAsText(f);
 };
 function newDrawing(){
-  snap(); S.ents=[]; S.sel.clear(); S.refImage=null; refImgEl=null; S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
+  snap(); S.ents=[]; S.sel.clear(); S.hover=-1; S.refImage=null; refImgEl=null; S.groupSeq=1; S.flow.seq=1; S.view={cx:0,cy:0,s:2};
   setDocName("untitled");
   draw(); updateProps(); echo("New drawing");
 }
@@ -9909,6 +10173,8 @@ function auditRibbonButtons(){
 if(window.ResizeObserver) new ResizeObserver(resize).observe(document.getElementById("stage"));
 else window.addEventListener("resize",resize);
 auditRibbonButtons();
+auditEntityTypes();
+reseedEntSeq();
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
 setWorkspaceMode("whiteboard");
 resize(); readout();
