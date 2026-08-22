@@ -254,6 +254,16 @@
   #cmdin:focus{outline:1px solid var(--pen);outline-offset:-1px;border-color:var(--pen);background:#191f25}
   #cmdin::placeholder{color:#59636f}
   #echo{color:#737d89;font-size:9.8px;white-space:nowrap;max-width:40%;overflow:hidden;text-overflow:ellipsis;text-align:right;font-family:var(--mono)}
+  /* ---- direct-on-canvas text editor ---------------------------------- */
+  #inline-editor{
+    position:absolute;z-index:55;display:none;resize:none;overflow:auto;
+    border:1px solid var(--pen);border-radius:4px;outline:0;
+    background:rgba(22,27,33,.94);color:#eef5fb;box-shadow:0 8px 22px rgba(0,0,0,.38);
+    padding:5px 7px;line-height:1.28;white-space:pre-wrap;tab-size:4;
+    caret-color:#fff;min-width:42px;min-height:28px;
+  }
+  #inline-editor.flow-edit{background:rgba(245,248,252,.97);color:#16202b;border-color:#4f93ca;box-shadow:0 0 0 2px rgba(79,147,202,.18),0 8px 22px rgba(0,0,0,.3)}
+  #inline-editor.markup-edit{background:rgba(25,30,36,.96);border-color:currentColor}
   #echo.warn{color:var(--alert)}
 
   /* ---------------- touch and mobile mode ----------------
@@ -429,6 +439,7 @@
 
   <div id="stage">
     <canvas id="cv"></canvas>
+    <textarea id="inline-editor" spellcheck="true" aria-label="Edit drawing text"></textarea>
     <div class="shell-resizer shell-resizer-top" id="resize-top" role="separator" aria-orientation="horizontal" aria-label="Resize ribbon" tabindex="0" title="Drag to resize ribbon · double-click to reset"></div>
     <div class="shell-resizer shell-resizer-bottom" id="resize-bottom" role="separator" aria-orientation="horizontal" aria-label="Resize command and status area" tabindex="0" title="Drag to resize bottom controls · double-click to reset"></div>
   </div>
@@ -723,6 +734,70 @@ function moveEnt(e,d){
 /* let, not const: PNG export repoints these at an offscreen canvas, redraws
    the scene at export resolution, then puts them back. */
 let cv=document.getElementById("cv"), ctx=cv.getContext("2d");
+const inlineEditor=document.getElementById("inline-editor");
+let textEdit=null;
+function textEntityIndex(ent){ return S.ents.indexOf(ent); }
+function positionInlineEditor(){
+  if(!textEdit || !inlineEditor || inlineEditor.style.display==="none") return;
+  const e=textEdit.ent, r=cv.getBoundingClientRect();
+  let left=20,top=20,width=180,height=56,fs=14;
+  if(e.t==="node"){
+    left=X(e.p.x-e.w/2); top=Y(e.p.y+e.h/2); width=Math.max(70,e.w*S.view.s); height=Math.max(38,e.h*S.view.s); fs=Math.max(10,e.fs*S.view.s);
+  } else if(e.t==="edge"){
+    const R=flowRoute(e), m=R?flowRouteMid(R):V(S.view.cx,S.view.cy); fs=Math.max(10,(e.fs||px(S.flow.fontPx))*S.view.s);
+    width=220; height=Math.max(38,fs*2.4); left=X(m.x)-width/2; top=Y(m.y)-height/2;
+  } else if(e.t==="text"){
+    fs=Math.max(10,(e.h||S.textHeight)*S.view.s); left=X(e.p.x); top=Y(e.p.y)-fs*1.3; width=260; height=Math.max(38,fs*2.2);
+  } else if(e.t==="mtext"){
+    const B=mkTextBox(e); fs=Math.max(10,e.h*S.view.s); left=X(B.x0); top=Y(B.y1); width=Math.max(90,(B.x1-B.x0)*S.view.s); height=Math.max(38,(B.y1-B.y0)*S.view.s);
+    if(!e.tw && e.box===false) width=Math.max(180,width);
+  }
+  left=Math.max(2,Math.min(W-width-2,left)); top=Math.max(2,Math.min(H-height-2,top));
+  inlineEditor.style.left=left+"px"; inlineEditor.style.top=top+"px"; inlineEditor.style.width=width+"px"; inlineEditor.style.height=height+"px";
+  inlineEditor.style.fontSize=fs+"px";
+  inlineEditor.style.fontWeight=e.bold?"700":"400"; inlineEditor.style.fontStyle=e.italic?"italic":"normal";
+  inlineEditor.style.textAlign=e.align|| (e.t==="node"?"center":"left");
+  inlineEditor.style.color=e.t==="mtext"?(e.mk&&e.mk.col||"#ff3b30"):(e.mk&&e.mk.text||e.mk&&e.mk.col||"#16202b");
+}
+function finishInlineTextEdit(commit=true){
+  if(!textEdit) return;
+  const T=textEdit, e=T.ent;
+  if(commit){
+    e.s=inlineEditor.value;
+    if(e.t==="node" && e.autoSize!==false) flowFit(e);
+    if(T.emptyDeletes && !String(e.s||"").trim()){
+      const i=textEntityIndex(e); if(i>=0) S.ents.splice(i,1);
+    }
+    echo(e.t==="edge"?"Connector label set":e.t==="node"?"Node text set":e.t==="text"?"Text set":"Markup text set");
+  } else {
+    if(T.fresh){ const i=textEntityIndex(e); if(i>=0) S.ents.splice(i,1); }
+    else e.s=T.before;
+  }
+  textEdit=null; inlineEditor.style.display="none"; inlineEditor.className=""; inlineEditor.value="";
+  flowInvalidateIndex(); draw(); updateProps(); setPrompt();
+}
+function startInlineTextEdit(ent,opt={}){
+  if(!ent) return;
+  if(textEdit) finishInlineTextEdit(true);
+  if(!opt.fresh) snap();
+  textEdit={ent,kind:opt.kind||"flow",fresh:!!opt.fresh,emptyDeletes:!!opt.emptyDeletes,before:String(ent.s||"")};
+  inlineEditor.className=(textEdit.kind==="markup"?"markup-edit":"flow-edit");
+  inlineEditor.value=String(ent.s||""); inlineEditor.style.display="block"; positionInlineEditor();
+  requestAnimationFrame(()=>{inlineEditor.focus();inlineEditor.select();});
+}
+inlineEditor.addEventListener("input",()=>{
+  if(!textEdit) return; const e=textEdit.ent; e.s=inlineEditor.value;
+  if(e.t==="node" && e.autoSize!==false) flowFit(e);
+  draw(); positionInlineEditor();
+});
+inlineEditor.addEventListener("keydown",ev=>{
+  if(ev.key==="Escape"){ev.preventDefault();finishInlineTextEdit(false);return;}
+  if((ev.ctrlKey||ev.metaKey)&&ev.key==="Enter"){ev.preventDefault();finishInlineTextEdit(true);return;}
+  if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==="b"){ev.preventDefault();textEdit.ent.bold=!textEdit.ent.bold;positionInlineEditor();draw();return;}
+  if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==="i"){ev.preventDefault();textEdit.ent.italic=!textEdit.ent.italic;positionInlineEditor();draw();return;}
+  ev.stopPropagation();
+});
+inlineEditor.addEventListener("blur",()=>{ if(textEdit) setTimeout(()=>{if(textEdit && document.activeElement!==inlineEditor)finishInlineTextEdit(true)},0); });
 let W=0,H=0,DPR=1;
 function resize(){
   DPR=window.devicePixelRatio||1;
@@ -1349,13 +1424,11 @@ function commit(){
       return;
     }
     case "text":{
-      const at=P[0];
-      S.pending=[];
-      requestString("Text", "", s=>{
-        if(s){ snap(); S.ents.push({t:"text",li,p:at,h:S.textHeight,s,rot:0}); echo("Text added"); }
-        setPrompt(); draw();
-      });
-      return;
+      const at=P[0]; S.pending=[]; snap();
+      const te={t:"text",li,p:at,h:S.textHeight,s:"",rot:0};
+      S.ents.push(te); S.sel=new Set([S.ents.length-1]);
+      startInlineTextEdit(te,{kind:"cad",fresh:true,emptyDeletes:true});
+      draw(); updateProps(); return;
     }
   }
   if(e){ snap(); S.ents.push(e); echo(TOOLS[S.tool].label+" added"); }
@@ -1854,6 +1927,7 @@ function draw(){
   drawCross();
   mobilePaint();
   xPaint();
+  if(textEdit) positionInlineEditor();
 }
 function drawReferenceImage(){
   const R=S.refImage;
@@ -2540,8 +2614,19 @@ cv.addEventListener("dblclick",()=>{
   else if(S.tool==="pline"||S.tool==="spline") finishPline();
   else if(S.tool==="line"&&S.chain) finishChain();
   else if(S.tool==="select"){
-    const hit=flowHitAt(cursorPoint());
-    if(hit) flowAskLabel(hit);
+    const p=cursorPoint(), hit=flowHitAt(p);
+    if(hit) return flowAskLabel(hit);
+    const hi=hitIndex(p); if(hi>=0 && S.ents[hi] && S.ents[hi].t==="text") return startInlineTextEdit(S.ents[hi],{kind:"cad"});
+    const mi=mkHitMarkup(p);
+    if(mi>=0){ const me=S.ents[mi]; if(me.t==="mtext") return startInlineTextEdit(me,{kind:"markup"}); }
+    for(let i=S.ents.length-1;i>=0;i--){
+      const me=S.ents[i]; if(!mkIsEnt(me)||!mkClosed(me)) continue;
+      const P=mkOutline(me); if(P.length>2 && mkPointInPoly(p,P)){
+        const t={t:"mtext",li:markupLayer(),p,s:"",h:S.mk.textPx/S.view.s,tw:S.mk.textWidthPx/S.view.s,kind:"textbox",box:false,
+          bold:S.mk.textBold,italic:S.mk.textItalic,underline:S.mk.textUnderline,align:"center",bg:S.mk.textBg,bgAlpha:S.mk.textBgAlpha,border:false,mk:mkNewStyle("mktext")};
+        snap();S.ents.push(t);S.sel=new Set([S.ents.length-1]);return startInlineTextEdit(t,{kind:"markup",fresh:true,emptyDeletes:true});
+      }
+    }
   }
 });
 
@@ -2748,10 +2833,14 @@ const MK_TOOLS={
   mkcloud:{kind:"shape", shape:"cloud", label:"Revision Cloud", alias:"CLOUD", hot:"G", size:3,
     svg:'<path d="M3.6 7.6a2 2 0 013.3-1.4A2 2 0 0110.4 5a2 2 0 013.5 1.1 2 2 0 012.5 2.2 2 2 0 010 3.4 2 2 0 01-2.5 2.2A2 2 0 0110.4 15a2 2 0 01-3.5-1.2 2 2 0 01-3.3-1.4 2 2 0 010-4.8z"/>'},
 
-  mktext:{kind:"text", label:"Note", alias:"NOTE", size:2,
-    svg:'<rect x="3" y="4.4" width="14" height="11.2" rx="1.5"/><path d="M6 8.4h8M6 11.6h5"/>'},
+  mktext:{kind:"text", label:"Free Text", alias:"MTEXT", size:2,
+    svg:'<path d="M3 5h14M10 5v11M6.5 16h7"/>'},
+  mktextbox:{kind:"textbox", label:"Text Box", alias:"MTBOX", size:2,
+    svg:'<rect x="2.6" y="3.6" width="14.8" height="12.8" rx="1.4"/><path d="M5.5 7h9M5.5 10h7M5.5 13h8"/>'},
   mkcallout:{kind:"callout", label:"Callout", alias:"CALL", size:2,
     svg:'<rect x="5.4" y="3.4" width="11.6" height="7.6" rx="1.4"/><path d="M8 11l-5 6"/><path d="M3 17l.3-3.2L6.5 14z"/><path d="M8 5.8h6M8 8.2h4"/>'},
+  mksticky:{kind:"sticky", label:"Sticky Note", alias:"MSTICKY", size:2,
+    svg:'<path d="M3 3.5h10l4 4v9H3z"/><path d="M13 3.5v4h4"/><path d="M6 10h8M6 13h6"/>'},
 
   mkpick:{kind:"pick", label:"Pick Style", alias:"MPICK", size:2,
     svg:'<path d="M3.4 16.6l.7-2.6 7-7 1.9 1.9-7 7z"/><path d="M12.2 5.2l1.6-1.6a1.8 1.8 0 012.6 2.6l-1.6 1.6z"/>'},
@@ -2784,6 +2873,9 @@ S.mk={
   fillAlpha:0.18,
   textPx:15,
   textBox:true,
+  textWidthPx:180,
+  textBold:false, textItalic:false, textUnderline:false, textAlign:"left",
+  textBg:"#ffffff", textBgAlpha:.88, textBorder:true,
   headPx:15,
   cloudPx:14,
   smooth:true,
@@ -2864,13 +2956,30 @@ function mkScallops(P, closed, r){
 }
 function mkBump(e){ return e.bump || (e.mk&&e.mk.w? e.mk.w*8 : px(10)); }
 function mkTextBox(e){
-  const lines=String(e.s==null?"":e.s).split("\n");
-  ctx.save(); ctx.font="100px "+getCSS("--draft");
-  let wm=0; for(const l of lines) wm=Math.max(wm, ctx.measureText(l||" ").width);
+  const raw=String(e.s==null?"":e.s), fs=e.h||px(S.mk.textPx), lh=fs*1.34, pad=fs*0.45;
+  const maxW=(e.tw&&e.tw>fs*2)?e.tw:null;
+  ctx.save();
+  const sty=(e.italic?"italic ":"")+(e.bold?"700 ":"");
+  ctx.font=sty+"100px "+getCSS("--draft");
+  const measure=t=>ctx.measureText(t||" ").width/100*fs;
+  const lines=[];
+  for(const para of raw.split("\n")){
+    if(!maxW){ lines.push(para); continue; }
+    const words=para.split(/\s+/).filter(Boolean);
+    if(!words.length){ lines.push(""); continue; }
+    let line=words[0];
+    for(let i=1;i<words.length;i++){
+      const t=line+" "+words[i];
+      if(measure(t)<=Math.max(fs,maxW-pad*2)) line=t;
+      else { lines.push(line); line=words[i]; }
+    }
+    lines.push(line);
+  }
+  let wm=0; for(const l of lines) wm=Math.max(wm,measure(l));
   ctx.restore();
-  const w=wm/100*e.h, lh=e.h*1.34, pad=e.h*0.45;
-  const top=e.p.y+e.h*0.92, bot=e.p.y-(lines.length-1)*lh-e.h*0.30;
-  return {lines, lh, w, pad, x0:e.p.x-pad, x1:e.p.x+w+pad, y0:bot-pad*0.5, y1:top+pad*0.5};
+  const w=maxW||wm+pad*2;
+  const top=e.p.y+fs*0.92, bot=e.p.y-(Math.max(1,lines.length)-1)*lh-fs*0.30;
+  return {lines,lh,w:Math.max(wm,w-pad*2),pad,x0:e.p.x-pad,x1:e.p.x-pad+w,y0:bot-pad*0.5,y1:top+pad*0.5};
 }
 function mkOutline(e){
   if(e.t==="ink") return e.pts;
@@ -2979,27 +3088,39 @@ function mkHead(tip, from, e){
   ctx.fill();
 }
 function mkPaintText(e){
-  const B=mkTextBox(e), s=S.view.s, m=e.mk||{};
+  const B=mkTextBox(e), m=e.mk||{}, s=S.view.s;
+  ctx.save();
+  ctx.globalAlpha=m.alpha==null?1:m.alpha;
   if(e.lead){
-    const cx=(B.x0+B.x1)/2, cy=(B.y0+B.y1)/2;
-    ctx.beginPath(); ctx.moveTo(X(cx),Y(cy)); ctx.lineTo(X(e.lead.x),Y(e.lead.y)); ctx.stroke();
-    mkHead(e.lead, V(cx,cy), e);
+    const edge=V((B.x0+B.x1)/2,(B.y0+B.y1)/2);
+    ctx.strokeStyle=m.col||"#ff3b30"; ctx.fillStyle=ctx.strokeStyle;
+    ctx.lineWidth=Math.max(1,(m.w||px(2))*s); ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(X(edge.x),Y(edge.y)); ctx.lineTo(X(e.lead.x),Y(e.lead.y)); ctx.stroke();
+    mkHead(e.lead,edge,e);
   }
-  const x=X(B.x0), y=Y(B.y1), w=(B.x1-B.x0)*s, h=(B.y1-B.y0)*s;
-  if(e.box!==false && w>1 && h>1){
-    const r=Math.min(7,h/3);
-    ctx.save();
-    ctx.globalAlpha=(m.alpha==null?1:m.alpha)*0.86;
-    ctx.fillStyle=e.boxCol||"rgba(16,19,24,.84)";
-    ctx.beginPath(); mkRoundRect(x,y,w,h,r); ctx.fill();
-    ctx.restore();
-    ctx.beginPath(); mkRoundRect(x,y,w,h,r); ctx.stroke();
+  const boxed=e.box!==false || e.kind==="sticky" || e.kind==="textbox" || e.lead;
+  if(boxed){
+    const bg=e.bg|| (e.kind==="sticky"?"#ffe98a":"#ffffff");
+    ctx.globalAlpha=(m.alpha==null?1:m.alpha)*(e.bgAlpha==null?.88:e.bgAlpha);
+    ctx.fillStyle=bg;
+    ctx.beginPath(); mkRoundRect(X(B.x0),Y(B.y1),(B.x1-B.x0)*s,(B.y1-B.y0)*s,Math.min(8,e.h*.45*s)); ctx.fill();
+    if(e.border!==false){
+      ctx.globalAlpha=m.alpha==null?1:m.alpha; ctx.strokeStyle=m.col||"#ff3b30";
+      ctx.lineWidth=Math.max(1,(e.borderW||m.w||px(1))*s); ctx.stroke();
+    }
   }
+  ctx.globalAlpha=m.alpha==null?1:m.alpha;
   ctx.fillStyle=m.col||"#ff3b30";
+  const sty=(e.italic?"italic ":"")+(e.bold?"700 ":"");
+  ctx.font=sty+Math.max(6,e.h*s)+"px "+getCSS("--draft");
   ctx.textBaseline="alphabetic";
-  ctx.textAlign="left";
-  ctx.font=Math.max(7,e.h*s)+"px "+getCSS("--draft");
-  B.lines.forEach((ln,i)=>{ ctx.fillText(ln, X(e.p.x), Y(e.p.y - i*B.lh)); });
+  const align=e.align||"left"; ctx.textAlign=align;
+  const tx=align==="center"?(B.x0+B.x1)/2:align==="right"?B.x1-B.pad:e.p.x;
+  B.lines.forEach((ln,i)=>{
+    const y=e.p.y-i*B.lh; ctx.fillText(ln,X(tx),Y(y));
+    if(e.underline){ const tw=ctx.measureText(ln).width, yy=Y(y)+2; let x=X(tx); if(align==="center")x-=tw/2; else if(align==="right")x-=tw; ctx.beginPath();ctx.moveTo(x,yy);ctx.lineTo(x+tw,yy);ctx.strokeStyle=ctx.fillStyle;ctx.lineWidth=1;ctx.stroke(); }
+  });
+  ctx.restore();
 }
 function mkPaintEnt(e){
   const m=e.mk||{};
@@ -3065,7 +3186,7 @@ function mkConstrain(a,p,shift,kind){
 }
 function mkPointerDown(e){
   const T=MK_TOOLS[S.tool], p=mkRaw();
-  if(T.kind==="pick"||T.kind==="apply"||T.kind==="text"||T.kind==="callout"){
+  if(T.kind==="pick"||T.kind==="apply"||T.kind==="text"||T.kind==="textbox"||T.kind==="callout"||T.kind==="sticky"){
     mkDraw={tool:S.tool, kind:T.kind, a:p, b:p, moved:false};
     return;
   }
@@ -3116,7 +3237,7 @@ function mkPointerUp(e){
   }
   if(D.kind==="pick")  return mkPickStyle(D.a);
   if(D.kind==="apply") return mkApplyStyle(D.a);
-  if(D.kind==="text"||D.kind==="callout") return mkPlaceText(D);
+  if(D.kind==="text"||D.kind==="textbox"||D.kind==="callout"||D.kind==="sticky") return mkPlaceText(D);
   if(D.kind==="ink"){
     let P=D.ent.pts;
     if(P.length<2){ draw(); return; }
@@ -3155,20 +3276,22 @@ function mkHitMarkup(p){
   return -1;
 }
 function mkPlaceText(D){
-  const T=MK_TOOLS[D.tool];
-  const isCall = T.kind==="callout" && D.moved;
-  const anchor = isCall ? D.b : D.a;
-  const lead   = isCall ? D.a : null;
-  const h=S.mk.textPx/S.view.s;
-  requestString(isCall?"Callout text":"Note text", "", s=>{
-    if(s && s.trim()){
-      snap();
-      S.ents.push({t:"mtext", li:markupLayer(), p:anchor, s:s.replace(/\\n/g,"\n"),
-        h, lead, box:S.mk.textBox, hl:S.mk.headPx/S.view.s, mk:mkNewStyle(D.tool)});
-      echo("Note added");
-    }
-    setPrompt(); draw(); updateProps();
-  });
+  const T=MK_TOOLS[D.tool], h=S.mk.textPx/S.view.s;
+  const isCall=T.kind==="callout" && D.moved;
+  let p=isCall?D.b:D.a, lead=isCall?D.a:null, tw=null, kind=T.kind;
+  if(T.kind==="textbox"){
+    const x0=Math.min(D.a.x,D.b.x), x1=Math.max(D.a.x,D.b.x), y1=Math.max(D.a.y,D.b.y);
+    p=V(x0+px(6),y1-h*1.05); tw=Math.max(px(60),x1-x0);
+  } else if(T.kind==="sticky") tw=S.mk.textWidthPx/S.view.s;
+  else if(isCall) tw=S.mk.textWidthPx/S.view.s;
+  const ent={t:"mtext",li:markupLayer(),p,s:"",h,lead,tw,kind,
+    box:T.kind!=="text" ? true : S.mk.textBox, hl:S.mk.headPx/S.view.s,
+    bold:S.mk.textBold,italic:S.mk.textItalic,underline:S.mk.textUnderline,align:S.mk.textAlign,
+    bg:T.kind==="sticky"?"#ffe98a":S.mk.textBg,bgAlpha:S.mk.textBgAlpha,border:S.mk.textBorder,
+    mk:mkNewStyle(D.tool)};
+  snap(); S.ents.push(ent); const idx=S.ents.length-1; S.sel=new Set([idx]);
+  startInlineTextEdit(ent,{kind:"markup",fresh:true,emptyDeletes:true});
+  draw(); updateProps();
 }
 function mkPickStyle(p){
   const i=mkHitMarkup(p);
@@ -3297,9 +3420,14 @@ function mkOptbar(host, H){
     if(S.mk.fill) host.append(H.num("Fill %", Math.round(S.mk.fillAlpha*100), "1",
       v=>S.mk.fillAlpha=Math.max(2,Math.min(100,v))/100));
   }
-  if(T.kind==="text"||T.kind==="callout"){
+  if(T.kind==="text"||T.kind==="textbox"||T.kind==="callout"||T.kind==="sticky"){
     host.append(H.num("Text px", S.mk.textPx, "any", v=>S.mk.textPx=Math.max(6,Math.min(160,v))));
-    host.append(H.chk("Boxed", S.mk.textBox, v=>S.mk.textBox=v));
+    host.append(H.chk("Bold", S.mk.textBold, v=>S.mk.textBold=v));
+    host.append(H.chk("Italic", S.mk.textItalic, v=>S.mk.textItalic=v));
+    host.append(H.chk("Underline", S.mk.textUnderline, v=>S.mk.textUnderline=v));
+    host.append(H.radio([["left","Left"],["center","Centre"],["right","Right"]], S.mk.textAlign, v=>S.mk.textAlign=v));
+    if(T.kind==="text") host.append(H.chk("Boxed", S.mk.textBox, v=>S.mk.textBox=v));
+    if(T.kind!=="text") host.append(H.num("Width px", S.mk.textWidthPx, "any", v=>S.mk.textWidthPx=Math.max(60,Math.min(800,v))));
   }
   const hint=document.createElement("span");
   hint.className="oh";
@@ -3307,8 +3435,10 @@ function mkOptbar(host, H){
     T.kind==="ink"     ? "drag to draw" :
     T.kind==="erase"   ? "drag over markup to delete" :
     T.kind==="shape"   ? "drag  ·  Shift constrains" :
-    T.kind==="callout" ? "drag from the target to the note" :
-    T.kind==="text"    ? "click, then type the note" :
+    T.kind==="callout" ? "drag target to note, then type" :
+    T.kind==="textbox" ? "drag a box, then type" :
+    T.kind==="sticky"  ? "click to drop a note and type" :
+    T.kind==="text"    ? "click and type directly on canvas" :
     T.kind==="pick"    ? "click markup to adopt its style" :
                          "click markup to restyle it";
   host.append(hint);
@@ -3359,6 +3489,11 @@ function mkPropRows(e,H){
     rows.push(H.num("Text px", e.h*s, v=>{ snap(); e.h=Math.max(1e-6,v)/s; }));
     rows.push(H.choice("Box", e.box===false?"no":"yes", [["yes","Boxed"],["no","Plain"]],
       v=>{ e.box = v==="yes"; }));
+    rows.push(H.choice("Bold", e.bold?"yes":"no", [["no","No"],["yes","Yes"]], v=>e.bold=(v==="yes")));
+    rows.push(H.choice("Italic", e.italic?"yes":"no", [["no","No"],["yes","Yes"]], v=>e.italic=(v==="yes")));
+    rows.push(H.choice("Underline", e.underline?"yes":"no", [["no","No"],["yes","Yes"]], v=>e.underline=(v==="yes")));
+    rows.push(H.choice("Align", e.align||"left", [["left","Left"],["center","Centre"],["right","Right"]], v=>e.align=v));
+    if(e.tw) rows.push(H.num("Box width", e.tw, v=>{snap();e.tw=Math.max(px(40),v);}));
     if(e.lead) rows.push(H.info("Leader","Yes"));
   }
   if(e.t==="ink") rows.push(H.info("Points", String(e.pts.length)));
@@ -3542,15 +3677,19 @@ Object.assign(ACTIONS,{
   ftidy:{label:"Snap To Grid", alias:"FTIDY",
     svg:'<path d="M2.6 7h14.8M2.6 13h14.8M7 2.6v14.8M13 2.6v14.8"/>',
     run:()=>flowTidy()},
-  fautosize:{label:"Shrink To Text", alias:"FFIT",
+  fautosize:{label:"Fit Node to Text", alias:"FFIT",
     svg:'<rect x="2.4" y="5.4" width="15.2" height="9.2" rx="1.6"/><path d="M5.6 10h3.2M14.4 10h-3.2"/><path d="M7.4 8.4L5.6 10l1.8 1.6M12.6 8.4L14.4 10l-1.8 1.6"/>',
-    run:()=>flowAutoSize()}
+    run:()=>flowAutoSize()},
+  ffittext:{label:"Fit Text to Node", alias:"FFITT",
+    svg:'<rect x="2.4" y="4" width="15.2" height="12" rx="1.5"/><path d="M5 7h10M10 7v6M7 13h6"/>',
+    run:()=>flowFitText()}
 });
 
 S.flow={
   fill:"#f4f7fb", line:"#2d6fa8", text:"#16202b",
   edgeCol:"#8fb6d8", edgeW:2, strokeW:2,
   fontPx:13, w:170, h:72,
+  textBold:false, textItalic:false, textAlign:"center", textVAlign:"middle",
   route:"ortho", arrowStart:false, arrowEnd:true,
   headPx:13, askNode:true, askEdge:false,
   seq:1
@@ -3750,9 +3889,12 @@ function flowPaintNode(e,selected,hot){
   if(L.length){
     const lh=e.fs*1.32*s, cx=X(e.p.x), cy=Y(e.p.y);
     ctx.fillStyle=m.text||"#16202b";
-    ctx.textAlign="center"; ctx.textBaseline="middle";
-    ctx.font=Math.max(6,e.fs*s)+"px "+getCSS("--draft");
-    L.forEach((ln,i)=> ctx.fillText(ln, cx, cy + (i-(L.length-1)/2)*lh));
+    const al=e.align||"center"; ctx.textAlign=al; ctx.textBaseline="middle";
+    ctx.font=(e.italic?"italic ":"")+(e.bold?"700 ":"")+Math.max(6,e.fs*s)+"px "+getCSS("--draft");
+    const pad=e.fs*.65*s, tx=al==="left"?x+pad:al==="right"?x+w-pad:cx;
+    const va=e.valign||"middle", block=L.length*lh;
+    const base=va==="top"?y+pad+lh/2:va==="bottom"?y+h-pad-block+lh/2:cy-(L.length-1)*lh/2;
+    L.forEach((ln,i)=> ctx.fillText(ln, tx, base+i*lh));
   }
   ctx.restore();
 }
@@ -3780,7 +3922,7 @@ function flowPaintEdge(e,selected,hot){
     ctx.globalAlpha=1;
     ctx.fillStyle=m.col||"#8fb6d8";
     ctx.textAlign="center"; ctx.textBaseline="middle";
-    ctx.font=Math.max(6,fs*s)+"px "+getCSS("--draft");
+    ctx.font=(e.italic?"italic ":"")+(e.bold?"700 ":"")+Math.max(6,fs*s)+"px "+getCSS("--draft");
     ctx.fillText(e.s, X(mid.x), Y(mid.y));
   }
   ctx.restore();
@@ -3831,6 +3973,7 @@ function flowMkNode(k, centre, w, h){
   const e={
     t:"node", k, id:flowNewId(), li:flowLayer(),
     p:centre, w, h, s:"", fs:S.flow.fontPx/S.view.s,
+    bold:S.flow.textBold, italic:S.flow.textItalic, align:S.flow.textAlign, valign:S.flow.textVAlign, autoSize:true,
     mk:{fill:S.flow.fill, line:S.flow.line, text:S.flow.text, w:S.flow.strokeW/S.view.s}
   };
   if(k==="note") e.mk.fill = S.flow.fill==="#f4f7fb" ? "#ffe9a8" : S.flow.fill;
@@ -3952,16 +4095,8 @@ function flowHitEnt(e,p,tol){
   return false;
 }
 function flowAskLabel(e, fresh){
-  const isEdge=e.t==="edge";
-  requestString(isEdge?"Connector label":"Node label", String(e.s||""), v=>{
-    snap();
-    e.s=(v==null?"":v).replace(/\\n/g,"\n");
-    if(e.t==="node") flowFit(e);
-    setPrompt(); draw(); updateProps();
-    echo(fresh? (flowEntName(e).toLowerCase()+" added") : "Label set");
-  });
+  startInlineTextEdit(e,{kind:"flow",fresh:!!fresh,emptyDeletes:false});
 }
-
 /* ---- resize under the Select tool ------------------------------------ */
 function flowGripAt(e,sx,sy){
   if(!e || e.t!=="node") return null;
@@ -4034,6 +4169,23 @@ function flowAutoSize(){
   N.forEach(flowFitTight);
   draw(); updateProps(); echo("Shrank "+N.length+" node"+(N.length>1?"s":"")+" to its text");
 }
+function flowFitText(){
+  const sel=flowSelNodes();
+  if(!sel.length) return echo("Select one or more Flow nodes first","warn");
+  snap();
+  for(const e of sel){
+    let guard=80;
+    while(guard-- && e.fs>px(5)){
+      const L=flowLines(e), block=L.length*e.fs*1.32;
+      const widest=L.length?Math.max(...L.map(x=>flowTextW(x,e.fs))):0;
+      const usable=Math.max(e.fs,e.w*(e.k==="dec"?.62:1)-e.fs*1.3);
+      const usableH=e.h/(e.k==="dec"?1.8:1)-e.fs*1.1;
+      if(widest<=usable+1e-9 && block<=usableH+1e-9) break;
+      e.fs*=.94;
+    }
+  }
+  draw();updateProps();echo("Fit text inside "+sel.length+" node"+(sel.length>1?"s":""));
+}
 /* an edge whose node is gone is meaningless - drop it with the node */
 function flowPrune(){
   const before=S.ents.length;
@@ -4096,6 +4248,10 @@ function flowOptbar(host,H){
     host.append(H.num("W px", S.flow.w, "any", v=>S.flow.w=Math.max(20,v)));
     host.append(H.num("H px", S.flow.h, "any", v=>S.flow.h=Math.max(16,v)));
     host.append(H.num("Text px", S.flow.fontPx, "any", v=>S.flow.fontPx=Math.max(5,v)));
+    host.append(H.chk("Bold", S.flow.textBold, v=>S.flow.textBold=v));
+    host.append(H.chk("Italic", S.flow.textItalic, v=>S.flow.textItalic=v));
+    host.append(H.radio([["left","Left"],["center","Centre"],["right","Right"]], S.flow.textAlign, v=>S.flow.textAlign=v));
+    host.append(H.radio([["top","Top"],["middle","Middle"],["bottom","Bottom"]], S.flow.textVAlign, v=>S.flow.textVAlign=v));
     host.append(H.chk("Ask for label", S.flow.askNode, v=>S.flow.askNode=v));
     host.append(lab("click drops · drag sizes"));
     return;
@@ -4111,7 +4267,7 @@ function flowOptbar(host,H){
     host.append(lab("drag node to node"));
     return;
   }
-  host.append(lab("click a node or connector to relabel"));
+  host.append(lab("click a node or connector to edit text inline"));
 }
 function flowWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
@@ -4155,6 +4311,10 @@ function flowPropRows(e,H){
     rows.push(H.num("Centre X", e.p.x, v=>{ snap(); e.p.x=v; }));
     rows.push(H.num("Centre Y", e.p.y, v=>{ snap(); e.p.y=v; }));
     rows.push(H.num("Text px", e.fs*s, v=>{ snap(); e.fs=Math.max(1e-6,v)/s; }));
+    rows.push(H.choice("Bold", e.bold?"yes":"no", [["no","No"],["yes","Yes"]], v=>e.bold=(v==="yes")));
+    rows.push(H.choice("Italic", e.italic?"yes":"no", [["no","No"],["yes","Yes"]], v=>e.italic=(v==="yes")));
+    rows.push(H.choice("Align", e.align||"center", [["left","Left"],["center","Centre"],["right","Right"]], v=>e.align=v));
+    rows.push(H.choice("Vertical", e.valign||"middle", [["top","Top"],["middle","Middle"],["bottom","Bottom"]], v=>e.valign=v));
     rows.push(colour("Fill", ()=>e.mk.fill, v=>e.mk.fill=v));
     rows.push(colour("Line", ()=>e.mk.line, v=>e.mk.line=v));
     rows.push(colour("Text", ()=>e.mk.text, v=>e.mk.text=v));
@@ -4164,6 +4324,8 @@ function flowPropRows(e,H){
     return rows;
   }
   rows.push(H.txt("Label", String(e.s||""), v=>{ snap(); e.s=v; }));
+  rows.push(H.choice("Bold", e.bold?"yes":"no", [["no","No"],["yes","Yes"]], v=>e.bold=(v==="yes")));
+  rows.push(H.choice("Italic", e.italic?"yes":"no", [["no","No"],["yes","Yes"]], v=>e.italic=(v==="yes")));
   rows.push(H.info("From", e.from&&e.from.id ? e.from.id : "free point"));
   rows.push(H.info("To",   e.to&&e.to.id     ? e.to.id   : "free point"));
   rows.push(H.choice("Route", e.route==="ortho"?"ortho":"straight",
@@ -5480,9 +5642,16 @@ function sanEnt(e,nLayers,nStyles){
     case "mtext": {
       const p=P("p");
       if(!p) return null;
+      const kinds=new Set(["text","textbox","callout","sticky"]);
       const o=Object.assign(base,{t:"mtext",p,s:safeStr(e.s),
         h:Math.abs(safeNum(e.h,2.5))||2.5, hl:Math.abs(safeNum(e.hl,0)),
-        box:e.box!==false, mk:sanMk(e.mk)});
+        box:e.box!==false, kind:kinds.has(e.kind)?e.kind:(e.lead?"callout":"text"),
+        bold:!!e.bold,italic:!!e.italic,underline:!!e.underline,
+        align:["left","center","right"].includes(e.align)?e.align:"left",
+        bg:okColor(e.bg,e.kind==="sticky"?"#ffe98a":"#ffffff"),
+        bgAlpha:Math.max(0,Math.min(1,safeNum(e.bgAlpha,.88,1))), border:e.border!==false,
+        borderW:Math.abs(safeNum(e.borderW,0)), tw:Math.max(0,Math.abs(safeNum(e.tw,0))),
+        mk:sanMk(e.mk)});
       const lead=P("lead"); o.lead=lead||null;
       if(e.boxCol!=null) o.boxCol=okColor(e.boxCol,null);
       return o;
@@ -5493,7 +5662,10 @@ function sanEnt(e,nLayers,nStyles){
       const o=Object.assign(base,{t:"node",k:e.k,p,
         id:safeStr(e.id,64)||("N"+Math.floor(Math.random()*1e9)),
         w:Math.abs(safeNum(e.w,10))||10, h:Math.abs(safeNum(e.h,10))||10,
-        s:safeStr(e.s), fs:Math.abs(safeNum(e.fs,2))||2, mk:sanMk(e.mk,"node")});
+        s:safeStr(e.s), fs:Math.abs(safeNum(e.fs,2))||2,
+        bold:!!e.bold,italic:!!e.italic,align:["left","center","right"].includes(e.align)?e.align:"center",
+        valign:["top","middle","bottom"].includes(e.valign)?e.valign:"middle",autoSize:e.autoSize!==false,
+        mk:sanMk(e.mk,"node")});
       if(e.k==="lane") o.dir = e.dir==="h" ? "h" : "v";
       return o;
     }
@@ -5502,7 +5674,7 @@ function sanEnt(e,nLayers,nStyles){
       if(!from||!to) return null;
       const o=Object.assign(base,{t:"edge",from,to,
         route: e.route==="ortho" ? "ortho" : "straight",
-        a0:!!e.a0, a1:e.a1!==false, s:safeStr(e.s),
+        a0:!!e.a0, a1:e.a1!==false, s:safeStr(e.s), bold:!!e.bold,italic:!!e.italic,
         fs:Math.abs(safeNum(e.fs,2))||2, hl:Math.abs(safeNum(e.hl,0)), mk:sanMk(e.mk)});
       const wp=sanPts(e.wp);
       if(wp.length) o.wp=wp.slice(0,256);
@@ -7941,7 +8113,7 @@ function xVisibleTabs(){
 
 /* ============================================================ keyboard */
 window.addEventListener("keydown",e=>{
-  const typing = !!S.ask || document.activeElement===cmdin;
+  const typing = !!S.ask || document.activeElement===cmdin || document.activeElement===inlineEditor || !!textEdit;
   if(e.key==="Escape"){ cmdin.value=""; cancel(); return; }
   if(!typing && e.key==="Tab" && S.tool!=="measurealong" && S.snapList.length>1){
     e.preventDefault(); snapCycleNext(); return;
@@ -7967,6 +8139,10 @@ window.addEventListener("keydown",e=>{
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="o"){ e.preventDefault(); return document.getElementById("b2dbin").click(); }
   if(e.key==="Delete"||e.key==="Backspace"){ if(!typing){ e.preventDefault(); eraseSel(); } return; }
   if(typing) return;
+  if(e.key==="F2" && S.sel.size===1){ const ent=S.ents[[...S.sel][0]]; if(flowIsEnt(ent)) {e.preventDefault();return flowAskLabel(ent);} if(ent&&ent.t==="mtext"){e.preventDefault();return startInlineTextEdit(ent,{kind:"markup"});} if(ent&&ent.t==="text"){e.preventDefault();return startInlineTextEdit(ent,{kind:"cad"});} }
+  if(S.tool==="select" && S.sel.size===1 && e.key.length===1 && !e.ctrlKey&&!e.metaKey&&!e.altKey){
+    const ent=S.ents[[...S.sel][0]]; if(flowIsEnt(ent)){e.preventDefault(); startInlineTextEdit(ent,{kind:"flow"}); inlineEditor.value=e.key; ent.s=e.key; inlineEditor.setSelectionRange(1,1); draw(); return;}
+  }
   const NUD={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]}[e.key];
   if(NUD){
     if(!S.sel.size || S.pending.length || S.base) return;
@@ -7992,7 +8168,7 @@ const RIBBON={
   Markup:[
     {name:"Freehand", big:"mkpencil", small:["mkmarker","mkhighlight","mklasso","mkerase"]},
     {name:"Shapes",   big:"mkarrow",  small:["mkline","mkdarrow","mkrect","mkellipse","mkcloud"]},
-    {name:"Notes",    big:"mkcallout",small:["mktext"]},
+    {name:"Text",     big:"mktext",   small:["mktextbox","mkcallout","mksticky"]},
     {name:"Pen",      custom:"pen"},
     {name:"Markup",   big:"mkselect", small:["mkpick","mkapply","mkshow","mkclear"]}
   ],
@@ -8001,7 +8177,7 @@ const RIBBON={
     {name:"Connect", big:"fedge",  small:["flabel","fclearwp"]},
     {name:"Style",   custom:"flow"},
     {name:"Arrange", big:"ftidy",
-      small:["falignl","falignc","falignt","falignm","fdisth","fdistv","fautosize"]}
+      small:["falignl","falignc","falignt","falignm","fdisth","fdistv","fautosize","ffittext"]}
   ],
   Insert:[
     {name:"Drawing", big:"savedwg", small:["opendwg","newdwg","undo","redo","wipelocal"]},
@@ -8629,7 +8805,7 @@ function updateProps(){
       "<b style=\"color:#ff6f63\">Markup</b> tab: drag to draw &middot; <kbd>K</kbd> pencil &middot; <kbd>B</kbd> marker &middot; <kbd>H</kbd> highlighter &middot; <kbd>W</kbd> arrow &middot; <kbd>G</kbd> cloud<br>"+
       "Markup lands on its own MARKUP layer &middot; <kbd>MSHOW</kbd> hide it &middot; <kbd>MERA</kbd> erase it &middot; <kbd>MCLR</kbd> clear it<br>"+
       "<b style=\"color:#8fb6d8\">Flow</b> tab: <kbd>N</kbd> node, click drops or drag sizes &middot; <kbd>J</kbd> connector, drag node to node<br>"+
-      "Connectors bind to nodes and re-route when you move them &middot; double-click a node to relabel<br>"+
+      "Connectors bind to nodes and re-route when you move them &middot; double-click/F2 edits text directly on canvas &middot; Ctrl+Enter commits<br>"+
       "Drag a hollow diamond on a connector to add a waypoint &middot; <kbd>FCWP</kbd> clears them<br>"+
       "Select anything and drag its square handles to reshape it &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd>/<kbd>X</kbd>/<kbd>V</kbd> clipboard<br>"+
       "<kbd>Ctrl</kbd>+<kbd>S</kbd> save a .b2db &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open one &middot; <kbd>PNG</kbd> export &middot; <kbd>CPIMG</kbd> copy image<br>"+
