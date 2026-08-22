@@ -518,6 +518,7 @@ const S = {
   base: null,         // move/copy base point
   mouse: {x:0,y:0, sx:0, sy:0},
   snapHit: null,
+  alignGuide: null,       // temporary inferred alignment / parallel guide while drawing
   hover: -1,
   band: null,         // window-select rubber band
   ask: null,          // pending command-bar question {label, cb}
@@ -837,6 +838,7 @@ function cursorPoint(){
   if(MK_TOOLS[S.tool]) return raw;
   let p=resolveSnap(raw);
   const from=S.pending.length? S.pending[S.pending.length-1] : (S.base||null);
+  if(!S.snapHit) p=alignmentSnap(p,from);
   if(!S.snapHit) p=applyDimSnap(p,from);
   if(S.ortho && from && !S.snapHit) p=applyOrtho(p,from);
   return p;
@@ -1064,7 +1066,7 @@ function setTool(t){
     return;
   }
   const prev=S.tool; if(isMeasureTool(prev)&&prev!==t) clearMeasurement(false);
-  S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; resetNudge();
+  S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; S.alignGuide=null; resetNudge();
   if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
   if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && S.refImage && S.refImage.locked){ echo("Reference image is locked","warn"); t="select"; }
   if(SELOPS.includes(t) && !S.sel.size){
@@ -1375,7 +1377,7 @@ function cancel(){
     if(S.measureEscArmed){ S.measureEscArmed=false; setTool("select"); echo(""); return; }
     S.measureEscArmed=true; echo("Esc again to exit Measure"); return;
   }
-  S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
+  S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; S.alignGuide=null; mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
   if(XFX.raf||XFX.marks.length) xfxStop();
   if(S.tool!=="select") setTool("select"); else { S.sel.clear(); draw(); updateProps(); }
   echo("");
@@ -1847,6 +1849,7 @@ function draw(){
   mkPaintLive();
   flowPaintLive();
   drawBand();
+  drawAlignmentGuide();
   drawSnapMarker();
   drawCross();
   mobilePaint();
@@ -2176,6 +2179,25 @@ function drawBand(){
   const w=Math.abs(b.x-a.x)*S.view.s, h=Math.abs(b.y-a.y)*S.view.s;
   ctx.fillRect(x,y,w,h); ctx.strokeRect(x,y,w,h);
   ctx.setLineDash([]);
+}
+function drawAlignmentGuide(){
+  const g=S.alignGuide; if(!g) return;
+  ctx.save();
+  ctx.strokeStyle=getCSS("--snap"); ctx.lineWidth=1; ctx.globalAlpha=.7;
+  ctx.setLineDash([7,5]);
+  if(g.kind==="v"){
+    const sx=X(g.x); ctx.beginPath(); ctx.moveTo(sx,0); ctx.lineTo(sx,H); ctx.stroke();
+  } else if(g.kind==="h"){
+    const sy=Y(g.y); ctx.beginPath(); ctx.moveTo(0,sy); ctx.lineTo(W,sy); ctx.stroke();
+  } else if(g.kind==="parallel" && g.a && g.b){
+    const d=norm(sub(g.b,g.a));
+    if(isFinite(d.x)){
+      const far=px(Math.hypot(W,H)+80);
+      const a=sub(g.a,mul(d,far)), b=add(g.a,mul(d,far));
+      ctx.beginPath(); ctx.moveTo(X(a.x),Y(a.y)); ctx.lineTo(X(b.x),Y(b.y)); ctx.stroke();
+    }
+  }
+  ctx.restore();
 }
 function drawSnapMarker(){
   if(!S.snapHit) return;
@@ -2532,6 +2554,8 @@ function zoomExtents(){
 
 /* ============================================================ command line */
 const cmdin=document.getElementById("cmdin");
+// Browsers can restore stale form text on reload/history navigation. The command line must always boot empty.
+cmdin.value=""; cmdin.defaultValue=""; cmdin.removeAttribute("value");
 cmdin.addEventListener("keydown",e=>{
   if(e.key!=="Enter") return;
   e.preventDefault();
@@ -5823,6 +5847,66 @@ function snapSetOverride(k){
   echo(k? ("Snap override: "+SNAP_NAME[k]+" for the next pick") : "Snap override cleared");
   paintOptbar(); draw();
 }
+/* Revit-style temporary alignment inference while drawing.  This is not an
+   object snap to geometry under the cursor: it lets the cursor lock to an
+   existing X/Y datum or run parallel to an existing straight segment, then
+   carries that inferred direction until the next pick. */
+function alignmentSnap(p,from){
+  S.alignGuide=null;
+  if(!from || !S.osnap || S.snapSuspend) return p;
+  if(!(S.tool==="line" || S.tool==="pline" || S.tool==="spline")) return p;
+
+  const tolPxA=7, tolW=px(tolPxA);
+  let best=null, bestPx=1e9;
+  const consider=(q,guide,label,src)=>{
+    if(!q||!isFinite(q.x)||!isFinite(q.y)) return;
+    const dpx=Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy);
+    if(dpx>tolPxA || dpx>=bestPx) return;
+    bestPx=dpx; best={p:q,guide,label,src};
+  };
+
+  /* Datum alignment to meaningful existing points.  The guide can extend far
+     beyond the point itself, which is what makes 'line these two things up'
+     usable without having to hover over the source endpoint. */
+  let seen=0;
+  for(let i=S.ents.length-1;i>=0 && seen<700;i--){
+    const e=S.ents[i], L=S.layers[e.li]; if(L && !L.on) continue;
+    seen++;
+    const pts=[];
+    try{ pts.push(...entPoints(e),...entMids(e),...entCenters(e)); }catch(_){ }
+    for(const q of pts){
+      const dx=Math.abs(X(p.x)-X(q.x)), dy=Math.abs(Y(p.y)-Y(q.y));
+      if(dx<=tolPxA) consider(V(q.x,p.y),{kind:"v",x:q.x,src:q},"Aligned",q);
+      if(dy<=tolPxA) consider(V(p.x,q.y),{kind:"h",y:q.y,src:q},"Aligned",q);
+    }
+  }
+
+  /* Parallel inference. Project the cursor onto a ray through the active point
+     with the same direction as nearby straight geometry. This gives the classic
+     temporary parallel guide instead of forcing Ortho. */
+  let segCount=0;
+  for(let i=S.ents.length-1;i>=0 && segCount<500;i--){
+    const e=S.ents[i], L=S.layers[e.li]; if(L && !L.on) continue;
+    let cs=[]; try{ cs=curvesOf(e); }catch(_){ continue; }
+    for(const c of cs){
+      if(c.k!=="seg") continue; segCount++;
+      const d=sub(c.b,c.a), dl=len(d); if(!(dl>1e-9)) continue;
+      const u=mul(d,1/dl);
+      let t=sub(p,from).x*u.x+sub(p,from).y*u.y;
+      let q=add(from,mul(u,t));
+      let dpx=Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy);
+      /* Also test the opposite orientation; geometrically identical, but this
+         keeps the inferred travel direction intuitive around 180-degree lines. */
+      if(dpx<=tolPxA) consider(q,{kind:"parallel",a:from,b:q,dir:u},"Parallel",c);
+    }
+  }
+
+  if(!best) return p;
+  S.alignGuide=best.guide;
+  S.snapHit={p:best.p,kind:"align",label:best.label};
+  return best.p;
+}
+
 /* Revit rounds the rubber band to fixed length and angle increments when
    nothing better is under the cursor. */
 function applyDimSnap(p,from){
@@ -9487,6 +9571,7 @@ else window.addEventListener("resize",resize);
 auditRibbonButtons();
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
 resize(); readout();
+cmdin.value=""; cmdin.defaultValue="";
 cmdin.focus();
 setDocName(S.docName);
 (function initExperimental(){
