@@ -6099,12 +6099,29 @@ function xMagnet(){
   echo("Welded "+groups.length+" junction"+(groups.length===1?"":"s")+", moved "+moved+" endpoint"+(moved===1?"":"s"));
 }
 function xVacuum(){
+  /* Experimental means literal: if objects are selected, suck them out of the drawing.
+     With no selection it falls back to the original drawing-cleanup behaviour. Everything is undoable. */
+  const sel=[...S.sel].filter(i=>S.ents[i]).sort((a,b)=>b-a);
+  if(sel.length){
+    const victims=sel.map(i=>S.ents[i]);
+    const box=xBox(victims), c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+    snap();
+    for(const i of sel) S.ents.splice(i,1);
+    S.sel.clear(); resetNudge(); flowPrune(); flowInvalidateIndex(); updateProps();
+    xUiSweep();
+    xfxRun("vacuumEat",1500,{box,c,victims:victims.map(e=>JSON.parse(JSON.stringify(e)))},(t)=>{
+      if(Math.random()<.65 && XFX.parts.length<XCAP.PARTS){
+        const a=Math.random()*TAU, r=px(20+Math.random()*120);
+        xPart(c.x+Math.cos(a)*r,c.y+Math.sin(a)*r,-Math.cos(a)*r*2,-Math.sin(a)*r*2,700,"#54c7c4",1.8);
+      }
+    },null);
+    xBeep("sweep");
+    echo("VACUUM ATE "+victims.length+" selected object"+(victims.length===1?"":"s")+". Undo if that was a terrible idea.");
+    draw(); return;
+  }
   const before=S.ents.length;
-  const keyOf=e=>{
-    try{ return e.t+"|"+JSON.stringify(entPoints(e))+"|"+(e.r||"")+"|"+(e.s||""); }catch(_){ return null; }
-  };
-  const seen=new Set();
-  const junk={zero:0,dupe:0,empty:0,orphan:0};
+  const keyOf=e=>{ try{ return e.t+"|"+JSON.stringify(entPoints(e))+"|"+(e.r||"")+"|"+(e.s||""); }catch(_){ return null; } };
+  const seen=new Set(), junk={zero:0,dupe:0,empty:0,orphan:0};
   snap();
   S.ents=S.ents.filter(e=>{
     if(e.t==="line" && dist(e.a,e.b)<1e-9){ junk.zero++; return false; }
@@ -6112,19 +6129,15 @@ function xVacuum(){
     if((e.t==="pline"||e.t==="spline") && (!e.pts||e.pts.length<2)){ junk.empty++; return false; }
     if((e.t==="text"||e.t==="mtext") && !String(e.s||"").trim()){ junk.empty++; return false; }
     if(e.t==="ink" && (!e.pts||e.pts.length<2)){ junk.empty++; return false; }
-    const k=keyOf(e);
-    if(k){ if(seen.has(k)){ junk.dupe++; return false; } seen.add(k); }
+    const k=keyOf(e); if(k){ if(seen.has(k)){ junk.dupe++; return false; } seen.add(k); }
     return true;
   });
   junk.orphan=flowPrune();
   const gone=before-S.ents.length;
-  if(!gone){ S.undo.pop(); return echo("Nothing to clean up - the drawing is tidy"); }
-  S.sel.clear(); resetNudge(); flowInvalidateIndex(); draw(); updateProps();
-  xUiSweep();
-  xfxRun("vacuum",900,{box:xBox(xEnts())},null,null);
-  xBeep("sweep");
-  echo("Vacuumed "+gone+": "+junk.dupe+" duplicate, "+junk.zero+" zero-length, "+
-       junk.empty+" empty, "+junk.orphan+" orphaned connector"+(junk.orphan===1?"":"s"));
+  if(!gone){ S.undo.pop(); xfxRun("vacuumEmpty",850,{c:cursorPoint()},null,null); return echo("Vacuum found nothing. It is now aggressively disappointed."); }
+  S.sel.clear(); resetNudge(); flowInvalidateIndex(); updateProps();
+  xUiSweep(); xfxRun("vacuum",1200,{box:xBox(xEnts())},null,null); xBeep("sweep"); draw();
+  echo("Vacuumed "+gone+": "+junk.dupe+" duplicate, "+junk.zero+" zero-length, "+junk.empty+" empty, "+junk.orphan+" orphaned connector"+(junk.orphan===1?"":"s"));
 }
 function xIron(){
   const list=xSelOrAll();
@@ -6309,28 +6322,38 @@ function xSonar(p){
        "widest "+fmt(farthest.d)+" mm, "+hits.length+" of "+n+" rays hit something");
 }
 function xEarthquake(){
-  const tol=px(S.x.weldR);
-  const list=xEnts();
-  const handles=[];
-  for(const e of list) for(const h of xEndpoints(e)) handles.push({p:h.get(),e});
-  const fake=[];
-  let pairs=0;
-  for(let i=0;i<handles.length && pairs<XCAP.PAIRS;i++)
-    for(let j=i+1;j<handles.length && pairs<XCAP.PAIRS;j++){
-      pairs++;
-      const d=dist(handles[i].p,handles[j].p);
-      if(d>1e-9 && d<=tol && fake.length<600) fake.push(handles[i].p);
-    }
-  const dangling=S.ents.filter(e=>e.t==="edge" && (!flowEnd(e.from)||!flowEnd(e.to))).length;
+  const list=xSelOrAll().filter(e=>e && (e.t==="line"||e.t==="pline"||e.t==="spline"));
+  if(!list.length) return echo("Earthquake needs some linework to ruin","warn");
+  const box=xBox(list), amp=px(Math.max(10,S.x.weldR*1.8));
+  snap();
   XFX.marks.length=0;
-  for(const q of fake) XFX.marks.push({kind:"crack",p:q});
-  xUiQuake();
-  xfxRun("shake",900,{box:xBox(list)},null,null);
-  xBeep("thunk");
-  if(!fake.length && !dangling) echo("Shook it - everything held. No false joints within "+fmt(tol)+".");
-  else echo("Shook it - "+fake.length+" joint"+(fake.length===1?"":"s")+" that look connected are not"+
-            (dangling?(", and "+dangling+" connector"+(dangling===1?"":"s")+" have lost a node"):"")+
-            ". Magnet will close them.","warn");
+  let broken=0, shifted=0;
+  const out=[];
+  for(const e of S.ents){
+    if(!list.includes(e)){ out.push(e); continue; }
+    if(e.t==="line" && dist(e.a,e.b)>px(16)){
+      const t=.32+Math.random()*.36;
+      const mid=add(e.a,mul(sub(e.b,e.a),t));
+      const d=norm(sub(e.b,e.a)), n=perp(d);
+      const gap=px(5+Math.random()*14), shove=(Math.random()-.5)*amp;
+      const m1=add(mid,mul(d,-gap)), m2=add(mid,mul(d,gap));
+      const a1=add(e.a,mul(n,shove)), b1=add(m1,mul(n,shove));
+      const a2=add(m2,mul(n,-shove*.7)), b2=add(e.b,mul(n,-shove*.7));
+      out.push(Object.assign({},e,{a:a1,b:b1}),Object.assign({},e,{a:a2,b:b2}));
+      XFX.marks.push({kind:"crack",p:mid}); broken++; shifted+=Math.abs(shove);
+    } else if(e.pts && e.pts.length){
+      const pts=e.pts.map((q,i)=>V(q.x+(Math.random()-.5)*amp,q.y+(Math.random()-.5)*amp));
+      out.push(Object.assign({},e,{pts})); shifted++;
+    } else out.push(e);
+  }
+  S.ents=out; S.sel.clear(); flowInvalidateIndex(); updateProps();
+  xUiQuake(); xfxRun("megaShake",1800,{box,amp},(t)=>{
+    if(Math.random()<.8 && XFX.parts.length<XCAP.PARTS){
+      const q=V(box.x0+Math.random()*(box.x1-box.x0),box.y0+Math.random()*(box.y1-box.y0));
+      xPart(q.x,q.y,(Math.random()-.5)*amp*3,(Math.random()-.5)*amp*3,900,"#ef8178",2.2);
+    }
+  },null); xBeep("thunk"); draw();
+  echo("EARTHQUAKE: broke "+broken+" line"+(broken===1?"":"s")+" and displaced the structure. Undo before the insurance assessor arrives.",broken?undefined:"warn");
 }
 function xAnts(){
   const sel=[...S.sel].map(i=>S.ents[i]).filter(e=>e&&(e.t==="line"||e.t==="pline"));
@@ -6368,28 +6391,27 @@ function xBulldozer(a,b){
   if(!isFinite(d.x)) return echo("Drag a corridor across the plan","warn");
   const n=perp(d), h=width/2;
   const quad=[add(a,mul(n,h)), add(b,mul(n,h)), sub(b,mul(n,h)), sub(a,mul(n,h))];
-  const hits=[];
-  for(const e of xEnts()){
-    if(hits.length>=XCAP.REPORT*10) break;
+  const hitIdx=[];
+  for(let idx=0;idx<S.ents.length;idx++){
+    const e=S.ents[idx]; if(!xEnts().includes(e)) continue;
     let hit=mkPointInPoly(entPoints(e)[0]||V(1e18,1e18), quad);
     if(!hit) for(const c of xSegs(e)){
       if(mkPointInPoly(c.a,quad)||mkPointInPoly(c.b,quad)){ hit=true; break; }
-      let crossed=false;
-      for(let i=0;i<4;i++){
-        const r=lineLineInt(c.a,c.b,quad[i],quad[(i+1)%4]);
-        if(r && r.t>=0 && r.t<=1 && r.u>=0 && r.u<=1){ crossed=true; break; }
-      }
-      if(crossed){ hit=true; break; }
+      for(let i=0;i<4;i++){ const r=lineLineInt(c.a,c.b,quad[i],quad[(i+1)%4]); if(r&&r.t>=0&&r.t<=1&&r.u>=0&&r.u<=1){ hit=true; break; } }
+      if(hit) break;
     }
-    if(hit) hits.push(e);
+    if(hit) hitIdx.push(idx);
   }
-  XFX.marks.length=0;
-  XFX.marks.push({kind:"corridor",quad});
-  for(const e of hits.slice(0,400)) XFX.marks.push({kind:"hot",ent:e});
-  xfxRun("marks",3000,null,null,null);
-  xBeep("thunk");
-  echo("Corridor "+fmt(width)+" mm wide by "+fmt(dist(a,b))+" mm: "+hits.length+
-       " object"+(hits.length===1?"":"s")+" in the way");
+  if(!hitIdx.length){ XFX.marks.length=0; XFX.marks.push({kind:"corridor",quad}); xfxRun("dozer",1100,{a,b,quad,hits:[]},null,null); return echo("Bulldozer charged through. Miraculously, nothing was in the way."); }
+  const victims=hitIdx.map(i=>S.ents[i]);
+  snap(); for(const i of hitIdx.sort((x,y)=>y-x)) S.ents.splice(i,1);
+  S.sel.clear(); resetNudge(); flowPrune(); flowInvalidateIndex(); updateProps();
+  XFX.marks.length=0; XFX.marks.push({kind:"corridor",quad});
+  xfxRun("dozer",1700,{a,b,quad,hits:victims.map(e=>JSON.parse(JSON.stringify(e)))},(t)=>{
+    if(Math.random()<.7 && XFX.parts.length<XCAP.PARTS){ const q=add(a,mul(sub(b,a),Math.random())); xPart(q.x,q.y,(Math.random()-.5)*width*3,(Math.random()-.5)*width*3,800,"#ffd166",2); }
+  },null);
+  xBeep("thunk"); draw();
+  echo("BULLDOZER demolished "+victims.length+" object"+(victims.length===1?"":"s")+" in a "+fmt(width)+" mm corridor. Subtlety has left the building.");
 }
 
 /* ====================== LAYOUT ========================================= */
@@ -6728,6 +6750,29 @@ function xPaint(){
     ctx.beginPath(); for(let i=0;i<n;i++) i?ctx.lineTo(X(P[i].x),Y(P[i].y)):ctx.moveTo(X(P[i].x),Y(P[i].y)); if(xt>.92)ctx.closePath();ctx.stroke();
   }
 
+  if(XFX.kind==="megaShake" && XFX.data && XFX.data.box){
+    const b=XFX.data.box, fade=1-xt, A=18*fade;
+    ctx.save(); ctx.globalAlpha=.85*fade; ctx.strokeStyle="#ef8178"; ctx.lineWidth=2.5;
+    for(let k=0;k<8;k++){ const yy=Y(b.y0+(b.y1-b.y0)*(k+1)/9); ctx.beginPath();
+      for(let x=0;x<=W;x+=8){ const y=yy+Math.sin(x*.07+xt*42+k)*A+(Math.random()-.5)*A*.4; x?ctx.lineTo(x,y):ctx.moveTo(x,y); } ctx.stroke(); }
+    ctx.restore();
+  }
+  if(XFX.kind==="vacuumEat" && XFX.data && XFX.data.c){
+    const c=XFX.data.c, cx=X(c.x), cy=Y(c.y), fade=1-xt;
+    ctx.save(); ctx.strokeStyle="rgba(84,199,196,"+(0.25+fade*.75)+")"; ctx.lineWidth=2;
+    for(let k=0;k<7;k++){ const r=(1-xt)*(40+k*18); ctx.beginPath(); ctx.arc(cx,cy,r,xt*10+k,xt*10+k+Math.PI*1.5); ctx.stroke(); }
+    ctx.fillStyle="rgba(84,199,196,"+(fade*.45)+")"; ctx.beginPath(); ctx.arc(cx,cy,8+xt*20,0,TAU); ctx.fill(); ctx.restore();
+  }
+  if(XFX.kind==="vacuumEmpty" && XFX.data && XFX.data.c){
+    const c=XFX.data.c; ctx.save(); ctx.strokeStyle="rgba(84,199,196,"+(1-xt)+")"; ctx.lineWidth=2;
+    for(let k=0;k<4;k++){ctx.beginPath();ctx.arc(X(c.x),Y(c.y),12+xt*80+k*10,0,TAU);ctx.stroke();}ctx.restore();
+  }
+  if(XFX.kind==="dozer" && XFX.data){
+    const a=XFX.data.a,b=XFX.data.b, q=add(a,mul(sub(b,a),Math.min(1,xt*1.12)));
+    const th=Math.atan2(Y(b.y)-Y(a.y),X(b.x)-X(a.x));
+    ctx.save(); ctx.translate(X(q.x),Y(q.y)); ctx.rotate(th); ctx.fillStyle="#ffd166"; ctx.strokeStyle="#111"; ctx.lineWidth=2;
+    ctx.fillRect(-26,-14,52,28); ctx.strokeRect(-26,-14,52,28); ctx.fillStyle="#111"; ctx.fillRect(8,-19,24,38); ctx.restore();
+  }
   if(XFX.kind==="ants" && XFX.data && XFX.data.path){
     const P=XFX.data.path;
     const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
