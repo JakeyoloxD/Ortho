@@ -3,9 +3,11 @@
 Written so a cold session can pick up mid-build without re-deriving anything.
 Read this, then `README.md`, then the file.
 
+**Owner:** Jake.
 **Build this document describes:** 11,539 lines / 568 KB.
-**Phase 1 progress:** 1.1, 1.2, 1.3 landed. 1.4–1.7 outstanding.
-**Suite:** 27 tests, 142 hints, 0 audit problems.
+**State:** 27 self-tests passing, 142 tooltip hints, 0 audit problems.
+**Phase 1 progress:** 1.1, 1.2, 1.3 landed. 1.4 – 1.7 outstanding.
+
 Line numbers drift; every anchor below is a function or constant name.
 
 ---
@@ -17,11 +19,19 @@ you miss them.
 
 | Rule | Why |
 |---|---|
-| The **Experimental Features tab is permanent.** | Sire has said so three times. Do not suggest trimming it, do not cite its line count as a problem, do not move tools out of it. Shared *maths* may be lifted into neutral blocks (this has been done once, see §2) as long as the tab's tool list is untouched. Verify with the audit in §7. |
+| The **Experimental Features tab is permanent.** | Jake has said so three times. Do not suggest trimming it, do not cite its line count as a problem, do not move tools out of it. Shared *maths* may be lifted into neutral blocks (done once, see §2) as long as the tab's tool list is untouched. Verify with the audit in §7. |
 | **Every new entity type needs five functions plus `sanEnt`.** | Miss `sanEnt` and the type renders all session then vanishes on reload with no error. `ENTITY_TYPES` + `auditEntityTypes()` catch it at boot. Register first, implement second. |
-| **`snap()` before mutating, never after.** | And `snapEnts()` only for in-place edits that cannot add, remove or reorder entities. Anything structural takes a full `snap()`. |
-| **Entities leave the array only via `entKeep` / `entRemove`.** | These remap `S.sel`, `S.hover`, a live `gripDrag` and (since this build) `S.op`. A raw `splice` or `filter` silently corrupts all four. |
+| **`snap()` before mutating, never after.** | And `snapEnts()` / `snapEntList()` only for in-place edits that cannot add, remove or reorder entities. Anything structural takes a full `snap()`. |
+| **Entities leave the array only via `entKeep` / `entRemove`.** | These remap `S.sel`, `S.hover`, a live `gripDrag` and `S.op`. A raw `splice` or `filter` silently corrupts all four. |
 | **Zero network, no `unsafe-eval`, no third-party code.** | Rules out OCR libraries, AI calls, and any `eval`-based scripting. Design around it, do not ask to relax it. |
+
+Two smaller ones that have already bitten:
+
+- **`entPoints("mshape")` returns the two drag corners, not the outline.** That
+  is correct for grips and wrong for area. Use `mkOutline()` for measurement.
+- **There are two `num()` helpers.** The options bar one is
+  `num(label,val,step,set,disabled,hint)`; the properties panel has its own
+  `num(label,val,set)`. Do not cross them.
 
 House style for anything user-facing: say what happens, then the thing that is
 not obvious from the name. No marketing voice.
@@ -30,61 +40,63 @@ not obvious from the name. No marketing voice.
 
 ## 2. What changed since the README was written
 
-The uploaded `README.md` documents the 10,490-line build. Three passes have
-landed since. `README.md` has **not** been updated and is now stale in these
-areas.
+`README.md` documents the 10,490-line build and is **stale** in the areas below.
+Updating it is an outstanding task.
 
 ### Pass A — Measure Area + region engine
 
-- **New shared block: `REGION ENGINE`**, sits after the intersections block,
-  before `ENTITY TABLE`. Owns `RGN` caps, `rgnEnts`, `rgnSegs`, `rgnBox`,
-  `rgnRaster`, `rgnFlood` (pure), `rgnCellOf`, `rgnCellCentre`, `rgnStats`,
-  `RGN_UNITS`, `rgnAreaText`, `rgnRegionAt`.
-- The Experimental functions `xRaster`, `xFlood`, `xCellOf`, `xCellCentre`,
-  `xRegionAt`, `xAreaText` are now **one-line delegations** to those. Every
-  joke tool calls the same names and behaves the same. The tab's ribbon is
-  byte-identical: 7 groups, 30 tool ids, Flood Fill still `big` in Back Room.
-- `rgnRegionAt` seeds its raster window on the **viewport**, not the sheet, and
-  grows x3 up to `RGN.GROW` (4) times only when the flood escapes. Raster cap
-  raised 640 → 1024. Net effect: a 3 m room on a 40 m plan measures at ~3 mm
-  per cell instead of ~62 mm. `F.escaped` is only meaningful when the returned
-  `full` flag is true.
-- **New tool `measurearea`**, alias `MR`, in Draw › Measure beside MB and MA.
-  Temporary graphics: `S.areaResult`, painted by `paintAreaMeasure()` inside
-  `paintMeasurement()`, cleared by `clearMeasurement()`, two-stage Esc like the
-  rest of the family. Never an entity, never in an export.
-- **New state:** `S.areaResult`, `S.areaUnit` (`auto` | `mm2` | `cm2` | `m2`).
-  Unit selector is in the options bar.
+- **New shared block `REGION ENGINE`**, after intersections, before
+  `ENTITY TABLE`. Owns `RGN`, `rgnEnts`, `rgnSegs`, `rgnBox`, `rgnRaster`,
+  `rgnFlood` (pure), `rgnCellOf`, `rgnCellCentre`, `rgnStats`, `RGN_UNITS`,
+  `rgnAreaText`, `rgnRegionAt`.
+- Experimental `xRaster`, `xFlood`, `xCellOf`, `xCellCentre`, `xRegionAt`,
+  `xAreaText` are now **one-line delegations** to those. Behaviour identical,
+  ribbon untouched.
+- `rgnRegionAt` seeds its raster on the **viewport**, not the sheet, growing x3
+  up to `RGN.GROW` (4) times only when the flood escapes. Raster cap 640 → 1024.
+  A 3 m room on a 40 m plan now measures at ~3 mm/cell instead of ~62 mm.
+  `F.escaped` is only meaningful when the returned `full` flag is true.
+- **Tool `measurearea`** (`MR`) in Draw › Measure. Temporary graphics via
+  `S.areaResult` / `paintAreaMeasure()`, cleared by `clearMeasurement()`.
+  Never an entity, never exported.
+- **State added:** `S.areaResult`, `S.areaUnit`.
 
 ### Pass B — bug fix and test harness
 
-- `entKeep` now remaps `S.op` entity indices via `OP_ENT_KEYS =
-  ["first","boundary","ent"]`. A stale index is **dropped and the tool
-  re-prompts** rather than repointed at whatever slid into the slot. Add any
-  new multi-step tool's index field to that list.
-- **`test` at the command line** runs `SELFTEST`, currently 16 assertions, all
-  passing. Pure functions only, no `S` mutation that isn't restored in a
-  `finally`. It caught a real bug on its first run (`rgnSegs` was not filtering
-  degenerate segments on the `curvesOf` path).
+- `entKeep` remaps `S.op` entity indices via
+  `OP_ENT_KEYS = ["first","boundary","ent"]`. A stale index is **dropped and the
+  tool re-prompts**, not repointed. Add any new multi-step tool's index field.
+- **`test` at the command line** runs `SELFTEST`. Pure functions only; any `S`
+  mutation must be restored in a `finally`.
 
 ### Pass C — tooltips
 
-- **`HINTS`**, a central table of 139 entries, one per ribbon item, keyed by id.
-  Central rather than in the tool definitions because items are registered
-  across six tables (`TOOLS`, `ACTIONS`, `MK_TOOLS`, `FLOW_TOOLS`, `XTOOLDEF`,
+- **`HINTS`**, one entry per ribbon item, central because items register across
+  six tables (`TOOLS`, `ACTIONS`, `MK_TOOLS`, `FLOW_TOOLS`, `XTOOLDEF`,
   `XACTIONS`).
-- `itemTitle(id,T)` renders label / hint / keys as three blocks. Alias and
-  hotkey are deduped when they are the same letter.
-- **`auditRibbonHints()`** at boot and in the `audit` command. Currently zero
-  missing. **Any new ribbon item must add a `HINTS` entry or the audit fires.**
-- `TOGGLE_DEFS` is now the single source for the six drafting aids, consumed by
-  both `toggleWidget()` (View tab) and `applyToggleTitles()` (status bar).
-- Options bar factories `num`, `chk`, `radio`, `readField` all take an optional
-  trailing `hint`. **Note:** the properties panel has its own separate
-  three-argument `num(label,val,set)`. Do not confuse them.
+- `itemTitle(id,T)` renders label / hint / keys, deduping alias and hotkey when
+  they are the same letter.
+- **`auditRibbonHints()`** at boot and in `audit`. **Every new ribbon item needs
+  a `HINTS` entry or the audit fires.**
+- `TOGGLE_DEFS` is the single source for the six drafting aids, used by both
+  `toggleWidget()` and `applyToggleTitles()`.
 
-**Action item:** `README.md` needs a pass to cover all of the above. Not urgent,
-but it is the document a future session reads first.
+### Pass D — Phase 1.1 – 1.3
+
+- **Markup status.** `MK_STATUS` closed vocabulary of six, stored as `e.st`,
+  absent when unset. `sanStatus()` in the `sanEnt` chain drops unknown values
+  rather than clamping them. `mkPaintStatus()` draws a fixed-screen-size dot,
+  gated on `S.exporting` and `S.mkStatusShow`. Actions `mkstatus` (`MST`) and
+  `mkstatusshow` (`MSTD`) in a new Markup › Review group.
+- **Markup summary CSV.** `exportmarkupcsv` (`MCSV`) in Insert › Export.
+  `csvCell()` neutralises leading `=`, `+`, `-`, `@` so a redline comment cannot
+  execute as a spreadsheet formula. `mkOutline()` / `polyArea()` /
+  `polyLength()` / `mkMeasureOf()` do the geometry.
+- **Markups List.** Dock section between Line Styles and Properties.
+  `mkListMatches()` filters by type, status and free text; `paintMarkupList()`
+  builds the filter bar once and `paintMarkupRows()` rebuilds only the rows, so
+  the search field keeps focus mid-word. Hooked off `updateProps()` and the
+  history apply path. `zoomToEntities()` / `mkZoomFiltered()` for the ⌖ button.
 
 ---
 
@@ -92,77 +104,61 @@ but it is the document a future session reads first.
 
 ### Locked
 
-- Rename to BackToTheDrawingBoard; direction is a tool that communicates ideas
+- Name is BackToTheDrawingBoard; direction is a tool that communicates ideas
   visually.
 - Experimental Features tab and Flow tab both permanent.
 - Trim to Corner keeps Revit semantics (click what you keep).
 - Prior build order: references plural (**done**) → revision overlay → markup
-  summary export.
-- Architecturally blocked and **not being built** (agreed): Studio and any
-  real-time collaboration, SSO, DMS integrations, cloud storage, AI/MCP
-  features, OCR, 3D PDF / IFC / U3D, full PDF editing (form fields, redaction,
-  page manipulation, digital signatures), and batch multi-document operations.
+  summary export (**done**, arrived early as Phase 1.1).
+- **Not being built**, agreed: Studio and real-time collaboration, SSO, DMS
+  integrations, cloud storage, AI/MCP features, OCR, 3D PDF / IFC / U3D, full
+  PDF editing (form fields, redaction, page manipulation, digital signatures),
+  and batch multi-document operations.
 
-### Open — blocks Phase 2, confirm before writing code
+### Open — blocks Phase 2
 
 1. **Binding.** Does a filled region bind to its boundary geometry (move a wall,
    the area updates) or freeze a snapshot with a staleness flag like
    `refDrift`?
    *Recommendation: bound.* Bluebeam calls the equivalent object a **Space**,
-   not a measurement, and has "Convert Revit Rooms to Revu Spaces" — clearly a
+   not a measurement, and ships "Convert Revit Rooms to Revu Spaces" — a
    first-class object with identity. A region that goes stale when a wall moves
    is a worse object.
 2. **Boundary engine.** Analytic trace with raster fallback, or raster only?
    *Recommendation: analytic with fallback.* Raster alone gives a number whose
-   error is a function of window size rather than geometry. Analytic gives an
-   exact polygon you can store as the entity's point list.
-3. **DXF fidelity for regions.** R12 has no real HATCH. A region exports as a
-   boundary polyline plus a text label, losing the fill. Acceptable?
+   error is a function of window size rather than geometry.
+3. **DXF fidelity.** R12 has no real HATCH, so a region exports as a boundary
+   polyline plus a text label, losing the fill. Acceptable?
 
 ---
 
-## 4. Phase 1 — trivial wins, no new entity type
+## 4. Phase 1 — trivial wins
 
-Greenlit. Each item is independently shippable; do them in any order, verify
-after each. None of these needs the open decisions resolved.
+### Done
 
-### 1.1 Markup summary export (CSV) — DONE
-Honours the previously chosen build order. `S.ents` → rows: type, layer, colour,
-text, position, area/length where applicable, status. Reuse the existing
-download helper. Emit CSV only for now; XML if asked.
-*Touches:* new action in `ACTIONS`, `HINTS` entry, `RIBBON` Insert › Export.
+- **1.1 Markup summary export (CSV)** — see Pass D.
+- **1.2 Markup status field** — see Pass D.
+- **1.3 Markups List panel** — see Pass D.
 
-### 1.2 Markup status field — DONE
-A `status` string on markup entities plus a colour map. Bluebeam ships custom
-statuses at Core tier.
-*Touches:* `sanEnt` (accept and clamp the string), `mkPropRows`, paint routine
-for the status tint, `.b2db` round-trip is automatic once `sanEnt` allows it.
-
-### 1.3 Markups List panel — DONE
-Filterable table over `S.ents`. Cheap here and expensive for Bluebeam because
-your annotations are already a typed array. Filter by type, layer, colour,
-status; click a row to select and zoom.
-*Touches:* new right-dock section beside Layers / Line Styles / Properties, or
-a new panel; reuse `selectByIds` for selection so it survives reorder.
-
-### 1.4 Magic Markups equivalents
-Bluebeam's `$590` tier. Structurally cheap here because every entity is a point
+### 1.4 Magic Markups equivalents — NEXT
+Bluebeam's $590 tier. Structurally cheap here because every entity is a point
 list with a type tag.
 - **Convert to:** type swap plus `mapEnt`. e.g. pline → mshape rect, ink →
-  pline.
-- **Duplicate as:** clone then convert.
-- **Offset:** already exists, just expose it for markup.
+  pline, mshape → ink.
+- **Duplicate as:** clone then convert, original untouched.
+- **Offset:** already exists, expose it for markup.
 *Touches:* new actions, `HINTS`, a conversion table keyed by source type.
 *Gotcha:* converting across families (CAD ↔ markup) changes which paint router
-claims the entity. Test with `auditEntityTypes()`.
+claims the entity. `mkOutline()` already gives you the point list to convert
+from. Run `auditEntityTypes()` after.
 
 ### 1.5 Count measurement
-A stamp-style entity with a running tally, temporary like the rest of Measure or
-persistent if you want takeoff counts. Decide which when you start.
-*Touches:* Draw › Measure group, `HINTS`.
+A stamp-style entity with a running tally. Decide temporary (like the rest of
+Measure) or persistent (for takeoff counts) when you start. Persistent means a
+new entity type and the full five-function checklist.
 
 ### 1.6 Command macros
-Bluebeam's "scripting commands" is `$440` tier. You already have a command line,
+Bluebeam's "scripting commands" is $440 tier. You already have a command line,
 an `ALIAS` table and `handleCommand`. A macro is a recorded list of command
 strings replayed through `handleCommand`. **No `eval`, so no CSP conflict.**
 *Touches:* record/stop/play actions, storage in `.b2db` and localStorage,
@@ -172,35 +168,31 @@ strings replayed through `handleCommand`. **No `eval`, so no CSP conflict.**
 Named presets over `S.mk` (and later `S.flow`). Save, apply, delete. Serialise
 into `.b2db`.
 
-**Verification after each item:** §7.
-
 ---
 
 ## 5. Phase 2 — the region entity
 
-Gated on the open decisions in §3. This is the big one and it unlocks three
-other features.
+Gated on §3. This is the big one and it unlocks three other features.
 
 - **New entity type,** registered in `ENTITY_TYPES` first. Working name
-  `space`. Needs: `sanEnt`, `entPoints`, `entBox`, `entHit`, `paintEnt` or a
-  family router, `gripSet`, DXF and SVG emitters, properties rows.
-- **Boundary trace:** from the pick point, ray-cast to the nearest edge, then
+  `space`. Needs `sanEnt`, `entPoints`, `entBox`, `entHit`, paint routing,
+  `gripSet`, DXF and SVG emitters, properties rows.
+- **Boundary trace:** ray-cast from the pick point to the nearest edge, then
   walk the segment graph always taking the tightest turn by angular sort until
-  you return to the start. Shoelace for area. Build on `curveInt`, the
-  intersections block, `flatten` and `traceChainPoints`.
+  you return to the start. Shoelace for area — `polyArea()` already exists.
+  Build on `curveInt`, the intersections block, `flatten`, `traceChainPoints`.
 - **Gap tolerance and defined failure.** Real rooms are not closed. If the walk
   fails to close, fall back to `rgnRegionAt`, label the result approximate, and
   report which engine produced the number.
 - **Binding**, if confirmed: the region holds the eids of its boundary
-  entities and re-derives when they move. Model it on how flow edges bind to
-  nodes by id.
-- Then: **Measure Area becomes the throwaway** and the region entity is the
-  thing you keep.
+  entities and re-derives when they move. Model on how flow edges bind to nodes
+  by id.
+- Then **Measure Area becomes the throwaway** and `space` is the thing you keep.
 
-Unlocks, in order of cheapness once `space` exists:
+Unlocks, cheapest first once `space` exists:
 - **Custom hatch patterns** (Core tier) — a fill style on the region.
-- **Region-scoped markup reporting** (Complete tier) — point-in-polygon query
-  over `S.ents` inside a named region, feeding the Phase 1.1 CSV.
+- **Region-scoped markup reporting** (Complete tier) — point-in-polygon over
+  `S.ents` inside a named region, feeding the Phase 1.1 CSV.
 - **Named spaces** with schedules, if you want takeoff.
 
 ---
@@ -209,11 +201,12 @@ Unlocks, in order of cheapness once `space` exists:
 
 | Phase | Item | Notes |
 |---|---|---|
-| 3 | **Revision overlay** | Previously chosen next direction. `R.cal` was built for exactly this and nothing consumes it yet. Two registered points per reference is a similarity transform. Manual registration first; auto-align is a separate, harder job. |
-| 4 | **PDF export** | Your biggest real gap and not on Bluebeam's feature list because it is their substrate. A minimal vector + text PDF writer is a few hundred lines, no compression needed if you accept larger files. PDF is what people in Sire's world actually send. |
+| 3 | **Revision overlay** | `R.cal` was built for this and nothing consumes it yet. Two registered points per reference is a similarity transform. Manual registration first; auto-align is a separate, harder job. |
+| 4 | **PDF export** | The biggest real gap, and absent from Bluebeam's feature list only because PDF is their substrate. A minimal vector + text PDF writer is a few hundred lines, no compression needed if larger files are acceptable. PDF is what people in this line of work actually send. |
 | 5 | **VisualSearch** | Template-match a rasterised region against the drawing. `rgnRaster` and the Sobel edge pass already exist. Bounded correlation search, moderately fiddly. |
-| 6 | **`S.sel` → eids** | Deliberately deferred. Touches picking, grips, properties and every modify op. Must be its own pass with nothing else in the diff, or a break in one is indistinguishable from a break in the other. `entKeep` and the `S.op` fix keep it honest in the meantime. |
+| 6 | **`S.sel` → eids** | Deliberately deferred. Touches picking, grips, properties and every modify op. Must be its own pass with nothing else in the diff, or a break in one is indistinguishable from a break in the other. `entKeep` and the `S.op` fix hold the line meanwhile. |
 | 7 | **Multi-document** | Only if batch operations ever become worth it. `S` becomes one of many. Large architectural change; currently no reason to. |
+| — | **`README.md` refresh** | Stale since Pass A. Not urgent, but it is the first document a fresh session reads. |
 
 ---
 
@@ -223,7 +216,6 @@ Run after every change. Do not skip the syntax check; it catches most damage
 from scripted edits.
 
 ```bash
-# syntax
 python3 -c "
 import re
 s=open('BackToTheDrawingBoard.html').read()
@@ -231,11 +223,11 @@ open('/tmp/app.js','w').write(re.findall(r'<script[^>]*>(.*?)</script>', s, re.S
 " && node --check /tmp/app.js && echo SYNTAX_OK
 ```
 
-Headless test + hint audit: rebuild `/tmp/run.js` with browser stubs
-(`document`, `window`, `getComputedStyle`, `navigator`, `localStorage`,
-`ResizeObserver`, a canvas 2D context stub returning `createImageData` /
-`getImageData` / `measureText`), append the script, then run `SELFTEST` and
-`auditRibbonHints()`. Expect **16 passed, 0 missing hints**.
+Headless suite: build `/tmp/run.js` as browser stubs (`document`, `window`,
+`getComputedStyle`, `navigator`, `localStorage`, `ResizeObserver`, and a canvas
+2D context stub returning `createImageData` / `getImageData` / `measureText`),
+then the script, then run `SELFTEST`, `auditRibbonHints()` and
+`auditEntityTypes()`. Expect **27 passed, 0 missing hints, 0 entity problems**.
 
 Experimental tab must stay at **7 groups, 30 tool ids**:
 
@@ -248,17 +240,17 @@ print('groups',b.count('{name:'),'ids',len(re.findall(r'\"(x[a-z]+)\"',b)))
 "
 ```
 
-In-browser: `test`, `audit`, `hist`, `refs` at the command line. Console should
-be clean at boot — `auditRibbonButtons`, `auditRibbonHints`, `auditEntityTypes`,
+In-browser: `test`, `audit`, `hist`, `refs`. Console clean at boot —
+`auditRibbonButtons`, `auditRibbonHints`, `auditEntityTypes` and
 `auditReferences` all run there.
 
 ---
 
 ## 8. Working agreement
 
-- Step by step on technical work, stop at first failure.
-- One coherent chunk per pass, verified, then the next. Do not bundle a
-  refactor with a feature.
-- Add a `HINTS` entry for every new ribbon item.
-- Add a `SELFTEST` case for every new pure function.
-- Flag stale `README.md` sections rather than silently letting them rot.
+- Step by step on technical work; stop at first failure.
+- One coherent chunk per pass, verified, then the next. Never bundle a refactor
+  with a feature.
+- `HINTS` entry for every new ribbon item.
+- `SELFTEST` case for every new pure function.
+- Flag stale `README.md` sections rather than letting them rot silently.
