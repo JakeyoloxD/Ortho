@@ -443,7 +443,7 @@
     <div class="doc-tab"><span class="filename" id="fname">untitled.dxf &middot; units mm</span></div>
     <span class="spacer"></span>
     <span class="filename" id="counts"></span>
-    <button class="top-action" id="btn-compact" aria-pressed="false" title="Compact ribbon">Compact</button>
+    <button class="top-action" id="btn-compact" aria-pressed="false" title="Compact ribbon&#10;&#10;Shrink the ribbon to reclaim canvas height. Buttons keep their tooltips.">Compact</button>
   </div>
 
   <div id="ribbon">
@@ -464,19 +464,19 @@
     <span class="coord">X <b id="rx">0.000</b>&nbsp;&nbsp;Y <b id="ry">0.000</b></span>
     <span class="coord" id="rextra"></span>
     <span class="toggles">
-      <button class="tg" id="tg-ortho" aria-pressed="false" title="F8">Ortho</button>
-      <button class="tg" id="tg-gridshow" aria-pressed="true" title="Show the grid (F7)">Grid</button>
-      <button class="tg" id="tg-snap" aria-pressed="true" title="Snap to the grid (F9)">Snap</button>
-      <button class="tg" id="tg-osnap" aria-pressed="true" title="F3">Osnap</button>
-      <button class="tg" id="tg-edge" aria-pressed="true" title="Snap to strong edges in the reference image (F6)">Edge</button>
-      <button class="tg" id="tg-weld" aria-pressed="true" title="Coincident points move together (F4)">Weld</button>
+      <button class="tg" id="tg-ortho" aria-pressed="false" title="Ortho (F8)">Ortho</button>
+      <button class="tg" id="tg-gridshow" aria-pressed="true" title="Grid (F7)">Grid</button>
+      <button class="tg" id="tg-snap" aria-pressed="true" title="Grid snap (F9)">Snap</button>
+      <button class="tg" id="tg-osnap" aria-pressed="true" title="Object snap (F3)">Osnap</button>
+      <button class="tg" id="tg-edge" aria-pressed="true" title="Reference edge assist (F6)">Edge</button>
+      <button class="tg" id="tg-weld" aria-pressed="true" title="Weld (F4)">Weld</button>
     </span>
   </div>
 
   <div id="right">
-    <div class="sect-head"><span>Layers</span><button id="btn-addlayer" title="Add layer">+</button></div>
+    <div class="sect-head"><span>Layers</span><button id="btn-addlayer" title="Add layer&#10;&#10;Creates a new layer and makes it current.">+</button></div>
     <div id="layers"></div>
-    <div class="sect-head"><span>Line Styles</span><button id="btn-addstyle" title="Add line style">+</button></div>
+    <div class="sect-head"><span>Line Styles</span><button id="btn-addstyle" title="Add line style&#10;&#10;Creates a new weight, colour and dash combination for new geometry.">+</button></div>
     <div id="styles"></div>
     <div class="sect-head"><span id="prop-title">Drawing</span></div>
     <div id="props"></div>
@@ -542,6 +542,9 @@ const S = {
   measureLabel: null,
   measureTabChain: false,
   measureEscArmed: false,
+  /* Flood area measurement. Temporary like the rest of Measure: never an entity. */
+  areaResult: null,
+  areaUnit: "auto",
   groupSeq: 1,
   pending: [],        // picked points for the active tool
   base: null,         // move/copy base point
@@ -1274,6 +1277,8 @@ const TOOLS={
   /* Revit 2016 Modify > Measure. Temporary graphics, not permanent dimensions. */
   measurebetween:{label:"Measure Between Two References", pts:0, alias:"MB", prompts:["Select first reference","Select second reference"],
     svg:'<path d="M3 5v10M17 5v10M3 10h14"/><path d="M6 8l-3 2 3 2M14 8l3 2-3 2"/>'},
+  measurearea:{label:"Measure Area", pts:0, alias:"MR", prompts:["Click inside an enclosed space"],
+    svg:'<path d="M2.8 2.8h14.4v14.4H2.8z"/><path d="M5.6 5.6h8.8v8.8H5.6z" opacity=".55"/><path d="M7.2 12.4l5.6-5.6"/>'},
   measurealong:{label:"Measure Along An Element", pts:0, alias:"MA", pick:"measurealong", prompts:["Select element"],
     svg:'<path d="M3 14L7 6l5 7 5-9"/><path d="M3 17h14"/>'},
 
@@ -1343,10 +1348,38 @@ const ACTIONS={
 const SELOPS=["move","copy","mirror","rotate","scale","array","explode"];
 // scale intentionally not pts:1 any more - see feed()/commit() for its own point-count logic
 const PICKTOOLS=["trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","pickLines","measurealong"];
-const isMeasureTool=t=>t==="measurebetween"||t==="measurealong";
+const isMeasureTool=t=>t==="measurebetween"||t==="measurealong"||t==="measurearea";
 function clearMeasurement(keepEsc){
   S.pending=[]; S.measureSegs=[]; S.measureTotal=0; S.measureLabel=null; S.measureTabChain=false;
+  S.areaResult=null;
   if(!keepEsc) S.measureEscArmed=false;
+}
+/* Measure Area. Temporary graphics like the rest of the Measure group: the
+   result is a readout and a translucent wash, never an entity, never in an
+   export, gone on Esc. The number is a raster approximation and says so - the
+   cell size it was measured at is reported alongside it, because a figure you
+   cannot judge the error of is worse than no figure. */
+function feedMeasureArea(p){
+  S.measureEscArmed=false;
+  const got=rgnRegionAt(p);
+  if(!got){ S.areaResult=null; paintOptbar(); draw(); return echo("Nothing to flood into - the drawing is empty","warn"); }
+  const {R,F,full}=got;
+  if(F.blocked){ S.areaResult=null; paintOptbar(); draw(); return echo("That point is on a line. Click inside the space.","warn"); }
+  const st=rgnStats(R,F,p);
+  if(F.escaped && full){
+    S.areaResult={R,seen:F.seen,open:true,label:st.centroid,
+                  area:st.area,perim:st.perim,cell:st.cell,w:st.w,h:st.h};
+    paintOptbar(); draw();
+    return echo("Open region - the fill reached the sheet edge. Approx "
+                +rgnAreaText(st.area)+" before escaping. Close the boundary and measure again.","warn");
+  }
+  S.areaResult={R,seen:F.seen,open:false,label:st.centroid,
+                area:st.area,perim:st.perim,cell:st.cell,w:st.w,h:st.h};
+  paintOptbar(); draw();
+  echo("Area \u2248 "+rgnAreaText(st.area)
+      +"   \u00B7   Perimeter \u2248 "+fmt(st.perim)+" mm"
+      +"   \u00B7   Extents "+fmt(st.w)+" \u00D7 "+fmt(st.h)+" mm"
+      +"   \u00B7   \u00B1 raster "+fmt(st.cell)+" mm/cell");
 }
 function measurePath(e){
   if(!e) return null;
@@ -1432,7 +1465,7 @@ function setTool(t){
     S.op={r: t==="fillet"? S.lastFillet : S.lastChamfer};
     say("Pick first line");
     return; }
-  if(t==="measurebetween"||t==="measurealong"){ clearMeasurement(false); setPrompt(); paintOptbar(); draw(); return; }
+  if(isMeasureTool(t)){ clearMeasurement(false); setPrompt(); paintOptbar(); draw(); return; }
 }
 function say(t){ S.op.prompt=t; document.getElementById("prompt").textContent=t+":"; }
 function askArray(){
@@ -1482,6 +1515,7 @@ function setPrompt(){
   if(S.tool==="measurebetween") txt=(S.pending.length?(S.measureChain?"Select next reference or double-click to finish":"Select second reference"):"Select first reference")
     +(S.snapHit?("  \u00B7  "+(S.snapHit.label||SNAP_NAME[S.snapHit.kind]||"")):"")+":";
   if(S.tool==="measurealong") txt="Select element:";
+  if(S.tool==="measurearea")  txt="Click inside an enclosed space:";
   document.getElementById("prompt").textContent=txt;
 }
 function echo(m,cls){
@@ -1497,6 +1531,7 @@ function feed(p){
   const T=TOOLS[S.tool];
   if(S.tool==="select"){ return; }
   if(S.tool==="measurebetween") return feedMeasureBetween(p);
+  if(S.tool==="measurearea")    return feedMeasureArea(p);
   if(S.tool==="move"||S.tool==="copy"){
     if(!S.base){ S.base=p; setPrompt(); return; }
     const d=sub(p,S.base); snap();
@@ -1719,7 +1754,7 @@ function cancel(){
   if(S.x&&S.x.surferPick){S.x.surferPick=false;cv.classList.remove("picking");}
   if(S.ask){ S.ask=null; setPrompt(); echo(""); return; }
   if(isMeasureTool(S.tool)){
-    const active=S.pending.length||S.measureSegs.length||S.measureTotal>0;
+    const active=S.pending.length||S.measureSegs.length||S.measureTotal>0||S.areaResult;
     if(active){ clearMeasurement(true); S.measureEscArmed=true; setPrompt(); paintOptbar(); draw(); echo("Measurement cleared · Esc again to exit Measure"); return; }
     if(S.measureEscArmed){ S.measureEscArmed=false; setTool("select"); echo(""); return; }
     S.measureEscArmed=true; echo("Esc again to exit Measure"); return;
@@ -1831,6 +1866,195 @@ function others(idx){
   return S.ents.map((e,j)=>({e,j})).filter(o=>o.j!==idx && (S.layers[o.e.li]||{on:true}).on);
 }
 
+/* ============================================================ REGION ENGINE
+   Enclosure rasterisation and flood fill. This started life inside Experimental
+   Features as the engine behind Flood Fill and Rain Test, which meant a
+   production measurement would have depended on a tab full of toys for its
+   numbers. The maths lives here now; the Experimental functions delegate to it
+   and behave exactly as they did.
+
+   Honesty about what this is: a raster flood measures the drawing at whatever
+   cell size the window works out to, so the answer is an approximation whose
+   error scales with cell size against wall thickness. rgnRegionAt starts with a
+   window sized to the pick, not to the whole sheet, and only grows it when the
+   flood escapes - so a 3m room on a 40m plan is measured at roughly 3mm per
+   cell instead of 62mm. Escape is only ever reported once the window has grown
+   to the full drawing extent, so "open region" means open, not "ran off the
+   edge of a box I chose".                                                     */
+const RGN={
+  RASTER: 1024,        // longest edge of an enclosure raster
+  CELLS:  1024*1024,
+  ENTS:   20000,       // entities any raster will look at
+  GROW:   4,           // window enlargements before giving up on containment
+  SEED:   1.6          // first window = this many times the view width
+};
+function rgnEnts(){
+  return S.ents.slice(0,RGN.ENTS).filter(e=>{ const L=S.layers[e.li]; return !L||L.on; });
+}
+/* Straight spans of an entity. Deliberately independent of the Experimental
+   xSegs so the engine has no dependency pointing the wrong way. */
+function rgnSegs(e){
+  const out=[];
+  if(!e) return out;
+  if(e.t==="ink"){
+    const P=Array.isArray(e.pts)? e.pts.filter(q=>q&&isFinite(q.x)&&isFinite(q.y)) : [];
+    for(let i=0;i<P.length-1;i++) if(dist(P[i],P[i+1])>1e-9) out.push({a:P[i],b:P[i+1]});
+    if(e.closed&&P.length>2&&dist(P[P.length-1],P[0])>1e-9) out.push({a:P[P.length-1],b:P[0]});
+    return out;
+  }
+  for(const c of curvesOf(e)) if(c.k==="seg" && dist(c.a,c.b)>1e-9) out.push(c);
+  if(!out.length){
+    const P=flatten(e);
+    if(P&&P.length>1) for(let i=0;i<P.length-1;i++) if(dist(P[i],P[i+1])>1e-9) out.push({a:P[i],b:P[i+1]});
+  }
+  return out;
+}
+function rgnBox(list){
+  let x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,any=false;
+  for(const e of list){
+    const b=entBox(e);
+    if(!b||!isFinite(b.x0)||!isFinite(b.y1)) continue;
+    any=true; x0=Math.min(x0,b.x0); y0=Math.min(y0,b.y0); x1=Math.max(x1,b.x1); y1=Math.max(y1,b.y1);
+  }
+  return any? {x0,y0,x1,y1} : null;
+}
+function rgnRaster(box,maxDim){
+  const w0=Math.max(1e-9,box.x1-box.x0), h0=Math.max(1e-9,box.y1-box.y0);
+  const lim=Math.max(16,Math.min(RGN.RASTER,maxDim||RGN.RASTER));
+  const k=Math.min(lim/w0, lim/h0);
+  const W2=Math.max(8,Math.min(lim,Math.round(w0*k)));
+  const H2=Math.max(8,Math.min(lim,Math.round(h0*k)));
+  if(W2*H2>RGN.CELLS) return null;
+  const c=document.createElement("canvas");
+  c.width=W2; c.height=H2;
+  const g=c.getContext("2d");
+  if(!g) return null;
+  g.fillStyle="#000"; g.fillRect(0,0,W2,H2);
+  g.strokeStyle="#fff"; g.lineWidth=1.5; g.lineCap="round"; g.lineJoin="round";
+  const PX=p=>((p.x-box.x0)/w0)*W2, PY=p=>H2-((p.y-box.y0)/h0)*H2;
+  g.beginPath();
+  let drawn=0;
+  for(const e of rgnEnts()){
+    for(const s of rgnSegs(e)){
+      g.moveTo(PX(s.a),PY(s.a)); g.lineTo(PX(s.b),PY(s.b));
+      if(++drawn>RGN.CELLS) break;
+    }
+    if(drawn>RGN.CELLS) break;
+  }
+  g.stroke();
+  let data;
+  try{ data=g.getImageData(0,0,W2,H2).data; }catch(_){ return null; }
+  const cells=new Uint8Array(W2*H2);
+  for(let i=0;i<W2*H2;i++) cells[i]= data[i*4]>80 ? 1 : 0;
+  return {cells,w:W2,h:H2,box,sx:w0/W2,sy:h0/H2};
+}
+/* Pure: no canvas, no S. Given a mask it is fully testable, and the test
+   command below does exactly that. */
+function rgnFlood(R,cx,cy){
+  if(!R) return null;
+  const {cells,w,h}=R;
+  if(!(cx>=0&&cy>=0&&cx<w&&cy<h)) return null;
+  if(cells[cy*w+cx]) return {blocked:true,count:0,perim:0,escaped:false,seen:null,w,h};
+  const seen=new Uint8Array(w*h);
+  const stack=new Int32Array(w*h);
+  let sp=0;
+  stack[sp++]=cy*w+cx; seen[cy*w+cx]=1;
+  let count=0, perim=0, escaped=false;
+  while(sp>0){
+    const i=stack[--sp];
+    count++;
+    const x=i%w, y=(i/w)|0;
+    if(x===0||y===0||x===w-1||y===h-1){ escaped=true; perim++; }
+    const nb=[[1,0],[-1,0],[0,1],[0,-1]];
+    for(let n=0;n<4;n++){
+      const nx=x+nb[n][0], ny=y+nb[n][1];
+      if(nx<0||ny<0||nx>=w||ny>=h) continue;
+      const j=ny*w+nx;
+      if(cells[j]){ perim++; continue; }
+      if(!seen[j]){ seen[j]=1; stack[sp++]=j; }
+    }
+  }
+  return {count,perim,escaped,seen,w,h,blocked:false};
+}
+function rgnCellCentre(R,i){
+  const x=i%R.w, y=(i/R.w)|0;
+  return V(R.box.x0+(x+.5)*R.sx, R.box.y1-(y+.5)*R.sy);
+}
+function rgnCellOf(R,p){
+  return {cx:Math.floor((p.x-R.box.x0)/R.sx), cy:Math.floor((R.box.y1-p.y)/R.sy)};
+}
+/* Statistics over a flood result, in world units. */
+function rgnStats(R,F,fallback){
+  const out={area:0,perim:0,centroid:fallback||V(0,0),w:0,h:0,cell:Math.max(R.sx,R.sy)};
+  if(!F||F.blocked||!F.seen) return out;
+  out.area=F.count*R.sx*R.sy;
+  out.perim=F.perim*((R.sx+R.sy)/2);
+  let sx=0,sy=0,n=0,minx=R.w,miny=R.h,maxx=0,maxy=0;
+  for(let i=0;i<F.seen.length;i++){
+    if(!F.seen[i]) continue;
+    const x=i%R.w, y=(i/R.w)|0;
+    sx+=x+.5; sy+=y+.5; n++;
+    if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
+  }
+  if(n){
+    out.centroid=V(R.box.x0+(sx/n)*R.sx, R.box.y1-(sy/n)*R.sy);
+    out.w=(maxx-minx+1)*R.sx; out.h=(maxy-miny+1)*R.sy;
+  }
+  return out;
+}
+/* World units are mm. "auto" is fine for a throwaway readout but means two
+   rooms on one sheet can end up labelled in different units, so anything that
+   writes a label should pass an explicit unit. */
+const RGN_UNITS={
+  "mm2":{lab:"mm\u00B2", k:1},
+  "cm2":{lab:"cm\u00B2", k:1e2},
+  "m2" :{lab:"m\u00B2",  k:1e6}
+};
+function rgnAreaText(area,unit){
+  const u=RGN_UNITS[unit||S.areaUnit];
+  if(u) return fmt(area/u.k)+" "+u.lab;
+  if(area>=1e6) return fmt(area/1e6)+" m\u00B2";
+  if(area>=1e4) return fmt(area/1e4)+" cm\u00B2";
+  return fmt(area)+" mm\u00B2";
+}
+/* Flood from a world point using the smallest window that contains the region.
+   Returns {R,F,tries,full} - full=true means the window is the whole drawing,
+   which is the only condition under which F.escaped means anything. */
+function rgnRegionAt(p,opts){
+  const o=opts||{};
+  const all=rgnEnts();
+  const b=rgnBox(all);
+  if(!b) return null;
+  const m=Math.max((b.x1-b.x0),(b.y1-b.y0))*0.04;
+  const full={x0:Math.min(b.x0,p.x)-m, y0:Math.min(b.y0,p.y)-m,
+              x1:Math.max(b.x1,p.x)+m, y1:Math.max(b.y1,p.y)+m};
+  const fullW=full.x1-full.x0, fullH=full.y1-full.y0;
+
+  /* Seed the window on what the user can see, not on the sheet. A room the
+     size of the viewport rasterises at viewport resolution. */
+  let half = o.seed!=null ? o.seed
+           : Math.max((cv.width/(window.devicePixelRatio||1))/S.view.s, 1) * RGN.SEED * .5;
+  let last=null;
+  for(let attempt=0; attempt<=RGN.GROW; attempt++){
+    const isFull = (half*2>=fullW && half*2>=fullH) || attempt===RGN.GROW;
+    const box = isFull ? full : {
+      x0:Math.max(full.x0,p.x-half), y0:Math.max(full.y0,p.y-half),
+      x1:Math.min(full.x1,p.x+half), y1:Math.min(full.y1,p.y+half)
+    };
+    const R=rgnRaster(box);
+    if(!R) return last;
+    const c=rgnCellOf(R,p);
+    const F=rgnFlood(R,c.cx,c.cy);
+    if(!F) return last;
+    last={R,F,tries:attempt+1,full:isFull};
+    if(F.blocked) return last;              // clicked on a line: growing will not help
+    if(!F.escaped) return last;             // contained: this is the tightest window
+    if(isFull) return last;                 // genuinely open to the sheet edge
+    half*=3;
+  }
+  return last;
+}
+
 /* ============================================================ ENTITY TABLE
    S.ents is index-addressed and S.sel holds indices into it, so any splice or
    filter silently repoints the selection at whatever slid into the gap - and
@@ -1876,6 +2100,9 @@ function entIndicesOf(list){
   if(want.size) S.ents.forEach((e,i)=>{ if(want.has(e)) out.push(i); });
   return out;
 }
+/* Every S.op field that holds an index into S.ents. Declared once so a new
+   multi-step tool that parks an index has one list to add itself to. */
+const OP_ENT_KEYS=["first","boundary","ent"];
 /* The one place entities leave the array. pred(e,i) true = keep. */
 function entKeep(pred){
   const srcArr=S.ents, out=[], map=new Map();
@@ -1888,6 +2115,24 @@ function entKeep(pred){
   S.hover = map.has(S.hover) ? map.get(S.hover) : -1;
   if(gripDrag && gripDrag.i!=null){
     if(map.has(gripDrag.i)) gripDrag.i=map.get(gripDrag.i); else gripDrag=null;
+  }
+  /* S.op is scratch space for multi-step modify tools and parks entity indices
+     between picks: trim holds `first` and `boundary`, offset and Pick Lines
+     hold `ent`. Nothing removed entities mid-operation when this was written,
+     so it went unremapped - which made it a bug waiting for the first tool
+     that did. If the entity a half-finished operation was holding is gone,
+     drop that half of the operation and re-prompt rather than trim against
+     whatever slid into the slot. */
+  if(S.op) for(const k of OP_ENT_KEYS){
+    const v=S.op[k];
+    if(v==null) continue;
+    if(map.has(v)) S.op[k]=map.get(v);
+    else{
+      delete S.op[k];
+      if(k==="ent" && S.op.stage==="side"){ S.op.stage="pick"; say("Pick object to offset"); }
+      else if(k==="first")    say("Pick the part of the first element to keep");
+      else if(k==="boundary") say("Pick the boundary element");
+    }
   }
   flowInvalidateIndex();
   return gone;
@@ -2619,8 +2864,54 @@ function drawPreview(){
   function box(a,b){ctx.beginPath();ctx.rect(X(Math.min(a.x,b.x)),Y(Math.max(a.y,b.y)),
     Math.abs(b.x-a.x)*S.view.s,Math.abs(b.y-a.y)*S.view.s);ctx.stroke();}
 }
+/* The flood wash. Drawn cell by cell into an offscreen canvas at raster
+   resolution and blitted, rather than thousands of fillRects on the main
+   context - the raster is up to 1024 on its long edge. */
+function paintAreaMeasure(){
+  const A=S.areaResult;
+  if(!A||!A.seen) return;
+  const R=A.R;
+  const off=document.createElement("canvas");
+  off.width=R.w; off.height=R.h;
+  const g=off.getContext("2d");
+  if(!g) return;
+  const img=g.createImageData(R.w,R.h);
+  const d=img.data;
+  const col = A.open? [255,159,67] : [79,209,165];
+  for(let i=0;i<A.seen.length;i++){
+    if(!A.seen[i]) continue;
+    const j=i*4;
+    d[j]=col[0]; d[j+1]=col[1]; d[j+2]=col[2]; d[j+3]=96;
+  }
+  g.putImageData(img,0,0);
+  ctx.save();
+  ctx.imageSmoothingEnabled=false;
+  const x0=X(R.box.x0), y0=Y(R.box.y1);
+  ctx.drawImage(off, x0, y0, (R.box.x1-R.box.x0)*S.view.s, (R.box.y1-R.box.y0)*S.view.s);
+
+  /* Readout goes where the user is looking: at the centroid of the fill. */
+  const fs=12;
+  ctx.font="600 "+fs+"px "+getCSS("--ui");
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  const l1=rgnAreaText(A.area);
+  const l2=A.open? "OPEN REGION" : ("\u2248 "+fmt(A.perim)+" mm perimeter");
+  ctx.font=fs+"px "+getCSS("--ui");
+  const tw=Math.max(ctx.measureText(l1).width, ctx.measureText(l2).width)+16;
+  const tx=X(A.label.x), ty=Y(A.label.y);
+  ctx.fillStyle="rgba(25,28,33,.92)";
+  ctx.fillRect(tx-tw/2, ty-fs-4, tw, fs*2+10);
+  ctx.strokeStyle=A.open?"#ff9f43":"#4fd1a5"; ctx.lineWidth=1;
+  ctx.strokeRect(tx-tw/2, ty-fs-4, tw, fs*2+10);
+  ctx.font="600 "+(fs+1)+"px "+getCSS("--ui");
+  ctx.fillStyle=getCSS("--ink"); ctx.fillText(l1, tx, ty-3);
+  ctx.font=(fs-2)+"px "+getCSS("--ui");
+  ctx.fillStyle=A.open?"#ff9f43":getCSS("--ink-dim");
+  ctx.fillText(l2, tx, ty+11);
+  ctx.restore();
+}
 function paintMeasurement(){
   if(!isMeasureTool(S.tool)) return;
+  if(S.areaResult) paintAreaMeasure();
   const segs=S.measureSegs.slice();
   if(S.tool==="measurebetween"&&S.pending.length){
     const a=S.pending[S.pending.length-1],b=cursorPoint(); if(dist(a,b)>1e-9) segs.push({a,b,preview:true});
@@ -3166,8 +3457,12 @@ function handleCommand(raw){
     case "prevref": return cycleReference(-1);
     case "audit": {
       const p=auditEntityTypes().concat(auditReferences());
-      return echo(p.length? (p.length+" entity type problem(s) - see the console") : "Entity types clean \u00B7 "+Object.keys(ENTITY_TYPES).length+" registered");
+      const h=auditRibbonHints();
+      if(p.length) return echo(p.length+" entity type problem(s) - see the console","warn");
+      if(h.length) return echo(h.length+" ribbon item(s) with no tooltip - see the console","warn");
+      return echo("Clean \u00B7 "+Object.keys(ENTITY_TYPES).length+" entity types, "+Object.keys(HINTS).length+" tooltips");
     }
+    case "test": case "selftest": return runSelfTest();
     case "restore": return offerRestore();
     case "clearautosave": return clearAutosave();
     case "grid": case "gridshow": case "showgrid": return S.workspaceMode!=="drafting"?setWorkspaceMode("drafting"):toggle("gridShow");
@@ -3195,6 +3490,159 @@ function handleCommand(raw){
     S.cur=i; paintLayers(); return echo("Current layer "+S.layers[i].name);
   }
   echo("Unknown: "+raw,"warn");
+}
+
+/* ============================================================ SELF TEST
+   Assertions over the pure functions, run from the command line with `test`.
+   Nothing here touches S, the canvas or the DOM, and nothing mutates the
+   drawing - every case builds its own inputs. The point is that a change to a
+   shared geometry helper stops being something you find out about three tools
+   later. Keep new cases pure; anything that needs S belongs in an audit, not
+   here.                                                                     */
+const SELFTEST=[];
+function T(name,fn){ SELFTEST.push({name,fn}); }
+function tEq(got,want,what){
+  if(got!==want) throw new Error((what||"")+" expected "+want+", got "+got);
+}
+function tNear(got,want,tol,what){
+  if(!(Math.abs(got-want)<=(tol==null?1e-9:tol)))
+    throw new Error((what||"")+" expected ~"+want+", got "+got);
+}
+function tTrue(v,what){ if(!v) throw new Error((what||"assertion")+" was falsy"); }
+
+/* --- a synthetic raster, so rgnFlood can be exercised without a canvas --- */
+function tMask(w,h,walls){
+  const cells=new Uint8Array(w*h);
+  for(const [x,y] of walls) if(x>=0&&y>=0&&x<w&&y<h) cells[y*w+x]=1;
+  return {cells,w,h,box:{x0:0,y0:0,x1:w,y1:h},sx:1,sy:1};
+}
+function tRoom(w,h,x0,y0,x1,y1,gap){
+  const walls=[];
+  for(let x=x0;x<=x1;x++){ walls.push([x,y0]); if(!(gap&&x===((x0+x1)>>1))) walls.push([x,y1]); }
+  for(let y=y0;y<=y1;y++){ walls.push([x0,y]); walls.push([x1,y]); }
+  return tMask(w,h,walls);
+}
+
+T("rgnFlood: closed room counts its interior", ()=>{
+  /* 10x10 room outline from (2,2) to (7,7): interior is the 4x4 at 3..6 */
+  const R=tRoom(12,12,2,2,7,7,false);
+  const F=rgnFlood(R,4,4);
+  tTrue(F,"flood returned"); tEq(F.blocked,false,"blocked");
+  tEq(F.escaped,false,"escaped");
+  tEq(F.count,16,"interior cell count");
+});
+T("rgnFlood: a one-cell gap leaks to the edge", ()=>{
+  const R=tRoom(12,12,2,2,7,7,true);
+  const F=rgnFlood(R,4,4);
+  tEq(F.escaped,true,"escaped through the gap");
+});
+T("rgnFlood: starting on a wall reports blocked, not zero area", ()=>{
+  const R=tRoom(12,12,2,2,7,7,false);
+  const F=rgnFlood(R,2,4);
+  tEq(F.blocked,true,"blocked");
+});
+T("rgnFlood: out of bounds seed returns null", ()=>{
+  const R=tRoom(12,12,2,2,7,7,false);
+  tEq(rgnFlood(R,-1,4),null,"negative x");
+  tEq(rgnFlood(R,4,99),null,"y past the raster");
+});
+T("rgnFlood: perimeter counts wall contacts, not cells", ()=>{
+  const R=tRoom(12,12,2,2,7,7,false);
+  const F=rgnFlood(R,4,4);
+  /* A 4x4 interior touches wall on 16 edges: 4 per side. */
+  tEq(F.perim,16,"perimeter contacts");
+});
+T("rgnStats: area is cell count times cell area", ()=>{
+  const R=tRoom(12,12,2,2,7,7,false);
+  R.sx=100; R.sy=50; R.box={x0:0,y0:0,x1:1200,y1:600};
+  const F=rgnFlood(R,4,4);
+  const st=rgnStats(R,F,V(0,0));
+  tNear(st.area,16*100*50,1e-6,"area");
+  tNear(st.w,4*100,1e-6,"extent width");
+  tNear(st.h,4*50,1e-6,"extent height");
+});
+T("rgnStats: blocked flood yields zero, not NaN", ()=>{
+  const R=tRoom(12,12,2,2,7,7,false);
+  const st=rgnStats(R,rgnFlood(R,2,4),V(5,5));
+  tEq(st.area,0,"area"); tEq(st.perim,0,"perimeter");
+  tTrue(isFinite(st.centroid.x),"centroid finite");
+});
+T("rgnAreaText: explicit unit does not auto-switch", ()=>{
+  tEq(rgnAreaText(1e6,"m2"), fmt(1)+" m\u00B2", "1 m2");
+  tEq(rgnAreaText(1e3,"m2"), fmt(0.001)+" m\u00B2", "small value stays in m2");
+  tEq(rgnAreaText(1e6,"mm2"), fmt(1e6)+" mm\u00B2", "forced mm2");
+});
+T("rgnSegs: a closed pline yields the closing segment", ()=>{
+  const e={t:"pline", pts:[V(0,0),V(10,0),V(10,10),V(0,10)], closed:true, li:0, si:0};
+  tEq(rgnSegs(e).length,4,"segment count");
+});
+T("rgnSegs: a degenerate two-point line yields nothing", ()=>{
+  tEq(rgnSegs({t:"line",a:V(5,5),b:V(5,5),li:0,si:0}).length,0,"zero-length line");
+});
+T("shoelace sanity via entBox on a known rect", ()=>{
+  const b=entBox({t:"pline",pts:[V(0,0),V(30,0),V(30,20),V(0,20)],closed:true,li:0,si:0});
+  tNear(b.x1-b.x0,30,1e-9,"width"); tNear(b.y1-b.y0,20,1e-9,"height");
+});
+T("lineLineInt: crossing segments intersect at the centre", ()=>{
+  const r=lineLineInt(V(-5,0),V(5,0),V(0,-5),V(0,5));
+  tTrue(r,"result"); tNear(r.p.x,0,1e-9,"x"); tNear(r.p.y,0,1e-9,"y");
+});
+T("lineLineInt: parallel segments do not intersect", ()=>{
+  tEq(lineLineInt(V(0,0),V(10,0),V(0,4),V(10,4)),null,"parallel");
+});
+T("entKeep: removal remaps a parked S.op index", ()=>{
+  const keepEnts=S.ents, keepSel=S.sel, keepOp=S.op, keepHover=S.hover;
+  try{
+    S.ents=[{t:"line",a:V(0,0),b:V(1,0),li:0,si:0},
+            {t:"line",a:V(0,1),b:V(1,1),li:0,si:0},
+            {t:"line",a:V(0,2),b:V(1,2),li:0,si:0}];
+    S.sel=new Set([2]); S.hover=2; S.op={first:2, boundary:1};
+    entRemove([0]);
+    tEq(S.ents.length,2,"remaining entities");
+    tEq([...S.sel][0],1,"selection remapped");
+    tEq(S.hover,1,"hover remapped");
+    tEq(S.op.first,1,"S.op.first remapped");
+    tEq(S.op.boundary,0,"S.op.boundary remapped");
+  } finally { S.ents=keepEnts; S.sel=keepSel; S.op=keepOp; S.hover=keepHover; }
+});
+T("entKeep: a parked index whose entity is gone is dropped, not repointed", ()=>{
+  const keepEnts=S.ents, keepSel=S.sel, keepOp=S.op, keepHover=S.hover;
+  try{
+    S.ents=[{t:"line",a:V(0,0),b:V(1,0),li:0,si:0},
+            {t:"line",a:V(0,1),b:V(1,1),li:0,si:0}];
+    S.sel=new Set(); S.hover=-1; S.op={first:0};
+    entRemove([0]);
+    tEq(S.op.first,undefined,"stale index dropped");
+  } finally { S.ents=keepEnts; S.sel=keepSel; S.op=keepOp; S.hover=keepHover; }
+});
+T("selIds / selectByIds survive a reorder", ()=>{
+  const keepEnts=S.ents, keepSel=S.sel;
+  try{
+    S.ents=[{t:"line",a:V(0,0),b:V(1,0),li:0,si:0,eid:101},
+            {t:"line",a:V(0,1),b:V(1,1),li:0,si:0,eid:102},
+            {t:"line",a:V(0,2),b:V(1,2),li:0,si:0,eid:103}];
+    S.sel=new Set([2]);
+    const ids=selIds();
+    S.ents.reverse();
+    selectByIds(ids);
+    tEq(S.ents[[...S.sel][0]].eid,103,"same entity after reorder");
+  } finally { S.ents=keepEnts; S.sel=keepSel; }
+});
+
+function runSelfTest(){
+  const fails=[];
+  let ran=0;
+  for(const t of SELFTEST){
+    ran++;
+    try{ t.fn(); }
+    catch(err){ fails.push(t.name+" \u2014 "+(err&&err.message||err)); }
+  }
+  if(fails.length){
+    console.error("Self test: "+fails.length+"/"+ran+" failed\n  "+fails.join("\n  "));
+    return echo(fails.length+" of "+ran+" tests FAILED - see the console","warn");
+  }
+  console.log("Self test: "+ran+" passed");
+  return echo("Self test: "+ran+" passed");
 }
 
 /* ============================================================ toggles */
@@ -3813,7 +4261,7 @@ function mkColorChips(onPick){
   }
   const inp=document.createElement("input");
   inp.type="color"; inp.value=/^#[0-9a-f]{6}$/i.test(S.mk.col)?S.mk.col:"#ff3b30";
-  inp.title="Custom colour";
+  inp.title="Custom colour\n\nPick any colour for the markup pen. The chips beside it are the presets.";
   inp.oninput=()=>{ S.mk.col=inp.value; onPick(); };
   chips.append(inp);
   return chips;
@@ -3875,7 +4323,7 @@ function penWidget(){
   const t=S.mkLast||"mkpencil", pen=mkPen(t);
   const size=document.createElement("input");
   size.type="number"; size.step="any"; size.value=pen.size; size.style.maxWidth="52px";
-  size.title="Pen size in screen pixels for "+(MK_TOOLS[t]?MK_TOOLS[t].label:"markup");
+  size.title="Pen size\n\nEntered in screen pixels and stored in world units at the moment you draw, so the stroke scales with the drawing instead of staying a fixed screen thickness.";
   size.onchange=()=>{ const v=parseFloat(size.value); if(isFinite(v)) pen.size=Math.max(.5,Math.min(240,v)); paintOptbar(); };
   const fill=document.createElement("button");
   fill.className="small"; fill.type="button"; fill.style.minWidth="0";
@@ -4626,7 +5074,7 @@ function flowFillChips(onPick){
   }
   const inp=document.createElement("input");
   inp.type="color"; inp.value=/^#[0-9a-f]{6}$/i.test(S.flow.fill)?S.flow.fill:"#f4f7fb";
-  inp.title="Custom fill";
+  inp.title="Custom fill\n\nPick any fill colour for new flow nodes.";
   inp.oninput=()=>{ S.flow.fill=inp.value; onPick(); };
   chips.append(inp);
   return chips;
@@ -4694,14 +5142,14 @@ function flowWidget(){
   wrap.append(flowFillChips(()=>{ paintRibbon(); paintOptbar(); flowRestyleSelection(); }));
   const row=document.createElement("div"); row.className="rrow"; row.style.gap="3px";
   const line=document.createElement("input");
-  line.type="color"; line.value=S.flow.line; line.title="Node line colour";
+  line.type="color"; line.value=S.flow.line; line.title="Node outline colour\n\nApplied to new nodes, and to the selection if there is one.";
   line.oninput=()=>{ S.flow.line=line.value; flowRestyleSelection(); };
   const text=document.createElement("input");
-  text.type="color"; text.value=S.flow.text; text.title="Node text colour";
+  text.type="color"; text.value=S.flow.text; text.title="Node label colour\n\nApplied to new nodes, and to the selection if there is one.";
   text.oninput=()=>{ S.flow.text=text.value; flowRestyleSelection(); };
   const fs=document.createElement("input");
   fs.type="number"; fs.step="any"; fs.value=S.flow.fontPx; fs.style.maxWidth="46px";
-  fs.title="Label size in screen pixels";
+  fs.title="Label size\n\nIn screen pixels, converted to world units as the node is created, so labels scale with the diagram.";
   fs.onchange=()=>{ const v=parseFloat(fs.value); if(isFinite(v)) S.flow.fontPx=Math.max(5,v); paintOptbar(); };
   row.append(line,text,fs);
   wrap.append(row);
@@ -5526,7 +5974,7 @@ function pngWidget(){
   const lab=document.createElement("span"); lab.className="oh"; lab.textContent="px wide";
   const wd=document.createElement("input");
   wd.type="number"; wd.step="100"; wd.min="64"; wd.value=S.png.width; wd.style.maxWidth="66px";
-  wd.title="Long-edge width of the exported image";
+  wd.title="Export width\n\nPixel width of the long edge of the exported PNG. Height follows the drawing extents.";
   wd.onchange=()=>{ const v=parseInt(wd.value,10); if(isFinite(v)) S.png.width=Math.max(64,Math.min(12000,v)); };
   r1.append(lab,wd);
   const r2=document.createElement("div"); r2.className="rrow"; r2.style.gap="3px";
@@ -5535,7 +5983,7 @@ function pngWidget(){
     const o=document.createElement("option"); o.value=v; o.textContent=t;
     if(v===S.png.bg) o.selected=true; bg.append(o);
   }
-  bg.title="Background of the exported image";
+  bg.title="Export background\n\nBackground colour written into the PNG. Transparent keeps the alpha channel, which is what you want for pasting over a document.";
   bg.onchange=()=>S.png.bg=bg.value;
   const gl=document.createElement("label"); gl.style.display="flex"; gl.style.alignItems="center"; gl.style.gap="3px";
   const gc=document.createElement("input"); gc.type="checkbox"; gc.checked=S.png.grid;
@@ -5788,7 +6236,7 @@ function buildMobileShell(){
 
   const sheet=document.createElement("div"); sheet.id="msheet";
   const grab=document.createElement("button");
-  grab.className="mgrab"; grab.type="button"; grab.title="Close";
+  grab.className="mgrab"; grab.type="button"; grab.title="Close\n\nDismiss this panel. Nothing is discarded.";
   grab.textContent="\u2014";
   grab.onclick=()=>toggleSheet(false);
   const body=document.createElement("div"); body.className="mbody"; body.id="msheet-body";
@@ -6933,83 +7381,19 @@ function xRayHit(from,dir,maxD){
   return best;
 }
 
-/* ---- enclosure raster: the engine behind Flood Fill and Rain Test ------- */
-function xRaster(box,maxDim){
-  const w0=Math.max(1e-9,box.x1-box.x0), h0=Math.max(1e-9,box.y1-box.y0);
-  const lim=Math.max(16,Math.min(XCAP.RASTER,maxDim||XCAP.RASTER));
-  const k=Math.min(lim/w0, lim/h0);
-  const W2=Math.max(8,Math.min(lim,Math.round(w0*k)));
-  const H2=Math.max(8,Math.min(lim,Math.round(h0*k)));
-  if(W2*H2>XCAP.CELLS) return null;
-  const c=document.createElement("canvas");
-  c.width=W2; c.height=H2;
-  const g=c.getContext("2d");
-  if(!g) return null;
-  g.fillStyle="#000"; g.fillRect(0,0,W2,H2);
-  g.strokeStyle="#fff"; g.lineWidth=1.5; g.lineCap="round"; g.lineJoin="round";
-  const PX=p=>((p.x-box.x0)/w0)*W2, PY=p=>H2-((p.y-box.y0)/h0)*H2;
-  g.beginPath();
-  let drawn=0;
-  for(const e of xEnts()){
-    for(const c2 of xSegs(e)){
-      g.moveTo(PX(c2.a),PY(c2.a)); g.lineTo(PX(c2.b),PY(c2.b));
-      if(++drawn>XCAP.CELLS) break;
-    }
-    if(drawn>XCAP.CELLS) break;
-  }
-  g.stroke();
-  let data;
-  try{ data=g.getImageData(0,0,W2,H2).data; }catch(_){ return null; }
-  const cells=new Uint8Array(W2*H2);
-  for(let i=0;i<W2*H2;i++) cells[i]= data[i*4]>80 ? 1 : 0;
-  return {cells,w:W2,h:H2,box,sx:w0/W2,sy:h0/H2};
-}
-/* Pure, so it can be tested on a synthetic mask without a canvas. */
-function xFlood(R,cx,cy){
-  if(!R) return null;
-  const {cells,w,h}=R;
-  if(!(cx>=0&&cy>=0&&cx<w&&cy<h)) return null;
-  if(cells[cy*w+cx]) return {blocked:true,count:0,perim:0,escaped:false,seen:null};
-  const seen=new Uint8Array(w*h);
-  const stack=new Int32Array(w*h);
-  let sp=0;
-  stack[sp++]=cy*w+cx; seen[cy*w+cx]=1;
-  let count=0, perim=0, escaped=false;
-  while(sp>0){
-    const i=stack[--sp];
-    count++;
-    const x=i%w, y=(i/w)|0;
-    if(x===0||y===0||x===w-1||y===h-1){ escaped=true; perim++; }
-    const nb=[[1,0],[-1,0],[0,1],[0,-1]];
-    for(let n=0;n<4;n++){
-      const nx=x+nb[n][0], ny=y+nb[n][1];
-      if(nx<0||ny<0||nx>=w||ny>=h) continue;
-      const j=ny*w+nx;
-      if(cells[j]){ perim++; continue; }
-      if(!seen[j]){ seen[j]=1; stack[sp++]=j; }
-    }
-  }
-  return {count,perim,escaped,seen,w,h};
-}
-function xCellCentre(R,i){
-  const x=i%R.w, y=(i/R.w)|0;
-  return V(R.box.x0+(x+.5)*R.sx, R.box.y1-(y+.5)*R.sy);
-}
-function xCellOf(R,p){
-  return {cx:Math.floor((p.x-R.box.x0)/R.sx), cy:Math.floor((R.box.y1-p.y)/R.sy)};
-}
+/* ---- enclosure raster ---------------------------------------------------
+   The engine behind Flood Fill and Rain Test now lives in the shared REGION
+   ENGINE block, because Measure Area needs the same maths and a production
+   tool should not depend on this tab being present. These stay as the names
+   the Experimental tools already call, with identical behaviour.           */
+function xRaster(box,maxDim){ return rgnRaster(box,maxDim); }
+function xFlood(R,cx,cy){ return rgnFlood(R,cx,cy); }
+function xCellCentre(R,i){ return rgnCellCentre(R,i); }
+function xCellOf(R,p){ return rgnCellOf(R,p); }
 function xRegionAt(p,pad){
-  const b=xBox(xEnts());
-  if(!b) return null;
-  const m=Math.max((b.x1-b.x0),(b.y1-b.y0))*0.04+(pad||0);
-  const box={x0:Math.min(b.x0,p.x)-m, y0:Math.min(b.y0,p.y)-m, x1:Math.max(b.x1,p.x)+m, y1:Math.max(b.y1,p.y)+m};
-  const R=xRaster(box);
-  if(!R) return null;
-  const c=xCellOf(R,p);
-  const F=xFlood(R,c.cx,c.cy);
-  return F? {R,F} : null;
+  const got=rgnRegionAt(p, pad? {seed:pad} : null);
+  return got? {R:got.R, F:got.F, full:got.full} : null;
 }
-
 
 /* ---- chaos helpers: Experimental is intentionally theatrical ------------ */
 function xAllTargetable(){
@@ -7221,11 +7605,7 @@ function xLevel(p){
 }
 
 /* ====================== DIAGNOSTICS ==================================== */
-function xAreaText(area){
-  if(area>=1000000) return fmt(area/1000000)+" m²";
-  if(area>=10000) return fmt(area/10000)+" cm²";
-  return fmt(area)+" mm²";
-}
+function xAreaText(area){ return rgnAreaText(area,"auto"); }
 function xFlood2(p){
   const got=xRegionAt(p);
   if(!got){xfxRun("paintSplash",1400,{p,col:"#4fd1a5"},null,null);xBeep("pop");return echo("FLOOD FILL threw a bucket at empty space.");}
@@ -8567,7 +8947,7 @@ function xWidget(){
     mk("Wrap px","Shrink Wrap offset",()=>S.x.wrapOffset,v=>S.x.wrapOffset=Math.max(0,Math.min(400,v))));
   const r3=document.createElement("div"); r3.className="rrow"; r3.style.gap="6px";
   const sel=document.createElement("select");
-  sel.title="Stamp wording";
+  sel.title="Stamp wording\n\nWhich word the Stamp tool drops: VOID, REVISED, APPROVED, AS BUILT and the rest.";
   for(const wd of XSTAMPS){
     const o=document.createElement("option"); o.value=wd; o.textContent=wd;
     if(wd===S.x.stampWord) o.selected=true; sel.append(o);
@@ -8666,7 +9046,7 @@ const RIBBON={
     {name:"Modify", big:"move",
       small:["select","copy","rotate","mirror","scale","trimcorner","trimsingle","trimmultiple","offset","fillet","chamfer","array","explode","erase","group","ungroup","clipcut","clipcopy","clippaste"]},
     {name:"Annotate", big:"dim", small:["text"]},
-    {name:"Measure", big:"measurebetween", small:["measurealong"]},
+    {name:"Measure", big:"measurebetween", small:["measurealong","measurearea"]},
     {name:"Line Style", custom:"style"},
     {name:"Layers", custom:"layers", small:["dellayer"]}
   ],
@@ -8739,6 +9119,203 @@ function activateRibbonItem(id){
   draw();
 }
 
+/* ============================================================ TOOLTIPS
+   Every ribbon button used to show "Label   type ALIAS", which tells you the
+   name you can already read on the button and nothing about what pressing it
+   does. Hints live here rather than in the tool definitions because the items
+   are registered across six different tables (TOOLS, ACTIONS, MK_TOOLS,
+   FLOW_TOOLS, XTOOLDEF, XACTIONS) and a tooltip pass should be one list to
+   read and one list to edit.
+
+   House style: say what happens, then the thing that is not obvious from the
+   name. No marketing, no restating the label.
+   auditRibbonHints() at boot names anything missing one.                    */
+const HINTS={
+  /* --- Draw ------------------------------------------------------------ */
+  select:"Pick objects. Click one, drag left-to-right for a window that takes only what is fully inside, right-to-left for a crossing that takes anything it touches.",
+  line:"Two-point line. With Chain on in the options bar each segment commits as its own entity, so trim and fillet work per segment.",
+  pline:"Connected polyline as a single entity. Right-click or Enter to finish.",
+  rect:"Rectangle from two opposite corners. Drawn as a closed polyline.",
+  circle:"Circle from centre then a radius point, or type the radius.",
+  arc:"Three-point arc: start, end, then a point on the curve.",
+  arccenter:"Arc from a centre, a start point, then a sweep. Use this when the radius matters more than the endpoints.",
+  ellipse:"Ellipse from a centre and two axis points.",
+  pellipse:"Ellipse inscribed in a bounding box you drag, for when the extents matter more than the axes.",
+  polygon:"Regular polygon from a centre and a vertex. Asks for the side count.",
+  spline:"Smooth curve through the points you pick. Right-click or Enter to finish.",
+  dim:"Linear dimension between two points, then a third click to place the text off the measured line.",
+  text:"Single-line text. Height is entered in screen pixels and stored in world units, so it scales with the drawing.",
+  pickLines:"Trace a connected run of lines and offset the whole chain in one go. Pick a line, then pick the side.",
+
+  /* --- Modify ---------------------------------------------------------- */
+  move:"Move the selection by a base point and a destination. With Weld on, joined endpoints of untouched entities follow.",
+  copy:"Copy the selection to a destination. Multiple in the options bar keeps the base point fixed so you can drop several from one origin.",
+  rotate:"Rotate the selection around a base point.",
+  mirror:"Mirror the selection across a two-point axis.",
+  scale:"Scale the selection about a base point, by a typed factor or a reference distance.",
+  array:"Rectangular array of the selection. Asks for columns, rows and spacing.",
+  explode:"Break polylines, splines, polygons and flow nodes into their component lines. Fires immediately on the current selection.",
+  erase:"Delete the selection. Same as the Delete key.",
+  trimcorner:"Revit semantics: click the part of each of two elements you want to KEEP. Both overhangs past the intersection go, and either element extends if it falls short.",
+  trimsingle:"Pick a boundary element, then pick the piece to cut away. The tool stays loaded for the next cut instead of dropping back to Select.",
+  trimmultiple:"Pick one boundary, then keep clicking pieces to trim against it.",
+  offset:"Offset a single element by a distance. Pick the object, then pick which side.",
+  fillet:"Round the corner between two lines. Set the radius in the options bar; a radius of 0 just extends them to meet.",
+  chamfer:"Cut a straight corner between two lines at the distance set in the options bar.",
+  group:"Bind the selection into a group so clicking any member selects all of them.",
+  ungroup:"Release the selected group back into individual entities.",
+  clipcut:"Cut the selection to the app's own clipboard. Not the system clipboard, so styling and flow connector bindings survive.",
+  clipcopy:"Copy the selection to the app's own clipboard. Copied flow nodes get fresh ids so connectors bind to the copy.",
+  clippaste:"Paste from the app's clipboard at the cursor.",
+
+  /* --- Measure --------------------------------------------------------- */
+  measurebetween:"Temporary distance between two picked points, with the angle. Chain in the options bar keeps adding segments and running a total. Nothing is added to the drawing.",
+  measurealong:"Temporary total length along an existing element. Tab before picking extends it to the whole connected chain of lines.",
+  measurearea:"Click inside an enclosed space for its area and perimeter. Approximate: it floods a raster, and the cell size it used is reported next to the result so you can judge the error. Temporary, never becomes an entity.",
+
+  /* --- Layers and styles ----------------------------------------------- */
+  layers:"Current layer for new geometry. Layers carry visibility, lock and colour.",
+  dellayer:"Delete a layer and everything drawn on it. Undoable.",
+  style:"Line style applied to new lines, polylines, circles, arcs, ellipses, polygons and splines. Carries weight, colour and dash pattern.",
+
+  /* --- Markup ---------------------------------------------------------- */
+  mkpencil:"Freehand pencil. Thin, opaque, smoothed. Ignores object snap and grid snap because markup is annotation, not geometry.",
+  mkmarker:"Freehand marker. Thicker and slightly transparent.",
+  mkhighlight:"Highlighter. Multiply blend, so the linework underneath stays readable.",
+  mklasso:"Freehand closed loop for circling a region.",
+  mkerase:"Erase markup only. CAD geometry and flow nodes are left alone.",
+  mkline:"Straight markup line. Hold Shift or turn on Ortho for 45 degree increments.",
+  mkarrow:"Single-headed arrow, for pointing at the thing you are commenting on.",
+  mkdarrow:"Double-headed arrow, for showing a span or a move in both directions.",
+  mkrect:"Markup rectangle. Shift or Ortho makes it square.",
+  mkellipse:"Markup ellipse. Shift or Ortho makes it a circle.",
+  mkcloud:"Revision cloud around a region, the standard mark for something that has changed.",
+  mktext:"Free markup text placed where you click.",
+  mkcallout:"Text with a leader line back to the point you are annotating.",
+  mksticky:"Sticky note: text in a filled box, for a comment rather than a label.",
+  mkpick:"Eyedropper. Click existing markup to load its colour, width and opacity as the current pen.",
+  mkapply:"Push the current pen settings onto markup you click.",
+  mkselect:"Select markup only, ignoring CAD geometry and flow nodes underneath.",
+  mkshow:"Show or hide every markup entity at once, without touching layers.",
+  mkclear:"Delete all markup in the drawing. Undoable.",
+  pen:"Colour, width, opacity and fill for the markup tools. Width is in screen pixels and converted to world units as you draw.",
+
+  /* --- Flow ------------------------------------------------------------ */
+  fnproc:"Process node, the plain box. Click to drop one at default size, or drag to size it.",
+  fndec:"Decision node, the diamond. Branch labels go on the connectors.",
+  fnterm:"Terminator node, the pill. Start and end of a flow.",
+  fndata:"Data node, the parallelogram. Input or output.",
+  fnnote:"Note node, for an annotation that is part of the diagram rather than a step.",
+  fnlane:"Swimlane. Lanes grow automatically as you drop nodes into them.",
+  fedge:"Connector between two nodes. It binds by node id, not by coordinate, so moving a node re-routes the connector instead of stranding it.",
+  flabel:"Text label on a connector, for branch conditions like Yes and No.",
+  fclearwp:"Remove the manual waypoints from the selected connectors and let them route themselves again.",
+  flow:"Fill, line, text colour and label size for flow nodes.",
+  ftidy:"Snap the selected nodes onto the grid so a hand-placed diagram lines up.",
+  falignl:"Align the selected nodes to the leftmost edge in the selection.",
+  falignc:"Align the selected nodes on a shared vertical centreline.",
+  falignt:"Align the selected nodes to the topmost edge in the selection.",
+  falignm:"Align the selected nodes on a shared horizontal centreline.",
+  fdisth:"Even out the horizontal gaps between three or more selected nodes.",
+  fdistv:"Even out the vertical gaps between three or more selected nodes.",
+  fautosize:"Grow or shrink the selected nodes to fit the text inside them.",
+  ffittext:"Shrink the label text to fit the node instead of resizing the node.",
+
+  /* --- Insert ---------------------------------------------------------- */
+  savedwg:"Save a .b2db file. The only format that round-trips markup styling, flow node ids and connector bindings.",
+  opendwg:"Open a .b2db file, replacing the current drawing.",
+  newdwg:"Start an empty drawing. Autosave still holds the previous one, so Restore can bring it back.",
+  undo:"Step back through history. Depth is bounded by bytes rather than record count, so small drawings keep far more history than large ones.",
+  redo:"Step forward again after an undo.",
+  wipelocal:"Erase the autosave and stored preferences for this file. Does not touch anything you have saved to disk.",
+  refimage:"Load a PNG, JPEG or WebP as a tracing underlay. Each reference gets its own layer, calibration and crop.",
+  imgnext:"Cycle which loaded reference the image tools point at. The active one is the only one they affect.",
+  imgmove:"Drag the active reference to position, rotate and scale it under the drawing.",
+  imgcal:"Set the scale of the active reference: pick two points on it, type the real distance between them. The two points are stored in image pixels, so the calibration survives every later move, rotate and crop.",
+  imgstraight:"Pick two points that should be level and the active reference rotates to make them so. For scans that went in crooked.",
+  imgcrop:"Crop the active reference to a box. Non-destructive, the pixels are still there.",
+  imgresetcrop:"Undo the crop on the active reference and show the whole image again.",
+  imglock:"Lock the active reference so the image tools cannot nudge it while you draw over it.",
+  imgtoggle:"Show or hide the active reference without unloading it.",
+  imgremove:"Unload the active reference. Undo brings the pixels back.",
+  opendxf:"Import DXF R12 linework. Geometry only, no markup or flow.",
+  openpdf:"Import vector linework straight out of a PDF's content streams. No tracing and no OCR, because planning drawings are already vector. Multi-page.",
+  exportpng:"Export a raster image at the width, background, margin and grid set in the Image panel.",
+  copyimage:"Copy the drawing to the system clipboard as an image, for pasting into an email or a ticket.",
+  exportsvg:"Export scalable vector graphics. Visually faithful, not re-editable here.",
+  exportdxf:"Export DXF R12 for widest compatibility. Splines and ellipses are flattened to polylines and markup styling is lost.",
+  png:"Width, background, margin and grid options for PNG export and Copy Image.",
+
+  /* --- View and Manage ------------------------------------------------- */
+  zoomext:"Zoom to fit everything in the drawing. Also on the Z key.",
+  mobileui:"Switch to the touch layout: pinch and two-finger pan, an aim offset so the point lands above your fingertip, and a floating Finish, Cancel and Undo cluster.",
+  workspace:"Whiteboard is a clean canvas with no grid; Drafting turns the grid and grid snap on. Presentation only, every tool works in both.",
+  toggles:"Ortho, grid, grid snap, object snap, reference edge assist and weld. The same six toggles as the status bar.",
+  snaps:"Which object snaps are live, whether recursive midpoints are offered, and the dimension snap increments.",
+  grid:"Grid spacing in mm and whether the grid is drawn. The pitch shown adapts as you zoom.",
+  rightdock:"Show or hide the right-hand palette holding Layers, Line Styles and Properties.",
+
+  /* --- Experimental ----------------------------------------------------- */
+  xsurfer:"Send a rider along a line and watch where the path actually goes. Useful for following a route through a busy drawing.",
+  xpac:"Arcade toy. Eats its way around the linework.",
+  xgremlins:"Arcade toy. Small chaos agents loose in the drawing.",
+  xtermites:"Arcade toy. They chew the geometry. Undo puts it back.",
+  xblackhole:"Drag everything toward a point you pick. Undoable.",
+  xwreck:"Swing a wrecking ball at an impact point and scatter what it hits.",
+  xlightning:"Strike a point and fork outward along the nearest linework.",
+  xbulldozer:"Clear a corridor between two points, shoving anything in the way out to the sides.",
+  xblender:"Stir the selection. Purely destructive, purely undoable.",
+  xconfetti:"Confetti. No practical purpose, and that is fine.",
+  xquake:"Shake the drawing. Nothing moves permanently.",
+  xgravity:"Let the selection fall and settle against whatever is below it, for packing loose objects down.",
+  xrepel:"Push overlapping objects apart until they clear each other by the padding set in Settings.",
+  xspring:"Treat connected points as springs and let the layout relax.",
+  xcentrifuge:"Spin the selection outward from its centre, to break up a pile you cannot click into.",
+  xmagnet:"Pull nearby endpoints together within the weld radius, closing the small gaps that stop a region being enclosed.",
+  xwrap:"Shrink-wrap a boundary around the selection at the offset set in Settings.",
+  xvacuum:"Suck up the stray fragments left behind by trimming and exploding.",
+  xiron:"Flatten near-horizontal and near-vertical lines onto the axis, within the tolerance set in Settings.",
+  xraintest:"Rain into a space and show every point where the water escapes. The fast way to find which gap is stopping a region from closing.",
+  xsonar:"Ping outward from a point and show what the rays hit, for judging clearance in a cluttered area.",
+  xants:"Run marching ants along the linework so you can see which paths are actually connected.",
+  xstamp:"Drop a large drawing stamp: VOID, REVISED, AS BUILT and the rest. Wording is set in Settings.",
+  xcurrent:"Persistent animated flow along the linework, for showing direction in a walkthrough.",
+  xfloodfill:"Pour into a space and report roughly how much it filled. The quick check that an enclosure is actually closed. Measure Area in the Draw tab is the version to use when you want the number.",
+  xxray:"See through fills and overlaps to the linework underneath.",
+  xlevel:"Slam a picked line to exactly horizontal or vertical, whichever it is closer to.",
+  xtimelapse:"Replay the undo stack as an animation, for showing how a drawing came together.",
+  xspotlight:"Dim everything except the area under the cursor, for presenting one detail at a time.",
+  punch:"Test Your Might. Click an object to hit it; four hits destroys it. Purely for stress relief, and undo brings anything back.",
+  xsettings:"Radii, tolerances, padding and stamp wording for the Experimental tools."
+};
+function auditRibbonHints(){
+  const missing=[];
+  for(const tab of Object.keys(RIBBON))
+    for(const g of RIBBON[tab]){
+      const ids=[g.big, ...(g.small||[])].filter(Boolean);
+      if(g.custom) ids.push(g.custom);
+      for(const id of ids) if(!HINTS[id]) missing.push(tab+" \u203A "+(g.name||"")+" \u203A "+id);
+    }
+  if(missing.length) console.warn("Ribbon items with no tooltip hint:\n  "+missing.join("\n  "));
+  return missing;
+}
+
+
+/* Label, then what it does, then how to type it. Blank lines between so the
+   native tooltip renders three readable blocks rather than one run-on line. */
+function itemTitle(id,T){
+  const lines=[(T&&T.label)||id];
+  if(HINTS[id]) lines.push(HINTS[id]);
+  const keys=[];
+  const alias=String((T&&T.alias)||id).toUpperCase();
+  const hot=T&&T.hot? String(T.hot).toUpperCase() : "";
+  if(alias) keys.push("Type "+alias);
+  /* Alias and hotkey are often the same letter. Showing both reads as two
+     different ways in when there is only one. */
+  if(hot && hot!==alias) keys.push("Press "+hot);
+  if(keys.length) lines.push(keys.join("   \u00B7   "));
+  return lines.join("\n\n");
+}
 function mkBtn(id,big){
   const T=itemOf(id), b=document.createElement("button");
   b.type="button";
@@ -8750,8 +9327,8 @@ function mkBtn(id,big){
     console.error("Unwired ribbon item:",id);
     return b;
   }
-  const hot = T.hot? " or press "+T.hot : "";
-  b.title=T.label+"   type "+(T.alias||id)+hot;
+  b.title=itemTitle(id,T);
+  b.setAttribute("aria-label", T.label+(HINTS[id]? ". "+HINTS[id] : ""));
   b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true">'+T.svg+'</svg><span>'+
     T.label.replace(/,.*$/,"").replace(/\s*\(.*\)$/,"")+'</span>';
   b.onclick=()=>activateRibbonItem(id);
@@ -8834,7 +9411,7 @@ function layerWidget(){
   const sel=document.createElement("select");
   S.layers.forEach((L,i)=>{ const o=document.createElement("option");
     o.value=i; o.textContent=L.name; if(i===S.cur)o.selected=true; sel.append(o); });
-  sel.title="Current layer";
+  sel.title="Current layer\n\nNew geometry lands on this layer. Layers carry visibility, lock state and a colour, and each reference image gets its own.";
   sel.onchange=()=>{ S.cur=+sel.value; paintLayers(); };
   const row=document.createElement("div"); row.className="rrow";
   const nw=document.createElement("button"); nw.className="small";
@@ -8852,7 +9429,7 @@ function styleWidget(){
   const sel=document.createElement("select");
   S.styles.forEach((st,i)=>{ const o=document.createElement("option");
     o.value=i; o.textContent=st.name; if(i===S.curStyle) o.selected=true; sel.append(o); });
-  sel.title="Line style applied to new lines, polylines, circles, arcs, ellipses, polygons and splines";
+  sel.title="Current line style\n\nApplied to new lines, polylines, circles, arcs, ellipses, polygons and splines. Carries weight, colour and dash pattern. Markup ignores it entirely.";
   sel.onchange=()=>{ S.curStyle=+sel.value; paintStyles(); };
   const row=document.createElement("div"); row.className="rrow";
   const nw=document.createElement("button"); nw.className="small";
@@ -8862,16 +9439,32 @@ function styleWidget(){
   wrap.append(sel,row);
   return wrap;
 }
+/* The six drafting aids. One table, used by both the View tab widget and the
+   status bar, so the two can never drift apart. */
+const TOGGLE_DEFS=[
+  ["ortho","Ortho","F8",
+   "Constrains the next point to a straight horizontal or vertical run from the previous one, whichever axis you have moved further along. Only applies once there is a previous point, and an object snap always wins over it. Markup tools read it differently: there it gives 45 degree increments and makes rectangles square, the same as holding Shift."],
+  ["gridShow","Show grid","F7",
+   "Draws the background grid. The pitch shown adapts as you zoom so it never turns into mush. Purely visual: this does not make anything snap."],
+  ["gridSnap","Grid snap","F9",
+   "Rounds every picked point to the nearest grid intersection. This is the one that actually moves your cursor; Show grid only draws it."],
+  ["osnap","Object snap","F3",
+   "Snaps to features of existing geometry: endpoints, midpoints, centres, intersections, quadrants, perpendicular, tangent and nearest. Tab cycles between candidates under the cursor. Which snaps are live is set in View \u203A Snaps."],
+  ["edgeAssist","Image edge","F6",
+   "Lets you snap to strong edges detected in the active reference image, so you can trace a scanned plan without drawing over it first. Active reference only."],
+  ["weld","Weld","F4",
+   "Points that sit on top of each other move together. Drag one end of a wall and everything joined to it follows instead of tearing apart."]
+];
 function toggleWidget(){
   const wrap=document.createElement("div"); wrap.className="rrow";
   const col=document.createElement("div"); col.className="rcols";
   const col2=document.createElement("div"); col2.className="rcols";
-  const defs=[["ortho","Ortho","F8"],["gridShow","Show grid","F7"],["gridSnap","Grid snap","F9"],["osnap","Object snap","F3"],["edgeAssist","Image edge","F6"],["weld","Weld","F4"]];
-  defs.forEach(([k,label,fk],i)=>{
+  TOGGLE_DEFS.forEach(([k,label,fk,hint],i)=>{
     const b=document.createElement("button"); b.className="small"; b.dataset.tg=k;
     b.innerHTML='<svg viewBox="0 0 20 20"><rect x="2.5" y="6" width="15" height="8" rx="4"/><circle cx="'+
       (k==="ortho"?"6.5":"13.5")+'" cy="10" r="2.4" fill="currentColor"/></svg><span>'+label+'</span>';
-    b.title=label+"  ("+fk+")";
+    b.title=label+"\n\n"+hint+"\n\nPress "+fk;
+    b.setAttribute("aria-label",label+". "+hint);
     b.setAttribute("aria-pressed",String(S[k]));
     b.onclick=()=>toggle(k);
     (i<3?col:col2).append(b);
@@ -9026,7 +9619,9 @@ function workspaceWidget(){
   const b=document.createElement("button"); b.className="big"; b.type="button";
   const drafting=S.workspaceMode==="drafting";
   b.setAttribute("aria-pressed",String(drafting));
-  b.title=drafting?"Return to the clean whiteboard":"Switch to drafting view with grid and grid snap";
+  b.title=drafting
+    ? "Whiteboard\n\nClean canvas with no grid and no grid snap, for sketching and flowcharts. Presentation only: every tool still works.\n\nPress F7"
+    : "Drafting\n\nTurns the grid and grid snap on for measured work. Presentation only: every tool works in both modes.\n\nPress F7";
   b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14M7 3v14M11 3v14M15 3v14M3 3h14M3 7h14M3 11h14M3 15h14"/></svg><span>'+(drafting?'Whiteboard':'Drafting View')+'</span>';
   b.onclick=()=>setWorkspaceMode(drafting?"whiteboard":"drafting");
   const l=document.createElement("div"); l.style.cssText="font-size:10px;color:var(--ink-faint);text-align:center";
@@ -9035,11 +9630,22 @@ function workspaceWidget(){
 function gridWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
   const i=document.createElement("input"); i.type="number"; i.step="any"; i.value=S.gridStep;
-  i.title="Grid step in mm";
+  i.title="Grid step\n\nSpacing of the finest grid line, in millimetres. The pitch actually drawn adapts as you zoom so it never turns into mush. Changing this does not turn grid snap on.";
   i.onchange=()=>{ const v=parseFloat(i.value); if(isFinite(v)&&v>0){S.gridStep=v; draw(); echo("Grid "+v+"mm");} };
   const l=document.createElement("div"); l.style.cssText="font-size:10px;color:var(--ink-faint)";
   l.textContent="step (mm)";
   wrap.append(i,l); return wrap;
+}
+/* The status bar buttons are static HTML, so their titles are applied from the
+   same TOGGLE_DEFS table the View tab uses. Two places showing two different
+   explanations of Ortho is exactly how this got confusing in the first place. */
+function applyToggleTitles(){
+  for(const [k,label,fk,hint] of TOGGLE_DEFS){
+    const el=document.getElementById(TGID[k]);
+    if(!el) continue;
+    el.title=label+"\n\n"+hint+"\n\nPress "+fk;
+    el.setAttribute("aria-label",label+". "+hint);
+  }
 }
 function syncToggles(){
   for(const [k,id] of Object.entries(TGID)){
@@ -9065,37 +9671,44 @@ function paintOptbar(){
     context.textContent=activeTool.label.replace(/,.*/,"");
     host.append(context);
   }
-  const num=(label,val,step,set,disabled)=>{
+  /* Every options-bar control takes an optional trailing hint. These controls
+     change per tool and are the least self-explanatory thing in the app, so an
+     unhinted one should be the exception. */
+  const tip=(el,label,hint)=>{ if(hint){ el.title=(label||"")+"\n\n"+hint; el.setAttribute("aria-label",(label||"")+". "+hint); } return el; };
+  const num=(label,val,step,set,disabled,hint)=>{
     const wrap=document.createElement("label");
     const sp=document.createElement("span"); sp.textContent=label; sp.className="oh";
     const i=document.createElement("input"); i.type="number"; i.step=step||"any"; i.value=val; i.disabled=!!disabled;
     i.onchange=()=>{ const v=parseFloat(i.value); if(isFinite(v)) set(v); paintOptbar(); };
-    wrap.append(sp,i); return wrap;
+    wrap.append(sp,i); return tip(wrap,label,hint);
   };
-  const chk=(label,val,set)=>{
+  const chk=(label,val,set,hint)=>{
     const wrap=document.createElement("label");
     const i=document.createElement("input"); i.type="checkbox"; i.checked=!!val;
     i.onchange=()=>{ set(i.checked); paintOptbar(); draw(); };
     const sp=document.createElement("span"); sp.textContent=label;
-    wrap.append(i,sp); return wrap;
+    wrap.append(i,sp); return tip(wrap,label,hint);
   };
   if(S.snapSuspend||S.snapOverride){
     const b=document.createElement("button");
     b.className="small"; b.type="button"; b.style.minWidth="0";
     b.textContent=S.snapSuspend?"Snaps suspended (SS)":("Snap: "+SNAP_NAME[S.snapOverride]);
     b.setAttribute("aria-pressed","true");
-    b.title="Click to clear";
+    b.title=(S.snapSuspend
+      ? "Snaps suspended\n\nObject snap is off for the moment. Click to turn it back on, or type SR."
+      : "One-shot snap override\n\nThis snap applies to the next pick only, then clears itself. Click to cancel, or type SO.");
     b.onclick=()=>{ S.snapSuspend=false; snapSetOverride(null); };
     host.append(b);
   }
-  const readField=(label,val)=>{
+  const readField=(label,val,hint)=>{
     const wrap=document.createElement("label");
     const sp=document.createElement("span"); sp.textContent=label; sp.className="oh";
     const i=document.createElement("input"); i.type="text"; i.value=val; i.readOnly=true; i.disabled=true; i.style.width="92px";
-    wrap.append(sp,i); return wrap;
+    wrap.append(sp,i); return tip(wrap,label,hint||"Read-only result of the current measurement.");
   };
-  const radio=(options,val,set)=>{
+  const radio=(options,val,set,hint,label)=>{
     const wrap=document.createElement("div"); wrap.className="rrow";
+    if(hint) tip(wrap,label||"",hint);
     for(const [v,l] of options){
       const b=document.createElement("button"); b.className="small"; b.style.minWidth="0";
       b.textContent=l; b.setAttribute("aria-pressed", String(val===v));
@@ -9107,24 +9720,45 @@ function paintOptbar(){
   if(flowIsTool(S.tool)){ flowOptbar(host,{num,chk,radio}); return; }
   if(mkIsTool(S.tool)){ mkOptbar(host,{num,chk,radio}); return; }
   if(S.tool==="measurebetween"){
-    host.append(chk("Chain",S.measureChain,v=>{ S.measureChain=v; clearMeasurement(false); setPrompt(); }));
-    host.append(readField("Total Length",S.measureTotal>0?fmt(S.measureTotal):""));
+    host.append(chk("Chain",S.measureChain,v=>{ S.measureChain=v; clearMeasurement(false); setPrompt(); },
+      "Keep measuring on from the last point and run a total, instead of one pair at a time. Double-click or right-click ends the chain."));
+    host.append(readField("Total Length",S.measureTotal>0?fmt(S.measureTotal):"",
+      "Sum of every measured segment so far, in millimetres. Temporary: nothing is added to the drawing."));
+  } else if(S.tool==="measurearea"){
+    const A=S.areaResult;
+    host.append(readField("Area", A? rgnAreaText(A.area) : "",
+      "Area of the flooded region. Approximate - see the mm/cell figure for the size of one raster cell, which is the resolution the number was measured at."));
+    host.append(readField("Perimeter", A? fmt(A.perim) : "",
+      "Length of the boundary the flood ran up against, in millimetres. Same raster approximation as the area."));
+    host.append(radio([["auto","Auto"],["mm2","mm\u00B2"],["cm2","cm\u00B2"],["m2","m\u00B2"]],
+                      S.areaUnit, v=>{ S.areaUnit=v; },
+      "Unit the area is shown in. Auto picks per result, which means two rooms on the same sheet can end up labelled in different units - pick one explicitly if you are comparing them.", "Area unit"));
+    if(A){ const h=document.createElement("span"); h.className="oh";
+           h.textContent="\u00B1 "+fmt(A.cell)+" mm/cell"; host.append(h); }
   } else if(S.tool==="measurealong"){
-    host.append(readField("Total Length",S.measureTotal>0?fmt(S.measureTotal):""));
+    host.append(readField("Total Length",S.measureTotal>0?fmt(S.measureTotal):"",
+      "Total length along the picked element, in millimetres. Curves are flattened before measuring."));
     const hint=document.createElement("span"); hint.className="oh"; hint.textContent=S.measureTabChain?"Tab: chain preview":"Tab: connected chain"; host.append(hint);
   } else if(S.tool==="line"){
-    host.append(chk("Chain", S.chain, v=>{S.chain=v; S.pending=[]; S.chainPrev=null; setPrompt(); draw();}));
-    host.append(num("Offset", S.drawOffset, "any", v=>S.drawOffset=v));
-    host.append(chk("Radius", S.useRadius, v=>S.useRadius=v));
-    host.append(num("", S.chainRadius, "any", v=>S.chainRadius=Math.max(0,v), !S.useRadius));
+    host.append(chk("Chain", S.chain, v=>{S.chain=v; S.pending=[]; S.chainPrev=null; setPrompt(); draw();},
+      "Keep drawing on from the last point. Each segment still commits as its own entity, not one polyline, so trim and fillet work per segment. Enter or right-click ends the chain."));
+    host.append(num("Offset", S.drawOffset, "any", v=>S.drawOffset=v, false,
+      "Draw the line this far to one side of the points you pick, in millimetres. Zero draws through them."));
+    host.append(chk("Radius", S.useRadius, v=>S.useRadius=v,
+      "Round every corner of a chain automatically as you draw it, using the radius in the next box."));
+    host.append(num("", S.chainRadius, "any", v=>S.chainRadius=Math.max(0,v), !S.useRadius,
+      "Corner radius applied between chained segments, in millimetres."));
   } else if(S.tool==="pickLines"){
-    host.append(num("Offset", S.drawOffset, "any", v=>{S.drawOffset=v; if(S.op) S.op.d=Math.max(0,v);}));
+    host.append(num("Offset", S.drawOffset, "any", v=>{S.drawOffset=v; if(S.op) S.op.d=Math.max(0,v);}, false,
+      "Distance to offset the traced chain, in millimetres."));
   } else if(S.tool==="offset"){
-    host.append(radio([["numerical","Numerical"],["graphical","Graphical"]], S.offsetMode, v=>S.offsetMode=v));
+    host.append(radio([["numerical","Numerical"],["graphical","Graphical"]], S.offsetMode, v=>S.offsetMode=v,
+      "Numerical uses the typed distance and you only pick a side. Graphical ignores it and takes the distance from where you click.", "Offset mode"));
     if(S.offsetMode==="numerical")
       host.append(num("Offset", S.op.d!=null?S.op.d:S.lastOffset, "any",
         v=>{ S.lastOffset=v; if(S.op) S.op.d=v; }));
-    host.append(chk("Copy", S.copyOffset, v=>S.copyOffset=v));
+    host.append(chk("Copy", S.copyOffset, v=>S.copyOffset=v,
+      "Leave the original in place and create the offset as a new entity, rather than moving the original."));
   } else if(S.tool==="fillet"||S.tool==="chamfer"){
     host.append(num(S.tool==="fillet"?"Radius":"Distance",
       S.op.r!=null? S.op.r : (S.tool==="fillet"?S.lastFillet:S.lastChamfer), "any",
@@ -9132,15 +9766,20 @@ function paintOptbar(){
   } else if(S.tool==="scale"){
     host.append(radio([["graphical","Graphical"],["numerical","Numerical"]], S.scaleMode,
       v=>{ S.scaleMode=v; S.pending=[]; setPrompt(); draw(); }));
-    if(S.scaleMode==="numerical") host.append(num("Scale", S.lastScaleFactor, "any", v=>S.lastScaleFactor=v));
+    if(S.scaleMode==="numerical") host.append(num("Scale", S.lastScaleFactor, "any", v=>S.lastScaleFactor=v, false,
+      "Multiplier applied about the base point. 2 doubles, 0.5 halves."));
   } else if(S.tool==="copy"){
-    host.append(chk("Multiple", S.copyMultiple, v=>S.copyMultiple=v));
+    host.append(chk("Multiple", S.copyMultiple, v=>S.copyMultiple=v,
+      "Keep the base point fixed after each copy so you can drop several from one origin without restarting the tool."));
   } else if(S.tool==="rotate"){
-    host.append(chk("Copy", S.copyRotate, v=>S.copyRotate=v));
+    host.append(chk("Copy", S.copyRotate, v=>S.copyRotate=v,
+      "Leave the original where it is and rotate a copy instead."));
   } else if(S.tool==="mirror"){
-    host.append(chk("Copy", S.copyMirror, v=>S.copyMirror=v));
+    host.append(chk("Copy", S.copyMirror, v=>S.copyMirror=v,
+      "Keep the original and mirror a copy across the axis, rather than flipping the original."));
   } else if(S.tool==="polygon"){
-    host.append(num("Sides", S.polySides, "1", v=>S.polySides=Math.max(3,Math.min(64,Math.round(v)))));
+    host.append(num("Sides", S.polySides, "1", v=>S.polySides=Math.max(3,Math.min(64,Math.round(v))), false,
+      "Number of sides on the polygon, 3 to 64."));
     const wrap=document.createElement("label"); const sp=document.createElement("span"); sp.className="oh"; sp.textContent="";
     const sel=document.createElement("select");
     for(const [v,l] of [["1","Inscribed"],["0","Circumscribed"]]){
@@ -9174,23 +9813,23 @@ function paintLayers(){
     d.className="layer"+(i===S.cur?" current":"")+(L.on?"":" hidden");
     d.onclick=ev=>{ if(ev.target.closest(".licon")) return; S.cur=i; paintLayers(); };
     const sw=document.createElement("span"); sw.className="swatch"; sw.style.background=aciColor(L.aci);
-    sw.title="ACI "+L.aci+" - click to change";
+    sw.title="Layer colour\n\nAutoCAD Color Index "+L.aci+". Click to change. Entities set to ByLayer follow this.";
     sw.onclick=ev=>{ ev.stopPropagation();
       const k=ACI.findIndex(a=>a.i===L.aci); L.aci=ACI[(k+1)%ACI.length].i; paintLayers(); draw(); };
     const nm=document.createElement("span"); nm.className="lname"; nm.textContent=L.name;
-    nm.title="Double-click to rename";
+    nm.title="Layer name\n\nDouble-click to rename. Type LAYER <name> at the command line to make one current.";
     nm.ondblclick=ev=>{ ev.stopPropagation();
       requestString("Rename layer", L.name, v=>{
         if(v) L.name=v.trim().toUpperCase()||L.name;
         paintLayers(); draw(); }); };
     const vis=document.createElement("button"); vis.className="licon"+(L.on?" on":"");
-    vis.textContent=L.on?"\u25CF":"\u25CB"; vis.title="Show / hide";
+    vis.textContent=L.on?"\u25CF":"\u25CB"; vis.title="Visibility\n\nHide the layer without deleting anything. Hidden layers are skipped by exports and by area flooding.";
     vis.onclick=ev=>{ev.stopPropagation(); L.on=!L.on; paintLayers(); draw();};
     const lk=document.createElement("button"); lk.className="licon"+(L.lock?" on":"");
-    lk.textContent=L.lock?"\u25A0":"\u25A1"; lk.title="Lock / unlock";
+    lk.textContent=L.lock?"\u25A0":"\u25A1"; lk.title="Lock\n\nEntities on a locked layer still draw and still snap, but cannot be selected or edited.";
     lk.onclick=ev=>{ev.stopPropagation(); L.lock=!L.lock; paintLayers();};
     const del=document.createElement("button"); del.className="licon";
-    del.textContent="\u2715"; del.title="Delete this layer";
+    del.textContent="\u2715"; del.title="Delete layer\n\nRemoves the layer and everything drawn on it. Undoable.";
     del.onclick=ev=>{ev.stopPropagation(); deleteLayer(i);};
     d.append(sw,nm,vis,lk,del); host.append(d);
   });
@@ -9220,18 +9859,18 @@ function paintStyles(){
     d.className="style-row"+(i===S.curStyle?" current":"");
     d.onclick=ev=>{ if(ev.target.closest("input,.spat,.swatch")) return; S.curStyle=i; paintStyles(); };
     const sw=document.createElement("span"); sw.className="swatch"; sw.style.background=aciColor(st.aci);
-    sw.title="ACI "+st.aci+" - click to change";
+    sw.title="Style colour\n\nAutoCAD Color Index "+st.aci+". Click to change.";
     sw.onclick=ev=>{ ev.stopPropagation();
       const k=ACI.findIndex(a=>a.i===st.aci); st.aci=ACI[(k+1)%ACI.length].i; paintStyles(); draw(); };
     const nm=document.createElement("span"); nm.className="sname"; nm.textContent=st.name;
-    nm.title="Double-click to rename";
+    nm.title="Style name\n\nDouble-click to rename. The name is what the Line Style dropdown shows.";
     nm.ondblclick=ev=>{ ev.stopPropagation();
       requestString("Rename line style", st.name, v=>{ if(v) st.name=v.trim()||st.name; paintStyles(); draw(); }); };
     const w=document.createElement("input"); w.className="sweight"; w.type="number"; w.step="0.01"; w.min="0.01";
-    w.value=st.w; w.title="Line weight, mm";
+    w.value=st.w; w.title="Line weight\n\nIn millimetres of world space, so it scales with the drawing rather than staying a fixed screen thickness.";
     w.onclick=ev=>ev.stopPropagation();
     w.onchange=()=>{ const v=parseFloat(w.value); if(isFinite(v)&&v>0) st.w=v; else w.value=st.w; draw(); };
-    const pat=document.createElement("button"); pat.className="spat"; pat.title="Click to cycle the dash pattern";
+    const pat=document.createElement("button"); pat.className="spat"; pat.title="Dash pattern\n\nClick to cycle: solid, dashed, dotted and dash-dot. Exported to DXF as a linetype.";
     const dash=(st.pat||[]).map(v=>{ const n=Math.abs(Number(v)); return isFinite(n)? n : 1; }).join(",");
     pat.innerHTML='<svg viewBox="0 0 28 14"><line x1="2" y1="7" x2="26" y2="7" stroke-dasharray="'+dash+'"/></svg>';
     pat.onclick=ev=>{ ev.stopPropagation(); st.pat=nextPattern(st.pat); paintStyles(); draw(); };
@@ -10324,7 +10963,9 @@ function refreshCompactButton(){
   const on=appShell.classList.contains("ribbon-compact");
   compactButton.setAttribute("aria-pressed",String(on));
   compactButton.textContent=on?"Expand":"Compact";
-  compactButton.title=on?"Expand ribbon":"Compact ribbon";
+  compactButton.title=on
+    ? "Expand ribbon\n\nRestore the full-height ribbon with icon labels."
+    : "Compact ribbon\n\nShrink the ribbon to reclaim canvas height. Buttons keep their tooltips.";
 }
 function applyRibbonHeight(h,persist=true){
   h=clamp(Math.round(h),UI_LIMIT.ribbonMin,UI_LIMIT.ribbonMax);
@@ -10460,9 +11101,11 @@ function auditReferences(){
 if(window.ResizeObserver) new ResizeObserver(resize).observe(document.getElementById("stage"));
 else window.addEventListener("resize",resize);
 auditRibbonButtons();
+auditRibbonHints();
 auditEntityTypes();
 auditReferences();
 reseedEntSeq();
+applyToggleTitles();
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
 setWorkspaceMode("whiteboard");
 resize(); readout();
