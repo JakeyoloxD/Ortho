@@ -1367,6 +1367,7 @@ function finishChain(){
   S.pending=[]; S.chainPrev=null; setPrompt(); draw();
 }
 function cancel(){
+  if(S.x&&S.x.surferPick){S.x.surferPick=false;cv.classList.remove("picking");}
   if(S.ask){ S.ask=null; setPrompt(); echo(""); return; }
   if(isMeasureTool(S.tool)){
     const active=S.pending.length||S.measureSegs.length||S.measureTotal>0;
@@ -2437,6 +2438,26 @@ window.addEventListener("pointerup",e=>{
   if(flowDraw){ flowPointerUp(e); return; }
   if(!downAt) return;
   const w=cursorPoint();
+  if(S.x && S.x.surferPick){
+    if(!dragging || touchAimDrag()){
+      const raw=V(wX(S.mouse.sx),wY(S.mouse.sy));
+      const surfs=xRideSurfaces(), hit=xSurferNearestSurface(surfs,raw);
+      const maxPick=px(22);
+      if(hit && hit.dist<=maxPick){
+        S.x.surferPick=false;
+        cv.classList.remove("picking");
+        downAt=null; dragging=false;
+        xUiReact("xsurfer","action");
+        xLineSurfer(hit);
+        setPrompt(); draw();
+        return;
+      }
+      echo("LINE SURFER: click closer to a rideable line, ramp, or Marker stroke.","warn");
+      say("Line Surfer: click where he starts");
+      downAt=null; dragging=false; draw();
+      return;
+    }
+  }
   /* On touch, sliding to aim leaves dragging=true even though the user was
      placing a point, not dragging. Honour the release in that case, and pick
      from where the crosshair ended up rather than where the finger landed. */
@@ -5828,7 +5849,7 @@ function snapPickActive(){
 }
 
 /* ====================================================== EXPERIMENTAL FEATURES
-   Twenty tools where the physics is the mechanism, not the joke. Every one has
+   Experimental tools where physics, slapstick and visual feedback are the mechanism. Every one has
    a job: repair imported geometry, prove an enclosure is closed, find the
    duplicates you cannot see, lay out a diagram, or present one.
 
@@ -5842,7 +5863,7 @@ function snapPickActive(){
      - opt-in. The whole tab is hidden until you ask for it.                  */
 
 const XCAP={
-  PARTS: 1400,          // live particles
+  PARTS: 2200,          // live particles
   MS: 14000,            // any single effect
   RASTER: 640,          // longest edge of the enclosure raster
   CELLS: 640*640,
@@ -5856,11 +5877,29 @@ const XSTAMPS=["VOID","REVISED","APPROVED","REJECTED","AS BUILT","DRAFT","FOR RE
 S.experimental=false;
 S.x={
   weldR:9, ironTol:1.4, repelPad:8, wrapOffset:8, corridor:60, sonarRays:24,
-  stampWord:"VOID", xray:false, spotlight:false, current:false
+  stampWord:"VOID", xray:false, spotlight:false, current:false, surferPick:false
 };
 
 /* ---- effect driver ----------------------------------------------------- */
 const XFX={parts:[], marks:[], until:0, raf:0, kind:null, data:null, t0:0};
+
+/* Current is a persistent animated mode, not a timed XFX effect. Give it its
+   own RAF so its phase keeps advancing even after startup effects finish. */
+let XCURRENT_RAF=0;
+function xCurrentLoopStop(){
+  if(XCURRENT_RAF) cancelAnimationFrame(XCURRENT_RAF);
+  XCURRENT_RAF=0;
+}
+function xCurrentLoopStart(){
+  if(XCURRENT_RAF || !S.x.current) return;
+  const step=()=>{
+    if(!S.x.current){ XCURRENT_RAF=0; return; }
+    draw();
+    XCURRENT_RAF=requestAnimationFrame(step);
+  };
+  XCURRENT_RAF=requestAnimationFrame(step);
+}
+
 function xfxStop(){
   if(XFX.raf) cancelAnimationFrame(XFX.raf);
   XFX.raf=0; XFX.parts.length=0; XFX.marks.length=0; XFX.kind=null; XFX.data=null; XFX.until=0;
@@ -5943,8 +5982,60 @@ function xSelOrAll(){
   const sel=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
   return sel.length? sel : xEnts();
 }
+function xInkPath(e){
+  if(!e || e.t!=="ink" || !Array.isArray(e.pts)) return [];
+  const src=e.pts.filter(q=>q&&isFinite(q.x)&&isFinite(q.y));
+  if(src.length<2) return src.slice();
+
+  /* Marker/pencil strokes arrive at pointer-event density, which can be extremely
+     uneven. Resample them in world space so Experimental toys see one continuous
+     curve instead of hundreds of tiny jittery mouse segments. The original entity
+     is never modified. */
+  const step=Math.max(px(3.5),1e-6), out=[V(src[0].x,src[0].y)];
+  let carry=0, a=V(src[0].x,src[0].y);
+  for(let i=1;i<src.length;i++){
+    const b=src[i]; let d=dist(a,b);
+    if(!(d>1e-9)){a=b;continue;}
+    let dir=norm(sub(b,a));
+    while(carry+d>=step){
+      const need=step-carry;
+      a=add(a,mul(dir,need));
+      out.push(a); d-=need; carry=0;
+      if(d>1e-9) dir=norm(sub(b,a));
+    }
+    carry+=d; a=V(b.x,b.y);
+  }
+  const last=src[src.length-1];
+  if(dist(out[out.length-1],last)>step*.28) out.push(V(last.x,last.y));
+
+  /* One light smoothing pass removes hand-sampling buzz while preserving ramps,
+     bowls and deliberate corners. End points stay exact so gaps remain real. */
+  if(out.length>4){
+    const sm=[out[0]];
+    for(let i=1;i<out.length-1;i++) sm.push(V(
+      out[i-1].x*.18+out[i].x*.64+out[i+1].x*.18,
+      out[i-1].y*.18+out[i].y*.64+out[i+1].y*.18));
+    sm.push(out[out.length-1]);
+    return sm;
+  }
+  return out;
+}
 function xSegs(e){
   const out=[];
+
+  /* Markup ink is genuine geometry for Experimental mode. Do NOT send it through
+     flatten(), because generic entPoints(ink) intentionally exposes only its two
+     end points for normal CAD operations. Current and Line Surfer need the full
+     freehand path. */
+  if(e && e.t==="ink"){
+    const P=xInkPath(e);
+    for(let i=0;i<P.length-1;i++) if(dist(P[i],P[i+1])>1e-9)
+      out.push({a:P[i],b:P[i+1],ink:true,pathIndex:i,pathCount:P.length-1});
+    if(e.closed && P.length>2 && dist(P[P.length-1],P[0])>1e-9)
+      out.push({a:P[P.length-1],b:P[0],ink:true,pathIndex:P.length-1,pathCount:P.length});
+    return out;
+  }
+
   for(const c of curvesOf(e)) if(c.k==="seg") out.push(c);
   if(!out.length){
     const P=flatten(e);
@@ -6062,41 +6153,89 @@ function xRegionAt(p,pad){
   return F? {R,F} : null;
 }
 
+
+/* ---- chaos helpers: Experimental is intentionally theatrical ------------ */
+function xAllTargetable(){
+  return xEnts().filter(e=>e && !["dim"].includes(e.t));
+}
+function xEntityCenter(e){
+  const b=entBox(e);
+  return b&&isFinite(b.x0)?V((b.x0+b.x1)/2,(b.y0+b.y1)/2):(e.p||e.c||e.a||V(0,0));
+}
+function xEffectBox(list){
+  const b=xBox(list&&list.length?list:xEnts());
+  if(b) return b;
+  const p=cursorPoint(), r=px(120);
+  return {x0:p.x-r,y0:p.y-r,x1:p.x+r,y1:p.y+r};
+}
+function xBurstAt(p,col,count,speed){
+  count=Math.min(XCAP.PARTS-XFX.parts.length,count||40);
+  speed=speed||px(240);
+  for(let i=0;i<count;i++){
+    const a=Math.random()*TAU, v=speed*(.25+Math.random());
+    xPart(p.x,p.y,Math.cos(a)*v,Math.sin(a)*v,650+Math.random()*900,col||"#ffd166",1.4+Math.random()*2.8);
+  }
+}
+function xKickParticles(dt){
+  for(const q of XFX.parts){
+    q.x+=q.vx*dt; q.y+=q.vy*dt; q.vx*=.985; q.vy*=.985; q.life-=dt*1000;
+  }
+  XFX.parts=XFX.parts.filter(q=>q.life>0);
+}
+function xNearestIndex(p){
+  let bi=-1,bd=1e99;
+  for(let i=0;i<S.ents.length;i++){
+    const e=S.ents[i]; if(!e||!xEnts().includes(e)) continue;
+    let d=dist(p,xEntityCenter(e));
+    if(entHit(e,p,px(14))) d=0;
+    if(d<bd){bd=d;bi=i;}
+  }
+  return bi;
+}
+function xSelectedOrEverything(){
+  const sel=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
+  return sel.length?sel:xAllTargetable();
+}
+
 /* ====================== CLEANUP ======================================== */
 function xMagnet(){
-  const r=px(S.x.weldR);
-  const list=xSelOrAll();
+  const list=xSelectedOrEverything();
   const handles=[];
   for(const e of list) for(const h of xEndpoints(e)) handles.push(h);
-  if(handles.length<2) return echo("Nothing with loose ends in that selection","warn");
-  if(handles.length>XCAP.PAIRS) return echo("Too many endpoints to weld in one pass ("+handles.length+")","warn");
+  const box=xEffectBox(list), c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+  if(handles.length<2){
+    xfxRun("magnet",1200,{c,box},(t)=>{ if(Math.random()<.4)xBurstAt(c,"#ff5ac8",2,px(80)); xKickParticles(.016); },null);
+    xBeep("pop"); return echo("MAGNET CLANG: nothing weldable, so it magnetised the air instead.");
+  }
+  const r=Math.max(px(S.x.weldR),Math.max(box.x1-box.x0,box.y1-box.y0)*.18);
+  snap();
+  let moved=0,groups=0;
   const used=new Uint8Array(handles.length);
-  const groups=[];
+  XFX.marks.length=0;
   for(let i=0;i<handles.length;i++){
     if(used[i]) continue;
-    const g=[i]; used[i]=1;
-    const pi=handles[i].get();
+    const pi=handles[i].get(), g=[i]; used[i]=1;
     for(let j=i+1;j<handles.length;j++){
       if(used[j]) continue;
-      if(dist(pi,handles[j].get())<=r){ used[j]=1; g.push(j); }
+      if(dist(pi,handles[j].get())<=r){used[j]=1;g.push(j);}
     }
-    if(g.length>1) groups.push(g);
+    if(g.length<2) continue;
+    let sx=0,sy=0; for(const k of g){const p=handles[k].get();sx+=p.x;sy+=p.y;}
+    const q=V(sx/g.length,sy/g.length);
+    for(const k of g){ if(dist(handles[k].get(),q)>1e-9){handles[k].set(q);moved++;} }
+    XFX.marks.push({kind:"weld",p:q}); groups++;
   }
-  if(!groups.length) return echo("No endpoints within "+fmt(r)+" of each other","warn");
-  snap();
-  let moved=0;
-  for(const g of groups){
-    let sx=0,sy=0;
-    for(const i of g){ const p=handles[i].get(); sx+=p.x; sy+=p.y; }
-    const c=V(sx/g.length, sy/g.length);
-    for(const i of g){ if(dist(handles[i].get(),c)>1e-12) moved++; handles[i].set(c); }
-    xPart(0,0,0,0,0);
-    XFX.marks.push({p:c,kind:"weld"});
+  if(!groups){
+    /* No natural group? Force the two closest endpoints to slam together. */
+    let a=0,b=1,bd=1e99;
+    for(let i=0;i<handles.length;i++)for(let j=i+1;j<handles.length;j++){const d=dist(handles[i].get(),handles[j].get());if(d<bd){bd=d;a=i;b=j;}}
+    const q=mul(add(handles[a].get(),handles[b].get()),.5); handles[a].set(q); handles[b].set(q); moved=2; groups=1;
+    XFX.marks.push({kind:"weld",p:q});
   }
-  flowInvalidateIndex(); draw(); updateProps();
-  xfxRun("marks",1400,null,null,null);
-  xBeep("tick");
-  echo("Welded "+groups.length+" junction"+(groups.length===1?"":"s")+", moved "+moved+" endpoint"+(moved===1?"":"s"));
+  flowInvalidateIndex(); updateProps();
+  xfxRun("magnet",1500,{c,box},(t)=>{ if(Math.random()<.7){const q=V(box.x0+Math.random()*(box.x1-box.x0),box.y0+Math.random()*(box.y1-box.y0));xPart(q.x,q.y,(c.x-q.x)*2,(c.y-q.y)*2,700,"#ff5ac8",2);} xKickParticles(.016); },null);
+  xBeep("thunk"); draw();
+  echo("MAGNET SNAP: "+groups+" junction"+(groups===1?"":"s")+" slammed together, "+moved+" endpoint"+(moved===1?"":"s")+" moved.");
 }
 function xVacuum(){
   /* Experimental means literal: if objects are selected, suck them out of the drawing.
@@ -6140,34 +6279,32 @@ function xVacuum(){
   echo("Vacuumed "+gone+": "+junk.dupe+" duplicate, "+junk.zero+" zero-length, "+junk.empty+" empty, "+junk.orphan+" orphaned connector"+(junk.orphan===1?"":"s"));
 }
 function xIron(){
-  const list=xSelOrAll();
-  const tol=px(S.x.ironTol);
-  let straightened=0, thinned=0;
+  const list=xSelectedOrEverything();
+  if(!list.length) return echo("STEAM IRON: no geometry, no wrinkles. The iron hisses anyway.");
+  const box=xEffectBox(list), tol=Math.max(px(S.x.ironTol),px(3));
   snap();
+  let changed=0;
   for(const e of list){
-    if(e.t==="pline"||e.t==="spline"){
-      if(!e.pts||e.pts.length<3) continue;
-      const n0=e.pts.length;
-      const simp=mkRDP(e.pts, tol);
-      if(simp.length>=2 && simp.length<n0){ e.pts=simp; thinned+=n0-simp.length; }
-      if(e.pts.length>2 && !e.closed){
-        const A=e.pts[0], B=e.pts[e.pts.length-1];
-        let dev=0;
-        for(const p of e.pts) dev=Math.max(dev, ptSegDist(p,A,B));
-        if(dev<=tol){ e.pts=[A,B]; straightened++; }
-      }
-    } else if(e.t==="line"){
-      const d=sub(e.b,e.a);
-      if(Math.abs(d.y)<=tol && Math.abs(d.x)>tol){ e.b=V(e.b.x,e.a.y); straightened++; }
-      else if(Math.abs(d.x)<=tol && Math.abs(d.y)>tol){ e.b=V(e.a.x,e.b.y); straightened++; }
+    if(e.t==="line"){
+      const d=sub(e.b,e.a), L=len(d); if(L<1e-9) continue;
+      const a=Math.abs(d.x)>=Math.abs(d.y)?0:Math.PI/2;
+      const mid=mul(add(e.a,e.b),.5), half=L/2;
+      e.a=V(mid.x-Math.cos(a)*half,mid.y-Math.sin(a)*half);
+      e.b=V(mid.x+Math.cos(a)*half,mid.y+Math.sin(a)*half); changed++;
+    }else if((e.t==="pline"||e.t==="spline")&&e.pts&&e.pts.length>1){
+      const A=e.pts[0],B=e.pts[e.pts.length-1], d=sub(B,A), horiz=Math.abs(d.x)>=Math.abs(d.y);
+      const fixed=e.pts.map(p=>horiz?V(p.x,(A.y+B.y)/2):V((A.x+B.x)/2,p.y));
+      e.t="pline"; e.pts=mkRDP(fixed,tol); e.closed=false; changed++;
+    }else if(e.t==="arc"||e.t==="circle"||e.t==="ellipse"){
+      /* squash curves flatter, because this is an iron, not a standards committee */
+      if(e.t==="circle"){e.t="ellipse";e.rx=e.r;e.ry=Math.max(px(2),e.r*.28);e.rot=0;delete e.r;changed++;}
+      else if(e.t==="ellipse"){e.ry=Math.max(px(2),e.ry*.35);changed++;}
     }
   }
-  if(!straightened && !thinned){ S.undo.pop(); return echo("Nothing needed pressing at "+fmt(tol)+" tolerance"); }
-  draw(); updateProps();
-  xUiSweep();
-  xfxRun("iron",950,{box:xBox(list)},null,null);
-  xBeep("sweep");
-  echo("Ironed: "+straightened+" run"+(straightened===1?"":"s")+" straightened, "+thinned+" surplus vertices removed");
+  flowInvalidateIndex(); updateProps();
+  xfxRun("superIron",1700,{box},(t)=>{ if(Math.random()<.45){const p=V(box.x0+Math.random()*(box.x1-box.x0),box.y1+px(10));xPart(p.x,p.y,0,px(30+Math.random()*50),650,"#ffffff",1.6);}xKickParticles(.016); },null);
+  xBeep("sweep"); draw();
+  echo("STEAM IRON: pressed "+changed+" object"+(changed===1?"":"s")+" brutally flat and square.");
 }
 function xDominantAngle(list){
   const bins=new Float64Array(90);
@@ -6194,136 +6331,117 @@ function xDominantAngle(list){
   return wsum>0 ? sum/wsum : bi+0.5;
 }
 function xCentrifuge(){
-  const list=xSelOrAll();
-  if(!list.length) return echo("Nothing to align","warn");
-  const a=xDominantAngle(list);
-  if(a==null) return echo("No straight runs to take a bearing from","warn");
-  const off=(a>45? a-90 : a);
-  if(Math.abs(off)<1e-4) return echo("Already square - dominant bearing is "+fmt(a)+"\u00B0");
-  const b=xBox(list);
-  const c=V((b.x0+b.x1)/2,(b.y0+b.y1)/2);
+  const list=xSelectedOrEverything();
+  if(!list.length) return echo("CENTRIFUGE: chamber empty. Dramatic spin cycle cancelled.");
+  const box=xEffectBox(list), c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
   snap();
-  for(const e of list) rotEnt(e,c,rad(-off));
-  flowInvalidateIndex(); draw(); updateProps();
-  xfxRun("spin",700,{c},null,null);
-  xBeep("sweep");
-  echo("De-skewed by "+fmt(-off)+"\u00B0 about the selection centre");
+  let i=0;
+  for(const e of list){
+    const ec=xEntityCenter(e), v=sub(ec,c), L=len(v)||1;
+    const spin=(i%2?1:-1)*rad(18+Math.random()*42);
+    rotEnt(e,ec,spin);
+    const shove=mul(norm(v),Math.max(px(10),Math.max(box.x1-box.x0,box.y1-box.y0)*(.05+Math.random()*.08)));
+    moveEnt(e,shove); i++;
+  }
+  flowInvalidateIndex(); updateProps();
+  xfxRun("centrifuge",1900,{c,box},(t)=>{if(Math.random()<.8){const a=Math.random()*TAU,r=(.1+.9*Math.random())*Math.max(box.x1-box.x0,box.y1-box.y0)*.65;xPart(c.x+Math.cos(a)*r,c.y+Math.sin(a)*r,-Math.sin(a)*r*3,Math.cos(a)*r*3,700,"#78b7f1",1.8);}xKickParticles(.016);},null);
+  xBeep("sweep"); draw();
+  echo("CENTRIFUGE: spun "+list.length+" object"+(list.length===1?"":"s")+" outward. Alignment is now a centrifugal suggestion.");
 }
 function xLevel(p){
   const i=hitIndex(p);
-  if(i<0) return echo("Point at a line to level it","warn");
+  if(i<0){xfxRun("levelFail",1200,{p},null,null);xBeep("tick");return echo("SPIRIT LEVEL slapped the drawing, but you missed a line.");}
   const e=S.ents[i];
-  if(e.t!=="line") return echo("The spirit level works on lines","warn");
-  const d=sub(e.b,e.a);
+  if(e.t!=="line"){xfxRun("levelFail",1200,{p},null,null);xBeep("tick");return echo("SPIRIT LEVEL only bullies straight lines.");}
+  const d=sub(e.b,e.a), L=len(d), c=mul(add(e.a,e.b),.5), horiz=Math.abs(d.x)>=Math.abs(d.y);
   snap();
-  if(Math.abs(d.x)>=Math.abs(d.y)){ e.b=V(e.b.x,e.a.y); echo("Levelled horizontal"); }
-  else { e.b=V(e.a.x,e.b.y); echo("Plumbed vertical"); }
-  S.sel=new Set([i]);
-  draw(); updateProps();
-  XFX.marks.length=0; XFX.marks.push({kind:"level",p:mul(add(e.a,e.b),.5)});
-  xfxRun("level",900,{p:mul(add(e.a,e.b),.5)},null,null);
-  xBeep("tick");
+  if(horiz){e.a=V(c.x-L/2,c.y);e.b=V(c.x+L/2,c.y);}
+  else{e.a=V(c.x,c.y-L/2);e.b=V(c.x,c.y+L/2);}
+  S.sel=new Set([i]);updateProps();
+  XFX.marks.length=0;XFX.marks.push({kind:"level",p:c});
+  xfxRun("levelSlam",1500,{p:c,horiz},null,null);xBeep("thunk");draw();
+  echo(horiz?"SPIRIT LEVEL: BANG. Perfectly horizontal.":"SPIRIT LEVEL: BANG. Perfectly plumb.");
 }
 
 /* ====================== DIAGNOSTICS ==================================== */
+function xAreaText(area){
+  if(area>=1000000) return fmt(area/1000000)+" m²";
+  if(area>=10000) return fmt(area/10000)+" cm²";
+  return fmt(area)+" mm²";
+}
 function xFlood2(p){
   const got=xRegionAt(p);
-  if(!got) return echo("Nothing to pour into","warn");
+  if(!got){xfxRun("paintSplash",1400,{p,col:"#4fd1a5"},null,null);xBeep("pop");return echo("FLOOD FILL threw a bucket at empty space.");}
   const {R,F}=got;
-  if(F.blocked) return echo("That point is on a line - aim inside a space","warn");
-  const area=F.count*R.sx*R.sy;
-  const perim=F.perim*((R.sx+R.sy)/2);
+  if(F.blocked){xfxRun("paintSplash",1400,{p,col:"#ff9f43"},null,null);xBeep("pop");return echo("FLOOD FILL hit a wall and exploded paint everywhere.");}
+  const area=F.count*R.sx*R.sy, perim=F.perim*((R.sx+R.sy)/2);
+
+  /* Put the useful measurement where the user is looking: inside the fill. */
+  let sx=0,sy=0,n=0,minx=R.w,miny=R.h,maxx=0,maxy=0;
+  for(let i=0;i<F.seen.length;i++){
+    if(!F.seen[i]) continue;
+    const x=i%R.w,y=(i/R.w)|0;
+    sx+=x+.5; sy+=y+.5; n++;
+    if(x<minx)minx=x;if(x>maxx)maxx=x;if(y<miny)miny=y;if(y>maxy)maxy=y;
+  }
+  const label=n?V(R.box.x0+(sx/n)*R.sx,R.box.y1-(sy/n)*R.sy):p;
+  const areaText=xAreaText(area);
   XFX.marks.length=0;
-  XFX.marks.push({kind:"fill",R,seen:F.seen,col:F.escaped?"#ff9f43":"#4fd1a5"});
-  xfxRun("marks",2600,null,null,null);
-  xBeep("pop");
-  if(F.escaped) echo("That space is not enclosed - paint escaped to the sheet edge. Approx "+fmt(area)+" mm\u00B2 flooded","warn");
-  else echo("Area \u2248 "+fmt(area)+" mm\u00B2   Perimeter \u2248 "+fmt(perim)+" mm   (raster estimate)");
+  XFX.marks.push({kind:"fill",R,seen:F.seen,col:F.escaped?"#ff9f43":"#4fd1a5",
+                  label,area,areaText,perim,escaped:F.escaped,
+                  regionW:(maxx-minx+1)*R.sx,regionH:(maxy-miny+1)*R.sy});
+  xfxRun("floodRush",3000,{p,R,seen:F.seen,escaped:F.escaped},null,null);xBeep("sweep");
+  echo(F.escaped?("FLOOD ESCAPE: open region, approx "+areaText+" flooded before reaching the sheet edge.")
+                :("FLOOD COMPLETE: Area = "+areaText+" · Perimeter ≈ "+fmt(perim)+" mm."));
 }
 function xRain(p){
   const got=xRegionAt(p);
-  if(!got) return echo("Nothing to rain on","warn");
+  if(!got){xfxRun("storm",2200,{p,cells:[p],leaks:[p]},(t)=>{xBurstAt(p,"#7fc4ff",2,px(100));xKickParticles(.016);},null);xBeep("sweep");return echo("RAIN TEST summoned a storm over absolutely nothing.");}
   const {R,F}=got;
-  if(F.blocked) return echo("Aim inside a space, not on a line","warn");
-  const leaks=[];
-  if(F.escaped){
-    for(let i=0;i<F.seen.length && leaks.length<60;i++){
-      if(!F.seen[i]) continue;
-      const x=i%R.w, y=(i/R.w)|0;
-      if(x===0||y===0||x===R.w-1||y===R.h-1) leaks.push(xCellCentre(R,i));
-    }
-  }
-  XFX.marks.length=0;
-  for(const q of leaks) XFX.marks.push({kind:"leak",p:q});
-  const cells=[];
-  for(let i=0;i<F.seen.length && cells.length<400;i+=Math.max(1,(F.seen.length/400)|0))
-    if(F.seen[i]) cells.push(xCellCentre(R,i));
-  xfxRun("rain",3200,{cells,leaks},(t)=>{
-    if(XFX.parts.length<XCAP.PARTS && cells.length){
-      for(let k=0;k<3;k++){
-        const c=cells[(Math.random()*cells.length)|0];
-        xPart(c.x, c.y+px(60)*(1-t), 0, -px(90), 900, F.escaped?"#ff9f43":"#7fc4ff", 1.6);
-      }
-    }
-    for(const q of XFX.parts){ q.x+=q.vx*0.016; q.y+=q.vy*0.016; q.life-=16; }
-    XFX.parts=XFX.parts.filter(q=>q.life>0);
-  },null);
-  xBeep("sweep");
-  if(F.escaped) echo("Leaks - water reached the sheet edge through "+leaks.length+" opening cell"+(leaks.length===1?"":"s")+". Marked in orange.","warn");
-  else echo("Watertight - the region is fully enclosed");
+  const cells=[],leaks=[];
+  if(!F.blocked){
+    if(F.escaped)for(let i=0;i<F.seen.length&&leaks.length<80;i++){if(!F.seen[i])continue;const x=i%R.w,y=(i/R.w)|0;if(x===0||y===0||x===R.w-1||y===R.h-1)leaks.push(xCellCentre(R,i));}
+    for(let i=0;i<F.seen.length&&cells.length<650;i+=Math.max(1,(F.seen.length/650)|0))if(F.seen[i])cells.push(xCellCentre(R,i));
+  }else cells.push(p);
+  XFX.marks.length=0;for(const q of leaks)XFX.marks.push({kind:"leak",p:q});
+  xfxRun("storm",4200,{p,cells,leaks},(t)=>{
+    const src=cells.length?cells:[p];
+    for(let k=0;k<10;k++){const c=src[(Math.random()*src.length)|0];xPart(c.x,c.y+px(120+Math.random()*180),0,-px(260+Math.random()*220),700,"#7fc4ff",1.4);}
+    xKickParticles(.016);
+  },null);xBeep("sweep");
+  echo(F.blocked?"RAIN TEST: water detonated against the line you clicked."
+       :F.escaped?("RAIN TEST: LEAK! "+leaks.length+" escape point"+(leaks.length===1?"":"s")+" getting drenched.")
+       :"RAIN TEST: watertight. The room is now experiencing indoor weather.");
 }
 function xXray(){
   S.x.xray=!S.x.xray;
-  if(!S.x.xray){ XFX.marks.length=0; draw(); return echo("X-ray off"); }
-  const list=xEnts();
-  const marks=[];
-  let pairs=0;
-  for(let i=0;i<list.length && pairs<XCAP.PAIRS;i++){
-    const bi=entBox(list[i]);
-    if(!bi||!isFinite(bi.x0)) continue;
-    for(let j=i+1;j<list.length && pairs<XCAP.PAIRS;j++){
-      pairs++;
-      const bj=entBox(list[j]);
-      if(!bj||!isFinite(bj.x0)) continue;
-      if(bi.x1<bj.x0||bj.x1<bi.x0||bi.y1<bj.y0||bj.y1<bi.y0) continue;
-      if(list[i].t!==list[j].t) continue;
-      const pi=entPoints(list[i]), pj=entPoints(list[j]);
-      if(pi.length!==pj.length||!pi.length) continue;
-      let same=true;
-      for(let k=0;k<pi.length;k++) if(dist(pi[k],pj[k])>px(1.5)){ same=false; break; }
-      if(same && marks.length<600) marks.push({kind:"hot",ent:list[j]});
+  const list=xEnts(), box=xEffectBox(list);
+  if(!S.x.xray){XFX.marks.length=0;xfxRun("xrayOff",700,{box},null,null);draw();return echo("X-RAY powered down with unnecessary drama.");}
+  const marks=[];let pairs=0;
+  for(let i=0;i<list.length&&pairs<XCAP.PAIRS;i++){const bi=entBox(list[i]);if(!bi||!isFinite(bi.x0))continue;
+    for(let j=i+1;j<list.length&&pairs<XCAP.PAIRS;j++){pairs++;const bj=entBox(list[j]);if(!bj||!isFinite(bj.x0))continue;
+      if(bi.x1<bj.x0||bj.x1<bi.x0||bi.y1<bj.y0||bj.y1<bi.y0||list[i].t!==list[j].t)continue;
+      const pi=entPoints(list[i]),pj=entPoints(list[j]);if(pi.length!==pj.length||!pi.length)continue;
+      let same=true;for(let k=0;k<pi.length;k++)if(dist(pi[k],pj[k])>px(1.5)){same=false;break;}
+      if(same&&marks.length<600)marks.push({kind:"hot",ent:list[j]});
     }
   }
-  XFX.marks.length=0;
-  for(const m of marks) XFX.marks.push(m);
-  xUiSweep();
-  xfxRun("xray",1200,{box:xBox(list)},null,null);
-  draw();
-  echo(marks.length? ("X-ray on - "+marks.length+" stacked or duplicate object"+(marks.length===1?"":"s")+" glowing")
-                   : "X-ray on - nothing stacked");
+  XFX.marks.length=0;for(const m of marks)XFX.marks.push(m);
+  xfxRun("xrayMega",2200,{box,count:marks.length},null,null);xBeep("sweep");draw();
+  echo(marks.length?("X-RAY: "+marks.length+" hidden duplicate"+(marks.length===1?"":"s")+" exposed in radioactive glory."):"X-RAY: scan clean. Skeleton mode still looks excellent.");
 }
 function xSonar(p){
-  const n=Math.max(4,Math.min(72,S.x.sonarRays|0));
-  const reach=drawingSpan();
-  const hits=[];
-  for(let i=0;i<n;i++){
-    const th=i/n*TAU;
-    const h=xRayHit(p,V(Math.cos(th),Math.sin(th)),reach);
-    if(h) hits.push({th,d:h.d,p:h.p});
-  }
-  if(!hits.length){ echo("Nothing within reach of that point","warn"); return; }
+  const n=Math.max(12,Math.min(96,S.x.sonarRays|0)), reach=Math.max(drawingSpan(),px(400)),hits=[];
+  for(let i=0;i<n;i++){const th=i/n*TAU,h=xRayHit(p,V(Math.cos(th),Math.sin(th)),reach);if(h)hits.push({th,d:h.d,p:h.p});}
   hits.sort((a,b)=>a.d-b.d);
-  const nearest=hits[0], farthest=hits[hits.length-1];
-  XFX.marks.length=0;
-  for(const h of hits) XFX.marks.push({kind:"ping",p,q:h.p});
-  xfxRun("sonar",1800,{p,hits,reach:farthest.d},null,null);
-  xBeep("pop");
-  echo("Clearance: nearest "+fmt(nearest.d)+" mm at "+fmt(deg(nearest.th))+"\u00B0, "+
-       "widest "+fmt(farthest.d)+" mm, "+hits.length+" of "+n+" rays hit something");
+  XFX.marks.length=0;for(const h of hits)XFX.marks.push({kind:"ping",p,q:h.p});
+  xfxRun("sonarMega",2600,{p,hits,reach:hits.length?hits[hits.length-1].d:reach},null,null);xBeep("pop");
+  echo(hits.length?("SONAR PING: "+hits.length+" echoes. Nearest "+fmt(hits[0].d)+" mm."):("SONAR PING: no echoes. Congratulations, you found the void."));
 }
 function xEarthquake(){
-  const list=xSelOrAll().filter(e=>e && (e.t==="line"||e.t==="pline"||e.t==="spline"));
-  if(!list.length) return echo("Earthquake needs some linework to ruin","warn");
+  let list=xSelOrAll().filter(e=>e && (e.t==="line"||e.t==="pline"||e.t==="spline"));
+  if(!list.length) list=xSelectedOrEverything();
+  if(!list.length){const p=cursorPoint();xfxRun("megaShake",1700,{box:{x0:p.x-px(120),y0:p.y-px(80),x1:p.x+px(120),y1:p.y+px(80)},amp:px(30)},null,null);xBeep("thunk");return echo("EARTHQUAKE shook empty space. Seismologists remain confused.");}
   const box=xBox(list), amp=px(Math.max(10,S.x.weldR*1.8));
   snap();
   XFX.marks.length=0;
@@ -6357,33 +6475,15 @@ function xEarthquake(){
 }
 function xAnts(){
   const sel=[...S.sel].map(i=>S.ents[i]).filter(e=>e&&(e.t==="line"||e.t==="pline"));
-  const list=sel.length? sel : xEnts().filter(e=>e.t==="line"||e.t==="pline");
-  if(!list.length) return echo("Select a chain of lines for the ants to walk","warn");
-  const tol=px(2.5);
-  const segs=[];
-  for(const e of list) for(const c of xSegs(e)) segs.push({a:c.a,b:c.b,used:false});
-  if(!segs.length) return echo("Nothing walkable there","warn");
-  if(segs.length>XCAP.PAIRS) return echo("That chain is too long to walk ("+segs.length+" segments)","warn");
-  const path=[segs[0].a, segs[0].b];
-  segs[0].used=true;
-  let grew=true;
-  while(grew){
-    grew=false;
-    const tail=path[path.length-1];
-    for(const s of segs){
-      if(s.used) continue;
-      if(dist(s.a,tail)<=tol){ path.push(s.b); s.used=true; grew=true; break; }
-      if(dist(s.b,tail)<=tol){ path.push(s.a); s.used=true; grew=true; break; }
-    }
-  }
-  const closed=path.length>2 && dist(path[0],path[path.length-1])<=tol;
-  const leftover=segs.filter(s=>!s.used).length;
-  XFX.marks.length=0;
-  if(!closed) XFX.marks.push({kind:"gap",p:path[path.length-1]});
-  xfxRun("ants",4000,{path},null,null);
-  xBeep("tick");
-  if(closed) echo("Loop closes - "+(path.length-1)+" segments walked"+(leftover?(", "+leftover+" not part of it"):""));
-  else echo("Gap - the ants fall off after "+(path.length-1)+" segment"+(path.length===2?"":"s")+". End marked.","warn");
+  const list=sel.length?sel:xEnts().filter(e=>e.t==="line"||e.t==="pline");
+  if(!list.length){const p=cursorPoint();xfxRun("antSwarm",2600,{path:[V(p.x-px(80),p.y),V(p.x+px(80),p.y)]},null,null);xBeep("tick");return echo("MARCHING ANTS escaped the picnic and are marching across empty space.");}
+  const segs=[];for(const e of list)for(const c of xSegs(e))segs.push({a:c.a,b:c.b,used:false});
+  const path=[segs[0].a,segs[0].b];segs[0].used=true;const tol=px(4);
+  let grew=true;while(grew){grew=false;const tail=path[path.length-1];for(const s of segs){if(s.used)continue;if(dist(s.a,tail)<=tol){path.push(s.b);s.used=true;grew=true;break;}if(dist(s.b,tail)<=tol){path.push(s.a);s.used=true;grew=true;break;}}}
+  const closed=path.length>2&&dist(path[0],path[path.length-1])<=tol,left=segs.filter(s=>!s.used).length;
+  XFX.marks.length=0;if(!closed)XFX.marks.push({kind:"gap",p:path[path.length-1]});
+  xfxRun("antSwarm",5200,{path,closed},null,null);xBeep("tick");
+  echo(closed?("ANT SWARM completed the loop with "+(path.length-1)+" segments."):("ANT SWARM fell off the geometry after "+(path.length-1)+" segments"+(left?"; "+left+" ignored.":".")));
 }
 function xBulldozer(a,b){
   const width=px(Math.max(4,S.x.corridor));
@@ -6417,245 +6517,581 @@ function xBulldozer(a,b){
 /* ====================== LAYOUT ========================================= */
 function xGravity(){
   const list=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
-  if(!list.length) return echo("Select what should fall","warn");
-  const moving=new Set(list);
-  const floorFor=(e)=>{
-    const b=entBox(e);
-    if(!b||!isFinite(b.x0)) return null;
-    let best=null;
-    for(const o of xEnts()){
-      if(moving.has(o)) continue;
-      const ob=entBox(o);
-      if(!ob||!isFinite(ob.x0)) continue;
-      if(ob.x1<b.x0||ob.x0>b.x1) continue;
-      if(ob.y1>b.y0+1e-9) continue;
-      if(best===null||ob.y1>best) best=ob.y1;
-    }
-    return best;
-  };
+  const targets=list.length?list:xSelectedOrEverything().slice(0,Math.min(80,xSelectedOrEverything().length));
+  if(!targets.length) return echo("GRAVITY: nothing exists to obey it.");
+  const box=xEffectBox(targets);
+  const ground=box.y0-Math.max(px(20),(box.y1-box.y0)*.15);
   snap();
-  let dropped=0, total=0;
-  for(const e of list){
-    const b=entBox(e);
-    const f=floorFor(e);
-    if(f===null||!b) continue;
-    const dy=f-b.y0;
-    if(dy>=-1e-9) continue;
-    moveEnt(e,V(0,dy));
-    dropped++; total+=-dy;
-    XFX.marks.push({kind:"impact",p:V((b.x0+b.x1)/2, f)});
+  let n=0;
+  for(const e of targets){
+    const b=entBox(e); if(!b||!isFinite(b.y0)) continue;
+    const dy=ground-b.y0;
+    moveEnt(e,V((Math.random()-.5)*px(8),dy)); n++;
+    XFX.marks.push({kind:"impact",p:V((b.x0+b.x1)/2,ground)});
   }
-  if(!dropped){ S.undo.pop(); return echo("Nothing had anywhere to fall to"); }
-  flowInvalidateIndex(); draw(); updateProps();
-  xfxRun("marks",1200,null,null,null);
-  xBeep("thunk");
-  echo("Dropped "+dropped+" object"+(dropped===1?"":"s")+", "+fmt(total)+" mm of fall");
+  flowInvalidateIndex(); updateProps();
+  xfxRun("gravitySlam",1800,{box,ground},(t)=>{if(Math.random()<.7){const p=V(box.x0+Math.random()*(box.x1-box.x0),ground);xPart(p.x,p.y,(Math.random()-.5)*px(180),px(80+Math.random()*120),650,"#c9a0ff",2);}xKickParticles(.016);},null);
+  xBeep("thunk"); draw();
+  echo("GRAVITY SLAM: "+n+" object"+(n===1?"":"s")+" pancaked onto an imaginary floor.");
 }
 function xRepel(){
-  const pad=px(S.x.repelPad);
-  const list=(([...S.sel].map(i=>S.ents[i]).filter(Boolean)).length
-    ? [...S.sel].map(i=>S.ents[i]) : xEnts())
-    .filter(e=>e&&(e.t==="node"||e.t==="mtext"||e.t==="text"));
-  if(list.length<2) return echo("Repel needs two or more labels or nodes","warn");
-  if(list.length>1200) return echo("Too many labels to relax at once ("+list.length+")","warn");
-  const boxes=list.map(e=>{ const b=entBox(e); return b&&isFinite(b.x0)? b : null; });
-  const move=list.map(()=>V(0,0));
-  let iters=0, hits=1;
-  while(hits>0 && iters<Math.min(XCAP.ITER,180)){
-    iters++; hits=0;
-    for(let i=0;i<list.length;i++){
-      if(!boxes[i]) continue;
-      for(let j=i+1;j<list.length;j++){
-        if(!boxes[j]) continue;
-        const A=boxes[i], B=boxes[j];
-        const ox=Math.min(A.x1,B.x1)-Math.max(A.x0,B.x0)+pad;
-        const oy=Math.min(A.y1,B.y1)-Math.max(A.y0,B.y0)+pad;
-        if(ox<=0||oy<=0) continue;
-        hits++;
-        const acx=(A.x0+A.x1)/2, acy=(A.y0+A.y1)/2, bcx=(B.x0+B.x1)/2, bcy=(B.y0+B.y1)/2;
-        if(ox<oy){
-          const s=(acx<=bcx? -1:1)*ox/2;
-          A.x0+=s; A.x1+=s; B.x0-=s; B.x1-=s;
-          move[i].x+=s; move[j].x-=s;
-        } else {
-          const s=(acy<=bcy? -1:1)*oy/2;
-          A.y0+=s; A.y1+=s; B.y0-=s; B.y1-=s;
-          move[i].y+=s; move[j].y-=s;
-        }
-      }
-    }
+  const list=xSelectedOrEverything();
+  if(list.length<2){
+    const p=list.length?xEntityCenter(list[0]):cursorPoint();
+    xfxRun("repelBlast",1100,{c:p},null,null); xBeep("pop");
+    return echo("REPEL: one object cannot argue with itself, but the force field fired.");
   }
-  let n=0;
-  for(let i=0;i<list.length;i++) if(len(move[i])>1e-9) n++;
-  if(!n) return echo("Nothing was overlapping");
+  const box=xEffectBox(list), c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+  const strength=Math.max(px(35),Math.max(box.x1-box.x0,box.y1-box.y0)*.22);
   snap();
-  for(let i=0;i<list.length;i++) if(len(move[i])>1e-9) moveEnt(list[i],move[i]);
-  flowInvalidateIndex(); draw(); updateProps();
-  xfxRun("repel",1000,{box:xBox(list)},null,null);
-  xBeep("pop");
-  echo("Pushed "+n+" label"+(n===1?"":"s")+" apart in "+iters+" pass"+(iters===1?"":"es"));
+  for(let i=0;i<list.length;i++){
+    let d=sub(xEntityCenter(list[i]),c);
+    if(len(d)<1e-6)d=V(Math.cos(i/list.length*TAU),Math.sin(i/list.length*TAU));
+    moveEnt(list[i],mul(norm(d),strength*(.55+Math.random()*.85)));
+  }
+  flowInvalidateIndex();updateProps();
+  xfxRun("repelBlast",1500,{c,box},(t)=>{if(Math.random()<.8)xBurstAt(c,"#ffd166",2,px(140));xKickParticles(.016);},null);
+  xBeep("pop");draw();
+  echo("REPEL BLAST: "+list.length+" object"+(list.length===1?"":"s")+" thrown away from the epicentre.");
 }
 function xSpring(){
   const nodes=xEnts().filter(e=>e.t==="node"&&e.k!=="lane");
-  const edges=xEnts().filter(e=>e.t==="edge");
-  if(nodes.length<2) return echo("Spring layout needs at least two nodes","warn");
-  if(nodes.length>400) return echo("Too many nodes for a spring pass ("+nodes.length+")","warn");
-  const idx=new Map(nodes.map((n,i)=>[n.id,i]));
-  const pos=nodes.map(n=>V(n.p.x,n.p.y));
-  const b=xBox(nodes);
-  const span=Math.max(1,Math.hypot(b.x1-b.x0,b.y1-b.y0));
-  const ideal=span/Math.sqrt(nodes.length)*0.9;
-  const iters=Math.min(XCAP.ITER,220);
-  for(let it=0; it<iters; it++){
-    const f=pos.map(()=>V(0,0));
-    for(let i=0;i<pos.length;i++)
-      for(let j=i+1;j<pos.length;j++){
-        const d=sub(pos[i],pos[j]);
-        let L=len(d);
-        if(L<1e-6){ d.x=(Math.random()-.5); d.y=(Math.random()-.5); L=len(d)||1; }
-        const rep=(ideal*ideal)/L;
-        const u=mul(d,rep/L);
-        f[i]=add(f[i],u); f[j]=sub(f[j],u);
-      }
-    for(const e of edges){
-      const a=e.from&&e.from.id!=null? idx.get(e.from.id) : undefined;
-      const c=e.to&&e.to.id!=null? idx.get(e.to.id) : undefined;
-      if(a===undefined||c===undefined) continue;
-      const d=sub(pos[c],pos[a]);
-      const L=Math.max(1e-6,len(d));
-      const att=(L*L)/ideal;
-      const u=mul(d,att/L*0.5);
-      f[a]=add(f[a],u); f[c]=sub(f[c],u);
-    }
-    const cool=ideal*0.1*(1-it/iters);
-    for(let i=0;i<pos.length;i++){
-      const L=Math.max(1e-9,len(f[i]));
-      pos[i]=add(pos[i], mul(f[i], Math.min(cool,L)/L));
-    }
+  const list=nodes.length>=2?nodes:xSelectedOrEverything();
+  if(list.length<2){
+    const p=list.length?xEntityCenter(list[0]):cursorPoint();
+    xfxRun("boing",1200,{c:p,pts:[p]},null,null);xBeep("pop");return echo("SPRING: boing. Needs more geometry for a proper slinky catastrophe.");
   }
-  const cb={x:0,y:0};
-  for(const p of pos){ cb.x+=p.x; cb.y+=p.y; }
-  cb.x/=pos.length; cb.y/=pos.length;
-  const c0=V((b.x0+b.x1)/2,(b.y0+b.y1)/2);
+  const box=xEffectBox(list), c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
   snap();
-  nodes.forEach((n,i)=>{
-    const target=V(pos[i].x-cb.x+c0.x, pos[i].y-cb.y+c0.y);
-    if(!isFinite(target.x)||!isFinite(target.y)) return;
-    moveEnt(n, sub(target, n.p));
+  const pts=[];
+  list.forEach((e,i)=>{
+    const ec=xEntityCenter(e), a=i/list.length*TAU, ring=Math.max(px(25),Math.max(box.x1-box.x0,box.y1-box.y0)*(.22+.08*(i%3)));
+    const target=add(c,V(Math.cos(a)*ring,Math.sin(a)*ring));
+    moveEnt(e,sub(target,ec)); pts.push(target);
   });
-  flowInvalidateIndex(); draw(); updateProps();
-  xfxRun("spring",1400,{nodes:nodes.map(n=>V(n.p.x,n.p.y)),edges},null,null);
-  xBeep("sweep");
-  echo("Relaxed "+nodes.length+" nodes and "+edges.length+" connectors over "+iters+" passes");
+  flowInvalidateIndex();updateProps();
+  xfxRun("boing",2100,{c,pts},null,null);xBeep("sweep");draw();
+  echo("SPRING LAYOUT: "+list.length+" object"+(list.length===1?"":"s")+" snapped onto a ridiculous radial slinky.");
 }
 function xShrinkWrap(){
-  const list=[...S.sel].map(i=>S.ents[i]).filter(Boolean);
-  const src=list.length? list : xEnts();
+  const list=xSelectedOrEverything();
   const pts=[];
-  for(const e of src){
-    for(const p of entPoints(e)) pts.push(p);
-    for(const c of xSegs(e)){ pts.push(c.a); pts.push(c.b); }
-    if(pts.length>XCAP.PAIRS) break;
-  }
+  for(const e of list){for(const p of entPoints(e))pts.push(p);for(const s of xSegs(e)){pts.push(s.a,s.b);}if(pts.length>XCAP.PAIRS)break;}
   const clean=pts.filter(p=>p&&isFinite(p.x)&&isFinite(p.y)).slice(0,XCAP.PAIRS);
-  if(clean.length<3) return echo("Need three or more points to wrap","warn");
+  const box=xEffectBox(list), c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+  if(clean.length<3){
+    xfxRun("wrapSnap",1200,{c,pts:[V(c.x-px(40),c.y),V(c.x,c.y+px(40)),V(c.x+px(40),c.y)]},null,null);
+    return echo("SHRINK WRAP: not enough corners, so the plastic snapped uselessly around the cursor.");
+  }
   clean.sort((a,b)=>a.x-b.x||a.y-b.y);
   const cross=(o,a,b)=>(a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
-  const lower=[], upper=[];
-  for(const p of clean){ while(lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop(); lower.push(p); }
-  for(let i=clean.length-1;i>=0;i--){ const p=clean[i]; while(upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop(); upper.push(p); }
-  lower.pop(); upper.pop();
-  const hull=lower.concat(upper);
-  if(hull.length<3) return echo("Those points are collinear - nothing to wrap","warn");
-  const off=px(S.x.wrapOffset);
-  const c={x:0,y:0};
-  for(const p of hull){ c.x+=p.x; c.y+=p.y; }
-  c.x/=hull.length; c.y/=hull.length;
-  const grown=hull.map(p=>{
-    const d=sub(p,V(c.x,c.y)), L=len(d);
-    return L>1e-9? add(p,mul(d,off/L)) : p;
-  });
+  const lo=[],up=[]; for(const p of clean){while(lo.length>=2&&cross(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop();lo.push(p);}
+  for(let i=clean.length-1;i>=0;i--){const p=clean[i];while(up.length>=2&&cross(up[up.length-2],up[up.length-1],p)<=0)up.pop();up.push(p);}lo.pop();up.pop();
+  const hull=lo.concat(up), off=px(Math.max(2,S.x.wrapOffset));
+  const cc=hull.reduce((a,p)=>add(a,p),V(0,0));cc.x/=hull.length;cc.y/=hull.length;
+  const grown=hull.map(p=>{const d=sub(p,cc),L=len(d)||1;return add(p,mul(d,off/L));});
+  snap();S.ents.push({t:"pline",li:S.cur,si:S.curStyle,closed:true,pts:grown});S.sel=new Set([S.ents.length-1]);
+  flowInvalidateIndex();updateProps();
+  xfxRun("wrapSnap",1600,{c:cc,pts:grown},null,null);xBeep("pop");draw();
+  echo("SHRINK WRAP: plastic snapped around "+hull.length+" hull points and cinched tight.");
+}
+
+
+/* ====================== MAYHEM ========================================== */
+function xBlackHole(p){
+  const span=drawingSpan(), r=Math.max(px(70),span*.16);
+  let ids=[...S.sel].filter(i=>S.ents[i]);
+  if(!ids.length) ids=S.ents.map((e,i)=>({e,i})).filter(o=>o.e&&xEnts().includes(o.e)&&dist(xEntityCenter(o.e),p)<=r).map(o=>o.i);
+  if(!ids.length){
+    const ni=xNearestIndex(p); if(ni>=0) ids=[ni];
+  }
+  const victims=ids.map(i=>S.ents[i]).filter(Boolean);
+  snap(); for(const i of ids.sort((a,b)=>b-a))S.ents.splice(i,1);
+  S.sel.clear();flowPrune();flowInvalidateIndex();updateProps();
+  xfxRun("blackhole",2200,{p,r,count:victims.length},(t)=>{for(let k=0;k<5;k++){const a=Math.random()*TAU,rr=r*(.4+Math.random());xPart(p.x+Math.cos(a)*rr,p.y+Math.sin(a)*rr,-Math.cos(a)*rr*4,-Math.sin(a)*rr*4,700,"#b47cff",1.8);}xKickParticles(.016);},null);
+  xBeep("sweep");draw();echo("BLACK HOLE consumed "+victims.length+" object"+(victims.length===1?"":"s")+". Event horizon says undo is still allowed.");
+}
+function xWreckingBall(p){
+  const first=xNearestIndex(p);
+  if(first<0){xfxRun("wreck",1500,{p,count:0},null,null);xBeep("thunk");return echo("WRECKING BALL missed everything and still looked excellent.");}
+  const c=xEntityCenter(S.ents[first]), radius=Math.max(px(55),drawingSpan()*.07);
+  const ids=S.ents.map((e,i)=>({e,i})).filter(o=>o.e&&xEnts().includes(o.e)&&dist(xEntityCenter(o.e),c)<=radius).map(o=>o.i);
+  snap();for(const i of ids.sort((a,b)=>b-a))S.ents.splice(i,1);S.sel.clear();flowPrune();flowInvalidateIndex();updateProps();
+  xfxRun("wreck",1900,{p:c,count:ids.length},(t)=>{if(Math.random()<.9)xBurstAt(c,"#ff7a59",3,px(220));xKickParticles(.016);},null);
+  xBeep("thunk");draw();echo("WRECKING BALL smashed "+ids.length+" object"+(ids.length===1?"":"s")+" into conceptual rubble.");
+}
+function xLightning(p){
+  const i=xNearestIndex(p);
+  if(i<0){xfxRun("lightning",1200,{p},null,null);xBeep("pop");return echo("LIGHTNING struck empty space. Zeus needs glasses.");}
+  const e=S.ents[i], c=xEntityCenter(e); snap();
+  if(e.t==="line"){
+    const A=e.a,B=e.b,d=sub(B,A),n=norm(perp(d)),pts=[A];
+    for(let k=1;k<9;k++){const q=add(A,mul(d,k/9));pts.push(add(q,mul(n,(k%2?1:-1)*px(6+Math.random()*18))));}
+    pts.push(B); S.ents[i]=Object.assign({},e,{t:"pline",pts,closed:false}); delete S.ents[i].a; delete S.ents[i].b;
+  }else{
+    rotEnt(e,c,rad((Math.random()-.5)*55)); sclEnt(e,c,.72+Math.random()*.55);
+  }
+  flowInvalidateIndex();updateProps();
+  xfxRun("lightning",1500,{p:c},(t)=>{if(Math.random()<.65)xBurstAt(c,"#f7f36b",2,px(170));xKickParticles(.016);},null);
+  xBeep("pop");draw();echo("LIGHTNING: direct hit. Geometry has been electrically discouraged.");
+}
+function xBlender(){
+  const list=xSelectedOrEverything();
+  if(!list.length)return echo("BLENDER: empty jug. Sad smoothie noises.");
+  const box=xEffectBox(list),c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);snap();
+  list.forEach((e,i)=>{const ec=xEntityCenter(e);rotEnt(e,ec,rad((Math.random()-.5)*220));const a=i/list.length*TAU+Math.random();moveEnt(e,V(Math.cos(a)*px(20+Math.random()*80),Math.sin(a)*px(20+Math.random()*80)));});
+  flowInvalidateIndex();updateProps();
+  xfxRun("blender",2200,{c,box},(t)=>{if(Math.random()<.9)xBurstAt(c,["#ff5ac8","#54c7c4","#ffd166"][(Math.random()*3)|0],2,px(180));xKickParticles(.016);},null);
+  xBeep("sweep");draw();echo("BLENDER: "+list.length+" object"+(list.length===1?"":"s")+" turned into CAD smoothie.");
+}
+function xConfettiCannon(){
+  const list=xSelectedOrEverything();
+  const box=xEffectBox(list),c=V((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+  if(list.length){snap();list.forEach((e,i)=>{const ec=xEntityCenter(e),a=-Math.PI/2+(Math.random()-.5)*1.4;moveEnt(e,V(Math.cos(a)*px(20+Math.random()*120),Math.sin(a)*px(30+Math.random()*160)));rotEnt(e,ec,rad((Math.random()-.5)*90));});flowInvalidateIndex();updateProps();}
+  xfxRun("confetti",2600,{c,box},(t)=>{for(let k=0;k<10;k++){const a=-Math.PI/2+(Math.random()-.5)*1.9,v=px(120+Math.random()*340);xPart(c.x,c.y,Math.cos(a)*v,Math.sin(a)*v,1000+Math.random()*1500,["#ff5ac8","#54c7c4","#ffd166","#78b7f1","#ef8178"][(Math.random()*5)|0],2+Math.random()*2);}for(const q of XFX.parts){q.vy-=px(260)*.016;}xKickParticles(.016);},null);
+  xBeep("pop");draw();echo("CONFETTI CANNON: design review has been cancelled in favour of chaos.");
+}
+
+/* ====================== ARCADE TOYS ==================================== */
+function xPathFromEnt(e){
+  let P=[];
+  try{P=flatten(e)||[];}catch(_){P=[];}
+  if(!P.length){
+    if(e.t==="line")P=[e.a,e.b];
+    else if(e.pts)P=e.pts.slice();
+  }
+  return P.filter(q=>q&&isFinite(q.x)&&isFinite(q.y));
+}
+function xPathLength(P){let n=0;for(let i=1;i<P.length;i++)n+=dist(P[i-1],P[i]);return n;}
+function xLongestRide(){
+  let best=null,L=-1;
+  for(const e of xEnts()){
+    const P=xPathFromEnt(e); if(P.length<2)continue;
+    const d=xPathLength(P); if(d>L){L=d;best={e,P,L:d};}
+  }
+  return best;
+}
+function xPointOnPath(P,d){
+  if(!P||P.length<2)return {p:P&&P[0]?P[0]:V(0,0),dir:V(1,0),i:0};
+  let acc=0;
+  for(let i=0;i<P.length-1;i++){
+    const a=P[i],b=P[i+1],L=dist(a,b);
+    if(d<=acc+L || i===P.length-2){
+      const u=L?Math.max(0,Math.min(1,(d-acc)/L)):0;
+      return {p:add(a,mul(sub(b,a),u)),dir:L?norm(sub(b,a)):V(1,0),i};
+    }
+    acc+=L;
+  }
+  return {p:P[P.length-1],dir:norm(sub(P[P.length-1],P[P.length-2])),i:P.length-2};
+}
+function xReversePath(P){return P.slice().reverse();}
+function xSurfCourse(){
+  const candidates=[];
+  for(const e of xEnts()){
+    const P=xPathFromEnt(e); if(P.length<2)continue;
+    const L=xPathLength(P); if(L>px(24))candidates.push({e,P,L});
+  }
+  if(!candidates.length)return null;
+  candidates.sort((a,b)=>b.L-a.L);
+  const used=new Set(),tol=px(3),course=[];
+  let cur=candidates[0],P=cur.P.slice(); used.add(cur.e); course.push(...P);
+  let guard=0;
+  while(guard++<80){
+    const end=course[course.length-1]; let best=null,bestD=Infinity,bestRev=false;
+    for(const c of candidates){
+      if(used.has(c.e))continue;
+      const d0=dist(end,c.P[0]),d1=dist(end,c.P[c.P.length-1]);
+      if(d0<bestD){best=c;bestD=d0;bestRev=false;}
+      if(d1<bestD){best=c;bestD=d1;bestRev=true;}
+    }
+    if(!best || bestD>tol)break;
+    used.add(best.e); const Q=bestRev?xReversePath(best.P):best.P;
+    if(bestD>1e-6)course.push(Q[0]);
+    course.push(...Q.slice(1));
+  }
+  return {P:course,L:xPathLength(course),segments:used.size};
+}
+function xHorizontalPlatforms(){
+  const out=[], slopeTol=.10, minL=px(34);
+  for(const e of xEnts()){
+    let segs=[]; try{segs=xSegs(e)||[];}catch(_){segs=[];}
+    for(const seg of segs){
+      if(!seg||!seg.a||!seg.b)continue;
+      let a=seg.a,b=seg.b,dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy);
+      if(L<minL || Math.abs(dy)/Math.max(1e-9,L)>slopeTol)continue;
+      if(a.x>b.x){const q=a;a=b;b=q;}
+      out.push({a,b,x0:a.x,x1:b.x,y:(a.y+b.y)/2,L,e});
+    }
+  }
+  out.sort((a,b)=>a.x0-b.x0 || b.y-a.y);
+  return out;
+}
+
+
+function xRideSurfaces(){
+  const out=[], minL=px(26), maxSlope=Math.tan(rad(58));
+  for(const e of xEnts()){
+    let segs=[]; try{segs=xSegs(e)||[];}catch(_){segs=[];}
+    for(const seg of segs){
+      if(!seg||!seg.a||!seg.b)continue;
+      let a=seg.a,b=seg.b, reversed=false;
+      if(a.x>b.x){const q=a;a=b;b=q;reversed=true;}
+      const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy);
+
+      /* CAD lines need enough physical length to be useful terrain. Freehand ink is
+         already resampled, so its short spans are intentional pieces of a curve and
+         must not be discarded. This is what lets a marker-drawn bowl/ramp become a
+         continuous skate surface. */
+      const ink=!!seg.ink || e.t==="ink";
+      const localMin=ink?px(1.8):minL;
+      const localDx=ink?px(.65):px(8);
+      const localMaxSlope=ink?Math.tan(rad(74)):maxSlope;
+      if(L<localMin || dx<localDx)continue;
+      if(Math.abs(dy/Math.max(1e-9,dx))>localMaxSlope)continue;
+      const dir=norm(sub(b,a)), ang0=Math.atan2(dir.y,dir.x);
+      out.push({a,b,x0:a.x,x1:b.x,L,dir,ang:ang0,e,ink,reversed,
+                pathIndex:seg.pathIndex,pathCount:seg.pathCount});
+    }
+  }
+  out.sort((a,b)=>a.x0-b.x0 || b.a.y-a.a.y);
+  return out;
+}
+function xSurfY(q,x){
+  const u=Math.max(0,Math.min(1,(x-q.a.x)/Math.max(1e-9,q.b.x-q.a.x)));
+  return q.a.y+(q.b.y-q.a.y)*u;
+}
+function xSurfConnectedFrom(surfs,cur){
+  const tol=px(4); let best=null,bd=Infinity,bscore=Infinity;
+  for(const q of surfs){
+    if(q===cur)continue;
+    const d=dist(cur.b,q.a);
+    if(d>tol || q.x1<=cur.x1-tol)continue;
+    const same=(q.e===cur.e), sequential=same&&Number.isFinite(cur.pathIndex)&&Number.isFinite(q.pathIndex)&&Math.abs(q.pathIndex-cur.pathIndex)===1;
+    /* Freehand strokes should follow their own next sample before jumping to some
+       unrelated line that happens to be nearby. Distance still breaks ties. */
+    const score=(sequential?-1000:same?-100:0)+d;
+    if(score<bscore || (score===bscore&&d<bd)){best=q;bd=d;bscore=score;}
+  }
+  return best;
+}
+function xSurfConnectedBack(surfs,cur){
+  const tol=px(4); let best=null,bd=Infinity,bscore=Infinity;
+  for(const q of surfs){
+    if(q===cur)continue;
+    const d=dist(cur.a,q.b);
+    if(d>tol || q.x0>=cur.x0+tol)continue;
+    const same=(q.e===cur.e), sequential=same&&Number.isFinite(cur.pathIndex)&&Number.isFinite(q.pathIndex)&&Math.abs(q.pathIndex-cur.pathIndex)===1;
+    const score=(sequential?-1000:same?-100:0)+d;
+    if(score<bscore || (score===bscore&&d<bd)){best=q;bd=d;bscore=score;}
+  }
+  return best;
+}
+function xSurfNextAhead(surfs,cur){
+  let best=null,score=Infinity;
+  for(const q of surfs){
+    if(q===cur)continue;
+    const gap=q.x0-cur.x1;
+    if(gap<px(3))continue;
+    const dy=q.a.y-cur.b.y;
+    const sc=gap+Math.abs(dy)*.22;
+    if(sc<score){score=sc;best=q;}
+  }
+  return best;
+}
+function xSurfCross(a,b,c,d){return (b.x-a.x)*(d.y-c.y)-(b.y-a.y)*(d.x-c.x);}
+function xSurfIntersection(a,b,c,d){
+  const r=sub(b,a),s0=sub(d,c),den=xSurfCross(a,b,c,d);
+  if(Math.abs(den)<1e-9)return null;
+  const ca=sub(c,a),t=(ca.x*s0.y-ca.y*s0.x)/den,u=(ca.x*r.y-ca.y*r.x)/den;
+  if(t>=0&&t<=1&&u>=0&&u<=1)return {p:add(a,mul(r,t)),t,u};
+  return null;
+}
+/* Swept board-vs-terrain landing test. The rider is a projectile once he leaves a lip.
+   We test the whole movement step against every ramp, then allow a tiny landing tolerance
+   so a fast board cannot tunnel through a lower platform between animation frames. */
+function xSurfSweepLanding(prev,nowp,vel,q,tol){
+  const h=xSurfIntersection(prev,nowp,q.a,q.b);
+  if(h){
+    const n=V(-q.dir.y,q.dir.x);
+    if(vel.x*n.x+vel.y*n.y<0)return {p:h.p,t:h.t};
+  }
+  const dx=nowp.x-prev.x;
+  if(Math.abs(dx)<1e-9)return null;
+  const xmin=Math.min(q.a.x,q.b.x)-tol,xmax=Math.max(q.a.x,q.b.x)+tol;
+  const lo=Math.max(Math.min(prev.x,nowp.x),xmin),hi=Math.min(Math.max(prev.x,nowp.x),xmax);
+  if(lo>hi)return null;
+  // Probe where the board passed the ramp's x-range. This catches high-speed near misses.
+  const probes=[lo,(lo+hi)*.5,hi];
+  let best=null;
+  for(const x of probes){
+    const tm=(x-prev.x)/dx; if(tm<0||tm>1)continue;
+    const by=prev.y+(nowp.y-prev.y)*tm;
+    const qdx=q.b.x-q.a.x;
+    const uq=Math.abs(qdx)>1e-9?(x-q.a.x)/qdx:0;
+    if(uq<-.02||uq>1.02)continue;
+    const gy=q.a.y+(q.b.y-q.a.y)*uq;
+    // Board must be descending through the top side of the ramp.
+    const n=V(-q.dir.y,q.dir.x);
+    if(vel.x*n.x+vel.y*n.y>=0)continue;
+    const dd=Math.abs(by-gy);
+    if(dd<=tol && (!best||dd<best.dd))best={p:V(x,gy),t:tm,dd};
+  }
+  return best;
+}
+function xChooseSurferStart(surfs){
+  if(!surfs.length)return null;
+  return surfs[0];
+}
+function xSurferNearestSurface(surfs,w){
+  let best=null, bestD=Infinity, bestU=0;
+  for(const q of surfs){
+    const ab=sub(q.b,q.a), den=ab.x*ab.x+ab.y*ab.y;
+    if(den<1e-12)continue;
+    const u=Math.max(0,Math.min(1,((w.x-q.a.x)*ab.x+(w.y-q.a.y)*ab.y)/den));
+    const p=add(q.a,mul(ab,u)), d=dist(w,p);
+    if(d<bestD){bestD=d;best=q;bestU=u;}
+  }
+  return best?{q:best,u:bestU,p:add(best.a,mul(sub(best.b,best.a),bestU)),dist:bestD}:null;
+}
+function xArmSurferPick(){
+  const surfs=xRideSurfaces();
+  if(!surfs.length){
+    const c=V(S.view.cx,S.view.cy);xfxRun("surferFail",1800,{c},null,null);xBeep("pop");
+    return echo("LINE SURFER: draw a rideable line, ramp, or Marker track first.","warn");
+  }
+  S.x.surferPick=true;
+  xUiReact("xsurfer","armed");
+  say("Line Surfer: click where he starts");
+  echo("LINE SURFER ARMED: click any point on the track to place the skater.");
+  cv.classList.add("picking");
+  draw();
+}
+function xLineSurfer(startPick){
+  const surfs=xRideSurfaces();
+  if(!surfs.length){
+    const c=V(S.view.cx,S.view.cy);xfxRun("surferFail",1800,{c},null,null);xBeep("pop");
+    return echo("LINE SURFER: no rideable ground. Draw some lines or ramps first.");
+  }
+  const hit=startPick||xSurferNearestSurface(surfs,V(S.view.cx,S.view.cy));
+  if(!hit||!hit.q)return echo("LINE SURFER: click a rideable part of the track.","warn");
+  const start=hit.q, margin=Math.max(0,Math.min(start.L,hit.u*start.L));
+  const data={surfs,p:start,state:"ride",d:margin,x:hit.p.x,y:hit.p.y,
+              speed:px(125),vx:0,vy:0,spin:0,last:0,jumps:0,landings:0,goal:null,crashed:false,
+              groundAng:start.ang,airAng:start.ang,sliding:false};
+  // Gravity is deliberately the strongest force in this toy. Rider input is only a small assist
+  // on fairly level ground; on a serious slope the hill wins.
+  const g=px(980), pump=px(18), rolling=.040, maxV=px(760), landSlop=px(4), steepSlide=Math.sin(rad(34));
+  const airDrag=.006, landingCarry=.92, landingBoost=px(42), rampPopMax=px(120);
+  const launch=()=>{
+    const t=data.p.dir, signed=data.speed;
+    data.state="air";
+    data.vx=signed*t.x;
+    data.vy=signed*t.y;
+    // Only a rider travelling FORWARD up a ramp gets a tiny ollie/pop. Reversing off a hill
+    // simply carries the downhill velocity into free flight.
+    if(signed>0 && t.y>0.08)data.vy+=Math.min(rampPopMax,Math.abs(signed)*t.y*.28+px(18));
+    else if(signed>0 && Math.abs(t.y)<.08)data.vy+=px(8);
+    data.airAng=Math.atan2(data.vy,data.vx||px(.01)); data.jumps++; data.launch=V(data.x,data.y);
+    data.goal=signed>=0?xSurfNextAhead(surfs,data.p):null;
+    data.sliding=false;
+    xBeep("pop");
+  };
+  xfxRun("lineSurfer",26000,data,(t,now)=>{
+    const dt=data.last?Math.min(.032,(now-data.last)/1000):.016; data.last=now;
+    if(data.state==="ride"){
+      const q=data.p, tangent=q.dir;
+      // Signed velocity along the terrain. Positive = left-to-right, negative = right-to-left.
+      // Gravity projected onto the slope is the dominant acceleration.
+      const gravityAlong=-g*tangent.y;
+      const slopeAbs=Math.abs(tangent.y);
+      const riderPush=(slopeAbs<.22 && data.speed>=0 && data.speed<px(165))?pump:0;
+      const rollingDrag=-rolling*data.speed;
+      data.speed+=(gravityAlong+riderPush+rollingDrag)*dt;
+      data.speed=Math.max(-maxV,Math.min(maxV,data.speed));
+      // On steep hills, once momentum loses to gravity, visibly enter a downhill slide.
+      data.sliding=slopeAbs>steepSlide && Math.sign(data.speed||gravityAlong)===Math.sign(gravityAlong);
+      if(Math.abs(data.speed)<px(2) && Math.abs(gravityAlong)<px(8))data.speed=0;
+
+      data.d+=data.speed*dt;
+      data.groundAng=q.ang;
+      if(data.d>=0 && data.d<=q.L){
+        data.x=q.a.x+tangent.x*data.d; data.y=q.a.y+tangent.y*data.d;
+      }else if(data.d>q.L){
+        data.x=q.b.x;data.y=q.b.y;
+        const next=xSurfConnectedFrom(surfs,q);
+        if(next){
+          const turn=Math.acos(Math.max(-1,Math.min(1,q.dir.x*next.dir.x+q.dir.y*next.dir.y)));
+          data.speed*=Math.max(.72,1-turn*.18);
+          data.p=next;data.d=Math.min(px(1.5),next.L);data.groundAng=next.ang;
+        }else launch();
+      }else{
+        // He has rolled/slid backwards off the low end of this ramp.
+        data.x=q.a.x;data.y=q.a.y;
+        const prev=xSurfConnectedBack(surfs,q);
+        if(prev){
+          const turn=Math.acos(Math.max(-1,Math.min(1,q.dir.x*prev.dir.x+q.dir.y*prev.dir.y)));
+          data.speed*=Math.max(.72,1-turn*.18);
+          data.p=prev;data.d=Math.max(0,prev.L-px(1.5));data.groundAng=prev.ang;
+        }else launch();
+      }
+      data.goal=data.speed>=0?xSurfNextAhead(surfs,data.p):null;
+    }else{
+      const prev=V(data.x,data.y),prevVy=data.vy;
+      // Free flight preserves and builds energy. Gravity is the engine of the run: the farther
+      // he falls, the faster his downward speed becomes. Horizontal speed is only lightly damped.
+      data.vx*=Math.max(.97,1-airDrag*dt*60);
+      data.x+=data.vx*dt; data.y+=data.vy*dt; data.vy-=g*dt;
+      data.airAng=Math.atan2(data.vy,data.vx||px(.01));
+      data.spin+=dt*(data.crashed?9:1.2)*(data.vx<0?-1:1);
+      if(prevVy<=px(14) || data.vy<=px(14)){
+        let landed=null,hit=null,bestT=Infinity;
+        const nowp=V(data.x,data.y),vel=V(data.vx,data.vy);
+        for(const q of surfs){
+          if(q===data.p && Math.min(dist(prev,q.a),dist(prev,q.b))<px(10))continue;
+          const h=xSurfSweepLanding(prev,nowp,vel,q,Math.max(landSlop,px(7)));
+          if(!h||h.t>=bestT)continue;
+          bestT=h.t;landed=q;hit=h.p;
+        }
+        if(landed){
+          data.p=landed;data.x=hit.x;data.y=hit.y;
+          data.d=dist(landed.a,hit);
+          // Keep the SIGN of the tangent projection. Landing while moving left means he keeps
+          // rolling left, and gravity decides what happens next.
+          const along=data.vx*landed.dir.x+data.vy*landed.dir.y;
+          const impact=Math.abs(data.vx*(-landed.dir.y)+data.vy*landed.dir.x);
+          const airSpeed=Math.hypot(data.vx,data.vy);
+          // Preserve almost all tangential momentum on a clean landing, then reward big drops by
+          // converting a slice of impact energy into forward board speed. This makes downhill gaps
+          // feed the next uphill ramp instead of feeling like a reset.
+          const dropBoost=Math.min(px(185),Math.max(0,-data.vy)*.34);
+          const impactPenalty=Math.min(.30,impact/Math.max(px(900),airSpeed*3));
+          const dirSign=Math.sign(along||data.vx||1);
+          data.speed=along*Math.max(.68,landingCarry-impactPenalty)+dirSign*(landingBoost+dropBoost);
+          if(Math.abs(data.speed)<px(2))data.speed=0;
+          data.vx=data.vy=0;data.state="ride";data.spin=0;data.groundAng=landed.ang;data.landings++;
+          data.sliding=false;
+          const landingSpeed=Math.abs(data.speed)*S.view.s;
+          xBeep("tick");xBurstAt(V(data.x,data.y),"#78b7f1",Math.min(26,8+Math.floor(landingSpeed/45)),px(110));
+          if(landingSpeed>330){
+            xBurstAt(V(data.x,data.y),"#ffd166",18,px(150));
+            echo("LINE SURFER: STOMP! "+Math.round(landingSpeed)+" speed carried into the next ramp.");
+          }
+        }
+      }
+      if(data.y < Math.min(...surfs.map(q=>Math.min(q.a.y,q.b.y)))-px(55))data.crashed=true;
+    }
+    const sx=X(data.x),sy=Y(data.y);
+    if(sx<-150||sx>W+150||sy<-190||sy>H+240)XFX.until=now;
+    if(Math.random()<.15){
+      const trailV=data.state==="ride"?Math.abs(data.speed):(Math.hypot(data.vx,data.vy));
+      const trailDir=data.state==="ride"?(data.speed<0?1:-1):(data.vx<0?1:-1);
+      xPart(data.x,data.y,trailDir*Math.max(px(30),trailV*.28),(Math.random()-.5)*px(34),430,"#78b7f1",1.4);
+    }
+    xKickParticles(dt);
+  },()=>echo("LINE SURFER: run ended after "+data.jumps+" launch"+(data.jumps===1?"":"es")+" and "+data.landings+" landing"+(data.landings===1?"":"s")+"."));
+  xBeep("sweep");echo("LINE SURFER: chase speed. Big drops build huge momentum, ramps turn that speed into airtime, and clean landings feed the next jump.");
+}
+function xPacEater(){
+  const list=xSelectedOrEverything().filter(e=>xPathFromEnt(e).length>1);
+  if(!list.length){const c=V(S.view.cx,S.view.cy);xfxRun("pacFail",1600,{c},null,null);return echo("LINE MUNCHER: hungry. No edible linework found.");}
+  const e=list[(Math.random()*list.length)|0], P=xPathFromEnt(e), idx=S.ents.indexOf(e);
   snap();
-  S.ents.push({t:"pline", li:S.cur, si:S.curStyle, closed:true, pts:grown});
-  S.sel=new Set([S.ents.length-1]);
-  flowInvalidateIndex(); draw(); updateProps();
-  xfxRun("wrap",1200,{pts:grown,c:V(c.x,c.y)},null,null);
-  xBeep("pop");
-  echo("Wrapped "+hull.length+" hull points at "+fmt(off)+" mm offset");
+  xfxRun("pacEater",4300,{P,L:xPathLength(P),idx},(t)=>{if(Math.random()<.16){const q=P[Math.min(P.length-1,Math.floor(t*(P.length-1)))];if(q)xBurstAt(q,"#ffd166",1,px(50));}xKickParticles(.016);},()=>{
+    const target=S.ents[idx];
+    if(target===e){S.ents.splice(idx,1);S.sel.clear();flowInvalidateIndex();updateProps();draw();}
+    echo("LINE MUNCHER: burp. One piece of geometry eaten completely.");
+  });
+  xBeep("tick");echo("LINE MUNCHER: NOM NOM NOM.");
+}
+
+function xGremlins(){
+  const list=xSelectedOrEverything().slice(0,10);
+  if(!list.length){const c=V(S.view.cx,S.view.cy);xfxRun("gremlinEmpty",1800,{c},null,null);return echo("GREMLINS: arrived, found nothing to vandalise, started blaming management.");}
+  const pts=list.map(xEntityCenter),b=xEffectBox(list);snap();
+  list.forEach((e,i)=>{const c=xEntityCenter(e);rotEnt(e,c,rad((Math.random()-.5)*24));moveEnt(e,V((Math.random()-.5)*px(35),(Math.random()-.5)*px(25)));});
+  flowInvalidateIndex();updateProps();
+  xfxRun("gremlins",5400,{pts,b},(t)=>{if(Math.random()<.35)xBurstAt(pts[(Math.random()*pts.length)|0],"#b8ff73",1,px(80));xKickParticles(.016);},null);
+  xBeep("pop");draw();echo("GREMLINS: "+list.length+" object"+(list.length===1?"":"s")+" quietly vandalised by tiny contractors.");
+}
+function xTermites(){
+  const lines=xSelectedOrEverything().filter(e=>e.t==="line").slice(0,12);
+  if(!lines.length){const c=V(S.view.cx,S.view.cy);xfxRun("termiteEmpty",1800,{c},null,null);return echo("TERMITES: no straight timber-shaped linework. Colony remains hungry.");}
+  snap(); const chewed=[];
+  for(const e of lines){
+    const i=S.ents.indexOf(e);if(i<0)continue;const d=sub(e.b,e.a),n=norm(d),L=len(d);if(L<px(18))continue;
+    const mid=.35+Math.random()*.3,gap=Math.min(L*.24,px(28+Math.random()*25));
+    const p1=add(e.a,mul(d,Math.max(.08,mid-gap/(2*L)))),p2=add(e.a,mul(d,Math.min(.92,mid+gap/(2*L))));
+    const a=Object.assign({},e,{a:e.a,b:p1}),bb=Object.assign({},e,{a:p2,b:e.b});
+    S.ents[i]=a;S.ents.push(bb);chewed.push(V((p1.x+p2.x)/2,(p1.y+p2.y)/2));
+  }
+  S.sel.clear();flowInvalidateIndex();updateProps();
+  xfxRun("termites",5000,{pts:chewed},(t)=>{if(chewed.length&&Math.random()<.3)xBurstAt(chewed[(Math.random()*chewed.length)|0],"#d6a85f",1,px(55));xKickParticles(.016);},null);
+  xBeep("tick");draw();echo("TERMITES: "+chewed.length+" line"+(chewed.length===1?"":"s")+" now have suspicious bite marks.");
 }
 
 /* ====================== PRESENTATION =================================== */
 function xTimelapse(){
-  if(!S.undo.length) return echo("No history to replay yet","warn");
-  const frames=S.undo.slice(-60).concat([stateBlob()]);
-  const hold=stateBlob();
-  const per=Math.max(60, Math.min(400, 4000/frames.length));
-  let i=0;
-  echo("Replaying "+frames.length+" steps - Esc to stop");
-  xfxRun("timelapse", Math.min(XCAP.MS, per*frames.length), {frames},
-    ()=>{
-      const want=Math.min(frames.length-1, Math.floor((( (typeof performance!=="undefined"&&performance.now)?performance.now():Date.now()) - XFX.t0)/per));
-      if(want!==i){ i=want; try{ applyBlob(frames[i]); }catch(_){} }
-    },
-    ()=>{ try{ applyBlob(hold); }catch(_){} S.sel.clear(); updateProps(); echo("Replay finished - drawing restored"); });
+  if(!S.undo.length){
+    const b=xEffectBox(xEnts()),c=V((b.x0+b.x1)/2,(b.y0+b.y1)/2);
+    xfxRun("rewind",1800,{c,empty:true},null,null);xBeep("sweep");return echo("TIME-LAPSE spun the clock backwards, found no history, and returned embarrassed.");
+  }
+  const frames=S.undo.slice(-80).concat([stateBlob()]),hold=stateBlob(),per=Math.max(45,Math.min(180,5000/frames.length));let i=-1;
+  xfxRun("rewind",Math.min(XCAP.MS,per*frames.length),{c:V(S.view.cx,S.view.cy),frames},
+    ()=>{const want=Math.min(frames.length-1,Math.floor((((typeof performance!=="undefined"&&performance.now)?performance.now():Date.now())-XFX.t0)/per));if(want!==i){i=want;try{applyBlob(frames[i]);}catch(_){}}},
+    ()=>{try{applyBlob(hold);}catch(_){}S.sel.clear();updateProps();echo("TIME-LAPSE finished. Reality restored.");});
+  xBeep("sweep");echo("TIME-LAPSE: "+frames.length+" states ripping past.");
 }
 function xSpotlight(){
   S.x.spotlight=!S.x.spotlight;
-  draw();
-  echo(S.x.spotlight? (S.sel.size? "Spotlight on "+S.sel.size+" object"+(S.sel.size===1?"":"s") : "Spotlight on - select something to light it")
-                    : "Spotlight off");
+  S.x.spotlightPoint=cursorPoint();
+  const p=S.sel.size?null:S.x.spotlightPoint;
+  xfxRun(S.x.spotlight?"spotOn":"spotOff",900,{p:p||S.x.spotlightPoint},null,null);
+  xBeep("pop");draw();
+  echo(S.x.spotlight?(S.sel.size?("SPOTLIGHT: "+S.sel.size+" object"+(S.sel.size===1?"":"s")+" on stage. Everybody else is irrelevant."):"SPOTLIGHT: cursor takes centre stage."):
+                     "SPOTLIGHT: house lights back on.");
 }
 function xCurrent(){
   S.x.current=!S.x.current;
-  if(!S.x.current){ xfxStop(); draw(); return echo("Flow off"); }
-  const edges=xEnts().filter(e=>e.t==="edge");
-  if(!edges.length){ S.x.current=false; return echo("No connectors to show flow along","warn"); }
-  const back=edges.filter(e=>{
-    const R=flowRoute(e);
-    return R && R.length>1 && R[R.length-1].x < R[0].x - 1e-9;
-  }).length;
-  xfxRun("current", XCAP.MS, {}, null, ()=>{ S.x.current=false; });
-  echo("Flow on - "+edges.length+" connector"+(edges.length===1?"":"s")+
-       (back? (", "+back+" running right to left") : ""));
+  if(!S.x.current){
+    xCurrentLoopStop();
+    draw();
+    return echo("CURRENT: power cut.");
+  }
+  xCurrentLoopStart();
+  /* Persistent mode: do not tie Current to XFX's temporary animation lifecycle.
+     Other Experimental effects are allowed to replace XFX without killing Current. */
+  const edges=xEnts().filter(e=>e.t==="edge"),segs=[];
+  if(!edges.length){
+    outer: for(const e of xEnts()) for(const s of xSegs(e)){
+      segs.push({a:s.a,b:s.b});
+      if(segs.length>=500) break outer;
+    }
+  }
+  /* Keep only the startup flash temporary. The persistent current is painted from
+     S.x.current below, so this can safely expire or be interrupted by another toy. */
+  xfxRun("currentKick",700,{segs:segs.slice(0,180)},null,null);
+  xBeep("sweep");draw();
+  echo(edges.length?("CURRENT: "+edges.length+" connector"+(edges.length===1?"":"s")+" electrified. Click Current again to cut power."):
+                    "CURRENT: no flow connectors, so visible linework is now a persistent neon racetrack. Click Current again to cut power.");
 }
 function xStamp(p){
-  const word=XSTAMPS.includes(S.x.stampWord)? S.x.stampWord : "VOID";
-  const b=xBox(xEnts());
-  const span=b? Math.max(b.x1-b.x0,b.y1-b.y0) : px(300);
-  const h=Math.max(px(18), span*0.09);
-  let li=S.layers.findIndex(l=>l.name.toUpperCase()==="STAMP");
-  if(li<0){ S.layers.push({name:"STAMP",aci:1,on:true,lock:false}); li=S.layers.length-1; paintLayers(); }
-  snap();
-  S.ents.push({t:"text", li, si:S.curStyle, p:V(p.x-word.length*h*0.32, p.y), h, rot:rad(18), s:word});
-  S.sel=new Set([S.ents.length-1]);
-  draw(); updateProps();
-  XFX.marks.length=0;
-  for(let i=0;i<28;i++){
-    const th=Math.random()*TAU, r=Math.random()*h*1.4;
-    XFX.marks.push({kind:"splat", p:V(p.x+Math.cos(th)*r, p.y+Math.sin(th)*r), r:h*0.05*(0.4+Math.random())});
-  }
-  xfxRun("stamp",1400,{p,h},null,null);
-  xBeep("thunk");
-  echo(word+" stamped");
+  const word=XSTAMPS.includes(S.x.stampWord)?S.x.stampWord:"VOID",b=xBox(xEnts()),span=b?Math.max(b.x1-b.x0,b.y1-b.y0):px(300),h=Math.max(px(24),span*.12);
+  let li=S.layers.findIndex(l=>l.name.toUpperCase()==="STAMP");if(li<0){S.layers.push({name:"STAMP",aci:1,on:true,lock:false});li=S.layers.length-1;paintLayers();}
+  snap();S.ents.push({t:"text",li,si:S.curStyle,p:V(p.x-word.length*h*.32,p.y),h,rot:rad(18),s:word});S.sel=new Set([S.ents.length-1]);updateProps();
+  XFX.marks.length=0;for(let i=0;i<55;i++){const th=Math.random()*TAU,r=Math.random()*h*1.8;XFX.marks.push({kind:"splat",p:V(p.x+Math.cos(th)*r,p.y+Math.sin(th)*r),r:h*.04*(.4+Math.random()*1.8)});}
+  xfxRun("megaStamp",1800,{p,h,word},null,null);xBeep("thunk");draw();echo("WHAM: "+word+" stamped hard enough to annoy the drafting manager.");
 }
 
 /* ---- painting ---------------------------------------------------------- */
 function xPaint(){
   if(S.exporting) return;
   const s=S.view.s;
-  if(S.x.spotlight && S.sel.size){
-    ctx.save();
-    ctx.fillStyle="rgba(8,10,13,.72)";
-    ctx.fillRect(0,0,W,H);
-    ctx.globalCompositeOperation="destination-out";
-    for(const i of S.sel){
-      const e=S.ents[i]; if(!e) continue;
-      const b=entBox(e); if(!b||!isFinite(b.x0)) continue;
-      const pad=px(10);
-      ctx.beginPath();
-      ctx.ellipse(X((b.x0+b.x1)/2), Y((b.y0+b.y1)/2),
-        Math.max(18,((b.x1-b.x0)/2+pad)*s), Math.max(18,((b.y1-b.y0)/2+pad)*s), 0,0,TAU);
-      ctx.fill();
+  if(S.x.spotlight){
+    ctx.save();ctx.fillStyle="rgba(8,10,13,.84)";ctx.fillRect(0,0,W,H);ctx.globalCompositeOperation="destination-out";
+    if(S.sel.size){
+      for(const i of S.sel){const e=S.ents[i];if(!e)continue;const b=entBox(e);if(!b||!isFinite(b.x0))continue;const pad=px(18);ctx.beginPath();ctx.ellipse(X((b.x0+b.x1)/2),Y((b.y0+b.y1)/2),Math.max(36,((b.x1-b.x0)/2+pad)*s),Math.max(36,((b.y1-b.y0)/2+pad)*s),0,0,TAU);ctx.fill();}
+    }else{
+      const q=S.x.spotlightPoint||V(S.view.cx,S.view.cy);const g=ctx.createRadialGradient(X(q.x),Y(q.y),10,X(q.x),Y(q.y),150);g.addColorStop(0,"rgba(0,0,0,1)");g.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=g;ctx.beginPath();ctx.arc(X(q.x),Y(q.y),150,0,TAU);ctx.fill();
     }
     ctx.restore();
   }
@@ -6708,6 +7144,38 @@ function xPaint(){
         ctx.fillRect(X(R.box.x0+x*R.sx), Y(R.box.y1-y*R.sy), Math.max(1,cw+.6), Math.max(1,ch+.6));
       }
       ctx.globalAlpha=1;
+
+      if(m.label && m.areaText){
+        const lx=X(m.label.x),ly=Y(m.label.y);
+        const title=m.escaped?"OPEN AREA":"AREA";
+        const value=m.areaText;
+        const detail="Perimeter ≈ "+fmt(m.perim)+" mm";
+        ctx.save();
+        ctx.textAlign="center";ctx.textBaseline="middle";
+        ctx.font='700 11px "Segoe UI",Arial,sans-serif';
+        const w1=ctx.measureText(title).width;
+        ctx.font='800 18px "Segoe UI",Arial,sans-serif';
+        const w2=ctx.measureText(value).width;
+        ctx.font='500 10px "Segoe UI",Arial,sans-serif';
+        const w3=ctx.measureText(detail).width;
+        const bw=Math.max(92,w1,w2,w3)+24,bh=61;
+        ctx.fillStyle="rgba(20,25,30,.90)";
+        ctx.strokeStyle=m.escaped?"#ff9f43":"#4fd1a5";
+        ctx.lineWidth=1.5;
+        ctx.beginPath();
+        const x=lx-bw/2,y=ly-bh/2,r=7;
+        ctx.moveTo(x+r,y);ctx.lineTo(x+bw-r,y);ctx.quadraticCurveTo(x+bw,y,x+bw,y+r);
+        ctx.lineTo(x+bw,y+bh-r);ctx.quadraticCurveTo(x+bw,y+bh,x+bw-r,y+bh);
+        ctx.lineTo(x+r,y+bh);ctx.quadraticCurveTo(x,y+bh,x,y+bh-r);
+        ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();ctx.fill();ctx.stroke();
+        ctx.fillStyle=m.escaped?"#ffb76b":"#7ce8bd";
+        ctx.font='700 10px "Segoe UI",Arial,sans-serif';ctx.fillText(title,lx,ly-18);
+        ctx.fillStyle="#f2f6fb";
+        ctx.font='800 18px "Segoe UI",Arial,sans-serif';ctx.fillText(value,lx,ly+1);
+        ctx.fillStyle="#aeb8c4";
+        ctx.font='500 10px "Segoe UI",Arial,sans-serif';ctx.fillText(detail,lx,ly+20);
+        ctx.restore();
+      }
     }
   }
   const xnow=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
@@ -6801,28 +7269,310 @@ function xPaint(){
     ctx.beginPath(); ctx.arc(X(XFX.data.p.x),Y(XFX.data.p.y), Math.max(1,XFX.data.reach*t*s), 0, TAU);
     ctx.stroke();
   }
+
+  if(XFX.kind==="magnet" && XFX.data && XFX.data.c){
+    const c=XFX.data.c,cx=X(c.x),cy=Y(c.y),fade=1-xt;
+    ctx.strokeStyle="rgba(255,90,200,"+(fade*.9)+")";ctx.lineWidth=2.2;
+    for(let k=0;k<8;k++){const a=k/8*TAU+xt*5;ctx.beginPath();ctx.moveTo(cx+Math.cos(a)*100,cy+Math.sin(a)*100);ctx.lineTo(cx+Math.cos(a)*12,cy+Math.sin(a)*12);ctx.stroke();}
+    ctx.fillStyle="rgba(255,90,200,.18)";ctx.beginPath();ctx.arc(cx,cy,18+Math.sin(xt*30)*5,0,TAU);ctx.fill();
+  }
+  if(XFX.kind==="superIron" && XFX.data && XFX.data.box){
+    const b=XFX.data.box, y=Y(b.y1)+(Y(b.y0)-Y(b.y1))*xt;
+    ctx.fillStyle="rgba(255,209,102,.12)";ctx.fillRect(X(b.x0)-18,y-20,(b.x1-b.x0)*s+36,40);
+    ctx.strokeStyle="#ffd166";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(X(b.x0)-18,y);ctx.lineTo(X(b.x1)+18,y);ctx.stroke();
+  }
+  if(XFX.kind==="centrifuge" && XFX.data && XFX.data.c){
+    const c=XFX.data.c,cx=X(c.x),cy=Y(c.y),rr=20+xt*120;
+    ctx.strokeStyle="rgba(120,183,241,"+(1-xt*.5)+")";ctx.lineWidth=2.5;
+    for(let k=0;k<5;k++){ctx.beginPath();ctx.arc(cx,cy,rr+k*12,xt*18+k,xt*18+k+Math.PI*1.25);ctx.stroke();}
+  }
+  if(XFX.kind==="gravitySlam" && XFX.data){
+    const y=Y(XFX.data.ground);ctx.strokeStyle="rgba(201,160,255,"+(1-xt*.45)+")";ctx.lineWidth=3;
+    for(let k=0;k<5;k++){ctx.beginPath();ctx.moveTo(0,y+k*7*xt);ctx.lineTo(W,y+k*7*xt);ctx.stroke();}
+  }
+  if(XFX.kind==="repelBlast" && XFX.data && XFX.data.c){
+    const c=XFX.data.c,cx=X(c.x),cy=Y(c.y);ctx.strokeStyle="rgba(255,209,102,"+(1-xt)+")";ctx.lineWidth=3;
+    for(let k=0;k<6;k++){ctx.beginPath();ctx.arc(cx,cy,20+xt*180+k*20,0,TAU);ctx.stroke();}
+  }
+  if(XFX.kind==="boing" && XFX.data){
+    ctx.strokeStyle="rgba(120,183,241,"+(1-xt*.4)+")";ctx.lineWidth=2;
+    const pts=XFX.data.pts||[];for(const p of pts){const r=8+Math.abs(Math.sin(xt*28+p.x*.01))*22*(1-xt*.4);ctx.beginPath();ctx.arc(X(p.x),Y(p.y),r,0,TAU);ctx.stroke();}
+  }
+  if(XFX.kind==="wrapSnap" && XFX.data && XFX.data.pts){
+    const P=XFX.data.pts,c=XFX.data.c;ctx.strokeStyle="rgba(84,199,196,"+(1-xt*.25)+")";ctx.lineWidth=3;
+    ctx.beginPath();P.forEach((p,i)=>{const q=add(c,mul(sub(p,c),.35+.65*xt));i?ctx.lineTo(X(q.x),Y(q.y)):ctx.moveTo(X(q.x),Y(q.y));});ctx.closePath();ctx.stroke();
+  }
+  if(XFX.kind==="blackhole" && XFX.data){
+    const p=XFX.data.p,cx=X(p.x),cy=Y(p.y),r=Math.max(20,XFX.data.r*s*(1-xt*.55));
+    ctx.fillStyle="rgba(5,0,15,.78)";ctx.beginPath();ctx.arc(cx,cy,18+xt*14,0,TAU);ctx.fill();
+    ctx.strokeStyle="rgba(180,124,255,"+(1-xt*.2)+")";ctx.lineWidth=3;
+    for(let k=0;k<8;k++){ctx.beginPath();ctx.arc(cx,cy,r*(.18+k*.09),xt*15+k,xt*15+k+Math.PI*1.4);ctx.stroke();}
+  }
+  if(XFX.kind==="wreck" && XFX.data){
+    const p=XFX.data.p,cx=X(p.x),cy=Y(p.y),a=-2.2+xt*2.2,rope=150;
+    ctx.strokeStyle="#ddd";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(cx-rope,cy-rope*.55);ctx.lineTo(cx+Math.cos(a)*rope*.8,cy+Math.sin(a)*rope*.8);ctx.stroke();
+    ctx.fillStyle="#555";ctx.beginPath();ctx.arc(cx+Math.cos(a)*rope*.8,cy+Math.sin(a)*rope*.8,22,0,TAU);ctx.fill();
+    if(xt>.55){ctx.strokeStyle="rgba(255,122,89,"+(1-xt)+")";for(let k=0;k<4;k++){ctx.beginPath();ctx.arc(cx,cy,(xt-.55)*220+k*15,0,TAU);ctx.stroke();}}
+  }
+  if(XFX.kind==="lightning" && XFX.data){
+    const p=XFX.data.p,cx=X(p.x),cy=Y(p.y);ctx.strokeStyle="rgba(247,243,107,"+(1-xt*.35)+")";ctx.lineWidth=3;
+    for(let z=0;z<3;z++){ctx.beginPath();ctx.moveTo(cx+(Math.random()-.5)*12,0);for(let y=0;y<cy;y+=22)ctx.lineTo(cx+(Math.random()-.5)*35,y);ctx.lineTo(cx,cy);ctx.stroke();}
+  }
+  if(XFX.kind==="blender" && XFX.data && XFX.data.c){
+    const c=XFX.data.c,cx=X(c.x),cy=Y(c.y);ctx.strokeStyle="rgba(255,90,200,"+(1-xt*.3)+")";ctx.lineWidth=3;
+    for(let k=0;k<7;k++){const r=25+k*17;ctx.beginPath();ctx.arc(cx,cy,r,xt*25+k,xt*25+k+Math.PI*1.2);ctx.stroke();}
+  }
+  if(XFX.kind==="confetti" && XFX.data && XFX.data.c){
+    const c=XFX.data.c;ctx.fillStyle="rgba(255,255,255,"+(1-xt)+")";ctx.font="900 22px Arial";ctx.textAlign="center";ctx.fillText("PARTY MODE",X(c.x),Y(c.y)-50-xt*80);
+  }
+
+
+  if(XFX.kind==="levelSlam" && XFX.data){const p=XFX.data.p;ctx.strokeStyle="rgba(84,199,196,"+(1-xt*.35)+")";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(X(p.x)-100,Y(p.y));ctx.lineTo(X(p.x)+100,Y(p.y));ctx.stroke();for(let k=0;k<3;k++){ctx.beginPath();ctx.arc(X(p.x),Y(p.y),15+xt*80+k*12,0,TAU);ctx.stroke();}}
+  if(XFX.kind==="levelFail" && XFX.data){const p=XFX.data.p;ctx.strokeStyle="rgba(239,129,120,"+(1-xt)+")";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(X(p.x)-25,Y(p.y)-25);ctx.lineTo(X(p.x)+25,Y(p.y)+25);ctx.moveTo(X(p.x)+25,Y(p.y)-25);ctx.lineTo(X(p.x)-25,Y(p.y)+25);ctx.stroke();}
+  if(XFX.kind==="paintSplash" && XFX.data){const p=XFX.data.p;ctx.fillStyle=XFX.data.col||"#4fd1a5";for(let k=0;k<28;k++){const a=k/28*TAU,r=xt*(25+(k%7)*12);ctx.beginPath();ctx.arc(X(p.x)+Math.cos(a)*r,Y(p.y)+Math.sin(a)*r,2+(k%4),0,TAU);ctx.fill();}}
+  if(XFX.kind==="floodRush" && XFX.data){const p=XFX.data.p;ctx.strokeStyle=XFX.data.escaped?"rgba(255,159,67,"+(1-xt*.3)+")":"rgba(79,209,165,"+(1-xt*.3)+")";ctx.lineWidth=4;for(let k=0;k<5;k++){ctx.beginPath();ctx.arc(X(p.x),Y(p.y),20+xt*(80+k*25),0,TAU);ctx.stroke();}}
+  if(XFX.kind==="storm" && XFX.data){ctx.fillStyle="rgba(127,196,255,.16)";ctx.fillRect(0,0,W,H);ctx.strokeStyle="rgba(247,243,107,"+(Math.sin(xt*80)>0.82?.85:0)+")";ctx.lineWidth=3;if(Math.sin(xt*80)>.82){const x=W*(.2+.6*Math.random());ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x-20,H*.35);ctx.lineTo(x+15,H*.6);ctx.lineTo(x,H);ctx.stroke();}}
+  if(XFX.kind==="xrayMega" && XFX.data && XFX.data.box){const b=XFX.data.box,x=X(b.x0)+(X(b.x1)-X(b.x0))*xt;ctx.fillStyle="rgba(80,190,255,.10)";ctx.fillRect(0,0,W,H);ctx.strokeStyle="#8fd0ff";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  if(XFX.kind==="xrayOff" && XFX.data){ctx.fillStyle="rgba(143,208,255,"+((1-xt)*.08)+")";ctx.fillRect(0,0,W,H);}
+  if(XFX.kind==="sonarMega" && XFX.data){const p=XFX.data.p,r=Math.max(1,XFX.data.reach*s);ctx.strokeStyle="rgba(143,208,255,"+(1-xt*.35)+")";ctx.lineWidth=2.5;for(let k=0;k<5;k++){const rr=((xt+k*.17)%1)*r;ctx.beginPath();ctx.arc(X(p.x),Y(p.y),rr,0,TAU);ctx.stroke();}for(const h of XFX.data.hits||[]){ctx.fillStyle="#8fd0ff";ctx.beginPath();ctx.arc(X(h.p.x),Y(h.p.y),3+Math.sin(xt*35+h.th)*2,0,TAU);ctx.fill();}}
+  if(XFX.kind==="antSwarm" && XFX.data && XFX.data.path){const P=XFX.data.path,total=P.reduce((a,p,i)=>i?a+dist(P[i-1],p):0,0);ctx.fillStyle="#ffd166";for(let k=0;k<36;k++){let want=((xt*2+k/36)%1)*total,acc=0,q=P[0];for(let i=0;i<P.length-1;i++){const L=dist(P[i],P[i+1]);if(acc+L>=want){q=add(P[i],mul(sub(P[i+1],P[i]),L?(want-acc)/L:0));break;}acc+=L;}const sx=X(q.x),sy=Y(q.y);ctx.save();ctx.translate(sx,sy);ctx.rotate(k+xt*20);ctx.beginPath();ctx.ellipse(0,0,3.2,1.7,0,0,TAU);ctx.fill();ctx.restore();}}
+  if(XFX.kind==="rewind" && XFX.data){const c=XFX.data.c,cx=X(c.x),cy=Y(c.y);ctx.strokeStyle="rgba(201,160,255,"+(1-xt*.3)+")";ctx.lineWidth=4;for(let k=0;k<4;k++){ctx.beginPath();ctx.arc(cx,cy,40+k*24,xt*TAU*4+Math.PI*.2,xt*TAU*4+Math.PI*1.7);ctx.stroke();}ctx.fillStyle="rgba(201,160,255,"+(1-xt)+")";ctx.font="900 34px Arial";ctx.textAlign="center";ctx.fillText("⏪",cx,cy+12);}
+  if(XFX.kind==="spotOn"||XFX.kind==="spotOff"){const q=XFX.data&&XFX.data.p?XFX.data.p:V(S.view.cx,S.view.cy);ctx.strokeStyle="rgba(255,255,220,"+(1-xt)+")";ctx.lineWidth=5;ctx.beginPath();ctx.arc(X(q.x),Y(q.y),30+xt*150,0,TAU);ctx.stroke();}
+  if(XFX.kind==="megaStamp" && XFX.data){const p=XFX.data.p,h=XFX.data.h,slam=Math.min(1,xt*4);ctx.save();ctx.translate(X(p.x),Y(p.y)-120*(1-slam));ctx.rotate(-.25);ctx.strokeStyle="#ef8178";ctx.lineWidth=7;ctx.strokeRect(-h*s*.8,-h*s*.38,h*s*1.6,h*s*.76);ctx.restore();}
+  if(XFX.kind==="currentKick"){ctx.save();ctx.fillStyle="rgba(84,199,196,"+(1-xt)+")";ctx.fillRect(0,0,W,H);ctx.globalCompositeOperation="lighter";ctx.strokeStyle="rgba(143,208,255,"+(1-xt*.35)+")";ctx.lineWidth=2+4*(1-xt);for(const seg of (XFX.data&&XFX.data.segs)||[]){ctx.beginPath();ctx.moveTo(X(seg.a.x),Y(seg.a.y));ctx.lineTo(X(seg.b.x),Y(seg.b.y));ctx.stroke();}ctx.restore();}
+  if(XFX.kind==="currentAll" && XFX.data && XFX.data.segs && !xEnts().some(e=>e.t==="edge")){const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();ctx.fillStyle="#54c7c4";for(const seg of XFX.data.segs.slice(0,500)){for(let k=0;k<2;k++){const t=((now/900+k*.5+seg.a.x*.001)%1);const q=add(seg.a,mul(sub(seg.b,seg.a),t));ctx.beginPath();ctx.arc(X(q.x),Y(q.y),2.5,0,TAU);ctx.fill();}}}
+
+  if(XFX.kind==="stickFight" && XFX.data){
+    const d=XFX.data, pulse=d.hit||0;
+    const limbPoly=(a,b,w0,w1,fill,stroke="#080b0f")=>{
+      const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy)||1,nx=-dy/L,ny=dx/L;
+      ctx.fillStyle=fill;ctx.strokeStyle=stroke;ctx.lineWidth=1.15;
+      ctx.beginPath();ctx.moveTo(a.x+nx*w0,a.y+ny*w0);ctx.lineTo(b.x+nx*w1,b.y+ny*w1);
+      ctx.lineTo(b.x-nx*w1,b.y-ny*w1);ctx.lineTo(a.x-nx*w0,a.y-ny*w0);ctx.closePath();ctx.fill();ctx.stroke();
+    };
+    const pt=(a,len,ang)=>({x:a.x+Math.cos(ang)*len,y:a.y+Math.sin(ang)*len});
+    const boot=(ank,forward,col)=>{
+      ctx.fillStyle=col;ctx.strokeStyle="#07090c";ctx.lineWidth=1.2;
+      ctx.beginPath();ctx.moveTo(ank.x-3,ank.y-4);ctx.lineTo(ank.x+3,ank.y-4);ctx.lineTo(ank.x+7*forward,ank.y-1);
+      ctx.quadraticCurveTo(ank.x+8*forward,ank.y+1,ank.x+5*forward,ank.y+2);
+      ctx.lineTo(ank.x-4*forward,ank.y+2);ctx.quadraticCurveTo(ank.x-6*forward,ank.y,ank.x-3,ank.y-4);ctx.fill();ctx.stroke();
+      ctx.strokeStyle="rgba(255,255,255,.16)";ctx.beginPath();ctx.moveTo(ank.x-2*forward,ank.y);ctx.lineTo(ank.x+5*forward,ank.y);ctx.stroke();
+    };
+    const glove=(w,col)=>{ctx.fillStyle=col;ctx.strokeStyle="#07090c";ctx.lineWidth=1.2;ctx.beginPath();ctx.ellipse(w.x,w.y,4.5,3.8,0,0,TAU);ctx.fill();ctx.stroke();};
+    const drawFighter=(x,y,oppX,col,isAttacker,gotHit,ko,move)=>{
+      const sx=X(x),sy=Y(y),oppSX=X(oppX),face=oppSX>=sx?1:-1,SC=.54;
+      const attack=!!isAttacker&&pulse>.06,kick=attack&&(move===8||move===12),upper=attack&&move===10;
+      const heavy=move===12, contact=pulse>.52, drive=attack?Math.sin(Math.PI*Math.min(1,pulse))*2.7:0;
+      const recoil=gotHit>0.1?Math.min(4,gotHit*4):0;
+      ctx.save();ctx.translate(sx,sy);ctx.scale(face*SC,SC);ctx.translate(drive-recoil,0);
+      if(ko){ctx.rotate(1.28);ctx.translate(4,10);}
+
+      const outline="#070a0e",skin="#d2a078",skinHi="#efc5a4",pants="#171c23",pantsHi="#29323d",bootCol="#0a0d11",belt="#0d1117";
+      ctx.fillStyle="rgba(0,0,0,.34)";ctx.beginPath();ctx.ellipse(0,3,16,2.8,0,0,TAU);ctx.fill();
+
+      // Fixed-length legs. Hips never stretch, knees articulate, boots have actual volume.
+      const hipL={x:-3.8,y:-18},hipR={x:3.8,y:-18};
+      let kneeL={x:-8.5,y:-9},ankL={x:-10.5,y:-1};
+      let kneeR={x:8.0,y:-9},ankR={x:10.5,y:-1};
+      if(kick){kneeR={x:13,y:-18};ankR={x:25,y:-18};kneeL={x:-7.5,y:-8};ankL={x:-10,y:-1};}
+      else if(attack){kneeR={x:8.8,y:-8.5};ankR={x:12,y:-1};}
+      limbPoly(hipL,kneeL,3.4,3.0,pantsHi,outline);limbPoly(kneeL,ankL,3.0,2.3,pants,outline);
+      limbPoly(hipR,kneeR,3.4,3.0,pantsHi,outline);limbPoly(kneeR,ankR,3.0,2.3,pants,outline);
+      boot(ankL,1,bootCol);boot(ankR,kick?1:1,bootCol);
+
+      // Pelvis and torso, compact 90s digitised-fighter proportions.
+      ctx.fillStyle=pants;ctx.strokeStyle=outline;ctx.lineWidth=1.4;ctx.beginPath();ctx.moveTo(-7,-21);ctx.lineTo(7,-21);ctx.lineTo(8,-16);ctx.lineTo(-8,-16);ctx.closePath();ctx.fill();ctx.stroke();
+      const tg=ctx.createLinearGradient(-10,-42,10,-18);tg.addColorStop(0,"#0b1016");tg.addColorStop(.32,col);tg.addColorStop(.7,col);tg.addColorStop(1,"#080d12");
+      ctx.fillStyle=tg;ctx.strokeStyle=outline;ctx.lineWidth=1.6;ctx.beginPath();ctx.moveTo(-10,-42);ctx.quadraticCurveTo(0,-46,10,-41);ctx.lineTo(8,-21);ctx.lineTo(-8,-21);ctx.closePath();ctx.fill();ctx.stroke();
+      ctx.fillStyle=belt;ctx.fillRect(-8,-23,16,3.3);ctx.fillStyle="#c7d0d8";ctx.fillRect(-1.5,-22.8,3,2.8);
+      ctx.strokeStyle="rgba(255,255,255,.18)";ctx.lineWidth=.9;ctx.beginPath();ctx.moveTo(-6,-37);ctx.lineTo(5,-40);ctx.moveTo(-5,-30);ctx.lineTo(6,-32);ctx.stroke();
+
+      // Fixed-length arms. Reach comes from shoulder rotation + body lunge, never arm stretching.
+      const shF={x:7,y:-38},shB={x:-7,y:-38};
+      let elF,wrF,elB,wrB;
+      if(kick){elF={x:13,y:-34};wrF={x:17,y:-28};elB={x:-12,y:-33};wrB={x:-15,y:-27};}
+      else if(upper){elF={x:12,y:-36};wrF={x:17,y:-51};elB={x:-12,y:-34};wrB={x:-14,y:-28};}
+      else if(attack){elF={x:15,y:-38};wrF={x:24,y:-38};elB={x:-12,y:-34};wrB={x:-15,y:-28};}
+      else{elF={x:13,y:-34};wrF={x:10,y:-27};elB={x:-12,y:-34};wrB={x:-9,y:-27};}
+      limbPoly(shF,elF,3.2,2.6,skin,outline);limbPoly(elF,wrF,2.6,2.1,skin,outline);
+      limbPoly(shB,elB,3.2,2.6,skin,outline);limbPoly(elB,wrB,2.6,2.1,skin,outline);
+      glove(wrF,col);glove(wrB,col);
+
+      // Neck and human head with jaw, brow, nose, ear and headband.
+      ctx.fillStyle=skin;ctx.strokeStyle=outline;ctx.lineWidth=1.2;ctx.fillRect(-2.8,-47,5.6,6);
+      const hg=ctx.createRadialGradient(-2,-55,1,0,-54,9);hg.addColorStop(0,skinHi);hg.addColorStop(.66,skin);hg.addColorStop(1,"#8f5e43");ctx.fillStyle=hg;
+      ctx.beginPath();ctx.moveTo(-6.5,-61);ctx.quadraticCurveTo(0,-66,6.8,-60);ctx.lineTo(7,-53);ctx.lineTo(4,-48);ctx.lineTo(-1,-47);ctx.lineTo(-6.5,-51);ctx.closePath();ctx.fill();ctx.stroke();
+      ctx.fillStyle="#090c10";ctx.beginPath();ctx.moveTo(-6,-61);ctx.quadraticCurveTo(-1,-68,7,-61);ctx.lineTo(5,-58);ctx.quadraticCurveTo(0,-62,-6,-58);ctx.closePath();ctx.fill();
+      ctx.strokeStyle=col;ctx.lineWidth=2.3;ctx.beginPath();ctx.moveTo(-6,-58);ctx.lineTo(7,-58);ctx.stroke();
+      ctx.strokeStyle="#261710";ctx.lineWidth=1.1;ctx.beginPath();ctx.moveTo(1,-56);ctx.lineTo(4.5,-56);ctx.moveTo(4,-54);ctx.lineTo(6,-52);ctx.moveTo(1,-49.5);ctx.lineTo(4.5,-50);ctx.stroke();ctx.fillStyle="#20140e";ctx.beginPath();ctx.arc(3.5,-55.3,.75,0,TAU);ctx.fill();
+
+      if(gotHit>.22){ctx.strokeStyle="rgba(255,225,130,"+Math.min(1,gotHit)+")";ctx.lineWidth=1.8;for(let k=0;k<5;k++){const aa=k*TAU/5+xt*8;ctx.beginPath();ctx.moveTo(-4+Math.cos(aa)*4,-57+Math.sin(aa)*4);ctx.lineTo(-10+Math.cos(aa)*9,-57+Math.sin(aa)*9);ctx.stroke();}}
+      ctx.restore();
+      const contactLocal=kick?ankR:wrF;
+      return {face,contactX:sx+face*(contactLocal.x+drive)*SC,contactY:sy+contactLocal.y*SC,contact};
+    };
+
+    const blueAttack=d.who===0&&d.phase==="attack",redAttack=d.who===1&&d.phase==="attack";
+    const blueHit=d.who===1?pulse:0,redHit=d.who===0?pulse:0;
+    const B=drawFighter(d.blueX,d.y,d.redX,"#3e7dc3",blueAttack,blueHit,false,d.move);
+    const R=drawFighter(d.redX,d.y,d.blueX,"#b23843",redAttack,redHit,d.ko,d.move);
+    if(pulse>.45&&d.phase==="attack"){
+      const atk=d.who===0?B:R,defX=d.who===0?X(d.redX):X(d.blueX),cx=(atk.contactX+defX)/2,cy=atk.contactY;
+      ctx.strokeStyle="rgba(255,225,120,"+Math.min(1,pulse)+")";ctx.lineWidth=2.4;
+      for(let k=0;k<8;k++){const aa=k*TAU/8,r=4+15*pulse;ctx.beginPath();ctx.moveTo(cx+Math.cos(aa)*2,cy+Math.sin(aa)*2);ctx.lineTo(cx+Math.cos(aa)*r,cy+Math.sin(aa)*r);ctx.stroke();}
+    }
+    ctx.fillStyle="#3e7dc3";ctx.fillRect(18,18,140*Math.max(0,d.blueHP)/100,8);ctx.strokeStyle="rgba(255,255,255,.35)";ctx.strokeRect(18,18,140,8);
+    ctx.fillStyle="#b23843";ctx.fillRect(W-158,18,140*Math.max(0,d.redHP)/100,8);ctx.strokeRect(W-158,18,140,8);
+    ctx.fillStyle="#fff";ctx.font="900 15px Arial";ctx.textAlign="center";ctx.fillText(d.ko?"K.O.  BLUE WINS!":(pulse>.48&&d.flash?d.flash:(d.phase==="approach"?"ROUND 1":"FIGHT!")),W/2,28);
+  }
+  if(XFX.kind==="fightFail"&&XFX.data){ctx.fillStyle="#ef8178";ctx.font="900 28px Arial";ctx.textAlign="center";ctx.fillText("NO ARENA LINE",X(XFX.data.c.x),Y(XFX.data.c.y));}
+  if(XFX.kind==="lineSurfer" && XFX.data){
+    const d=XFX.data,sx=X(d.x),sy=Y(d.y),a=d.state==="ride"?(d.groundAng||0):((d.airAng||0)+d.spin*.18);
+    const airborne=d.state==="air",speedPx=Math.abs((d.speed||0)*S.view.s),SC=.50;
+    const crouch=airborne?1.8:Math.min(4.5,speedPx/125);
+    const limbPoly=(a,b,w0,w1,fill,stroke="#070a0e")=>{const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy)||1,nx=-dy/L,ny=dx/L;ctx.fillStyle=fill;ctx.strokeStyle=stroke;ctx.lineWidth=1.05;ctx.beginPath();ctx.moveTo(a.x+nx*w0,a.y+ny*w0);ctx.lineTo(b.x+nx*w1,b.y+ny*w1);ctx.lineTo(b.x-nx*w1,b.y-ny*w1);ctx.lineTo(a.x-nx*w0,a.y-ny*w0);ctx.closePath();ctx.fill();ctx.stroke();};
+    const shoe=(p,forward)=>{ctx.fillStyle="#11151a";ctx.strokeStyle="#05070a";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(p.x-4,p.y-3);ctx.lineTo(p.x+3,p.y-3);ctx.lineTo(p.x+8*forward,p.y);ctx.quadraticCurveTo(p.x+8*forward,p.y+2,p.x+5*forward,p.y+2.5);ctx.lineTo(p.x-4*forward,p.y+2.5);ctx.closePath();ctx.fill();ctx.stroke();ctx.strokeStyle="#d7d7d7";ctx.beginPath();ctx.moveTo(p.x-2*forward,p.y+.5);ctx.lineTo(p.x+6*forward,p.y+.5);ctx.stroke();};
+    ctx.save();ctx.translate(sx,sy);ctx.rotate(a);ctx.scale(SC,SC);
+
+    // Late-90s pro-skater board: wider deck, grip, nose/tail kick, trucks and wheels.
+    const deck=ctx.createLinearGradient(-26,0,26,0);deck.addColorStop(0,"#6c4020");deck.addColorStop(.45,"#c58b3c");deck.addColorStop(1,"#5f351a");
+    ctx.fillStyle="#11151a";ctx.strokeStyle="#05070a";ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(-27,-1);ctx.quadraticCurveTo(-24,-5,-19,-4);ctx.lineTo(19,-4);ctx.quadraticCurveTo(24,-5,27,-1);ctx.lineTo(24,2);ctx.quadraticCurveTo(0,5,-24,2);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.strokeStyle=deck;ctx.lineWidth=2.4;ctx.beginPath();ctx.moveTo(-25,1);ctx.quadraticCurveTo(0,4,25,1);ctx.stroke();
+    ctx.strokeStyle="#9aa2aa";ctx.lineWidth=1.6;ctx.beginPath();ctx.moveTo(-15,2);ctx.lineTo(-15,7);ctx.moveTo(15,2);ctx.lineTo(15,7);ctx.stroke();
+    for(const wx of [-18,-12,12,18]){ctx.fillStyle="#090b0e";ctx.beginPath();ctx.arc(wx,8,3.2,0,TAU);ctx.fill();ctx.fillStyle="#b5bdc6";ctx.beginPath();ctx.arc(wx,8,1.15,0,TAU);ctx.fill();}
+
+    // Fixed-length skater anatomy. Baggy pants, oversized tee, cap, real shoes, no rubber limbs.
+    const skin="#d3a17b",skinHi="#efc39f",pants="#30343c",pantsHi="#454b56",tee="#7b2f3d",teeHi="#a44756",outline="#070a0e";
+    const hipL={x:-4,y:-20-crouch},hipR={x:4,y:-20-crouch};
+    const kneeL=airborne?{x:-10,y:-11}:{x:-11,y:-10};
+    const kneeR=airborne?{x:9,y:-9}:{x:11,y:-11};
+    const ankL=airborne?{x:-17,y:-3}:{x:-16,y:-2};
+    const ankR=airborne?{x:16,y:-2}:{x:16,y:-2};
+    limbPoly(hipL,kneeL,4.5,4.0,pantsHi,outline);limbPoly(kneeL,ankL,4.0,3.3,pants,outline);
+    limbPoly(hipR,kneeR,4.5,4.0,pantsHi,outline);limbPoly(kneeR,ankR,4.0,3.3,pants,outline);
+    shoe(ankL,1);shoe(ankR,1);
+    ctx.fillStyle=pants;ctx.strokeStyle=outline;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(-8,-24-crouch);ctx.lineTo(8,-24-crouch);ctx.lineTo(9,-18-crouch);ctx.lineTo(-9,-18-crouch);ctx.closePath();ctx.fill();ctx.stroke();
+
+    // Oversized tee / hoodie-like silhouette inspired by classic skate-game characters.
+    const sg=ctx.createLinearGradient(-12,-48,12,-22);sg.addColorStop(0,"#32151d");sg.addColorStop(.42,teeHi);sg.addColorStop(.75,tee);sg.addColorStop(1,"#241016");ctx.fillStyle=sg;ctx.strokeStyle=outline;ctx.lineWidth=1.4;
+    ctx.beginPath();ctx.moveTo(-12,-47-crouch);ctx.quadraticCurveTo(0,-51-crouch,12,-46-crouch);ctx.lineTo(11,-25-crouch);ctx.quadraticCurveTo(0,-21-crouch,-11,-25-crouch);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.fillStyle="#e7e7e7";ctx.font="900 7px Arial";ctx.textAlign="center";ctx.fillText("SK8",0,-34-crouch);
+    ctx.strokeStyle="rgba(255,255,255,.16)";ctx.beginPath();ctx.moveTo(-8,-41-crouch);ctx.lineTo(7,-44-crouch);ctx.stroke();
+
+    // Fixed arm bones in a low skating stance. Airborne pose spreads for balance.
+    const shL={x:-9,y:-43-crouch},shR={x:9,y:-43-crouch};
+    const elL=airborne?{x:-19,y:-39-crouch}:{x:-17,y:-34-crouch};
+    const wrL=airborne?{x:-27,y:-43-crouch}:{x:-12,y:-27-crouch};
+    const elR=airborne?{x:19,y:-37-crouch}:{x:17,y:-33-crouch};
+    const wrR=airborne?{x:27,y:-40-crouch}:{x:13,y:-26-crouch};
+    limbPoly(shL,elL,3.1,2.5,skin,outline);limbPoly(elL,wrL,2.5,2.0,skin,outline);limbPoly(shR,elR,3.1,2.5,skin,outline);limbPoly(elR,wrR,2.5,2.0,skin,outline);
+    ctx.fillStyle=skinHi;ctx.strokeStyle=outline;ctx.lineWidth=1;for(const w of [wrL,wrR]){ctx.beginPath();ctx.arc(w.x,w.y,2.6,0,TAU);ctx.fill();ctx.stroke();}
+
+    // Neck + detailed skater head, backwards cap and small facial features.
+    ctx.fillStyle=skin;ctx.fillRect(-2.6,-55-crouch,5.2,6);
+    const hg=ctx.createRadialGradient(-2,-63-crouch,1,0,-62-crouch,9);hg.addColorStop(0,skinHi);hg.addColorStop(.7,skin);hg.addColorStop(1,"#925f43");ctx.fillStyle=hg;ctx.strokeStyle=outline;ctx.lineWidth=1.2;
+    ctx.beginPath();ctx.moveTo(-6.5,-69-crouch);ctx.quadraticCurveTo(0,-74-crouch,7,-68-crouch);ctx.lineTo(7,-61-crouch);ctx.lineTo(4,-56-crouch);ctx.lineTo(-1,-55-crouch);ctx.lineTo(-6,-59-crouch);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.fillStyle="#202833";ctx.strokeStyle=outline;ctx.beginPath();ctx.arc(-1,-68-crouch,7,Math.PI,TAU);ctx.fill();ctx.stroke();ctx.fillRect(-8,-69-crouch,13,2.7);ctx.fillRect(-13,-68-crouch,6,2);
+    ctx.strokeStyle="#26170f";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(1,-65-crouch);ctx.lineTo(4,-65-crouch);ctx.moveTo(4,-63-crouch);ctx.lineTo(6,-61-crouch);ctx.moveTo(1,-58-crouch);ctx.lineTo(4,-58.5-crouch);ctx.stroke();ctx.fillStyle="#24160f";ctx.beginPath();ctx.arc(3.4,-64.3-crouch,.7,0,TAU);ctx.fill();
+
+    if(!airborne){ctx.strokeStyle="rgba(180,220,255,.45)";ctx.lineWidth=1.15;for(let k=0;k<3;k++){ctx.beginPath();ctx.moveTo(-29-k*5,2+k*2);ctx.lineTo(-39-k*8,2+k*2);ctx.stroke();}}
+    else {
+      const vmag=Math.hypot(d.vx||0,d.vy||0)*S.view.s;
+      if(vmag>260){ctx.save();ctx.rotate(-ang);ctx.fillStyle=vmag>430?"#ffd166":"#dceeff";ctx.font="900 13px Arial";ctx.textAlign="center";ctx.fillText(vmag>430?"SICK AIR!":"AIR!",0,-62);ctx.restore();}
+    }
+    ctx.restore();
+
+    if(d.goal){ctx.save();ctx.strokeStyle="rgba(120,183,241,.28)";ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(X(d.goal.x0),Y(d.goal.y)-16);ctx.lineTo(X(d.goal.x1),Y(d.goal.y)-16);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle="rgba(120,183,241,.75)";ctx.font="700 10px Arial";ctx.textAlign="center";ctx.fillText("LAND HERE",(X(d.goal.x0)+X(d.goal.x1))/2,Y(d.goal.y)-22);ctx.restore();}
+    if(d.state==="air"){ctx.fillStyle=d.crashed?"rgba(239,129,120,.95)":"rgba(255,209,102,.9)";ctx.font="900 14px Arial";ctx.textAlign="center";ctx.fillText(d.crashed?"OH NO":"AIR!",sx,sy-42);}
+    else{ctx.fillStyle="rgba(120,183,241,.7)";for(let k=0;k<4;k++){ctx.beginPath();ctx.arc(sx-10-k*7,sy+4+Math.sin(xt*30+k)*1.5,1.5,0,TAU);ctx.fill();}ctx.fillStyle="rgba(255,255,255,.75)";ctx.font="700 10px Arial";ctx.textAlign="left";ctx.fillText((d.sliding?"SLIDING  ":"")+Math.round(speedPx)+" px/s",sx+14,sy-17);}
+  }
+  if(XFX.kind==="surferFail"&&XFX.data){ctx.fillStyle="#ffd166";ctx.font="900 42px Arial";ctx.textAlign="center";ctx.fillText("¯\\_(ツ)_/¯",X(XFX.data.c.x),Y(XFX.data.c.y));}
+  if(XFX.kind==="pacEater" && XFX.data && XFX.data.P){
+    const P=XFX.data.P,total=Math.max(1,XFX.data.L);let want=xt*total,acc=0,q=P[0],dir=V(1,0);for(let i=0;i<P.length-1;i++){const L=dist(P[i],P[i+1]);if(acc+L>=want){q=add(P[i],mul(sub(P[i+1],P[i]),L?(want-acc)/L:0));dir=norm(sub(P[i+1],P[i]));break;}acc+=L;}
+    const sx=X(q.x),sy=Y(q.y),a=Math.atan2(-dir.y,dir.x),mouth=.18+Math.abs(Math.sin(xt*TAU*14))*.55;ctx.save();ctx.translate(sx,sy);ctx.rotate(a);ctx.fillStyle="#ffd900";ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,13,mouth,TAU-mouth);ctx.closePath();ctx.fill();ctx.restore();
+    ctx.fillStyle="#fff";for(let k=1;k<7;k++){const j=Math.max(0,want-k*total*.018);let aa=0,r=P[0];for(let i=0;i<P.length-1;i++){const L=dist(P[i],P[i+1]);if(aa+L>=j){r=add(P[i],mul(sub(P[i+1],P[i]),L?(j-aa)/L:0));break;}aa+=L;}ctx.beginPath();ctx.arc(X(r.x),Y(r.y),2,0,TAU);ctx.fill();}
+  }
+  if(XFX.kind==="pacFail"&&XFX.data){ctx.fillStyle="#ffd900";ctx.font="900 34px Arial";ctx.textAlign="center";ctx.fillText("NOM?",X(XFX.data.c.x),Y(XFX.data.c.y));}
+  if(XFX.kind==="ufo" && XFX.data){
+    const c=XFX.data.c,cx=X(c.x),top=Math.max(55,Y(XFX.data.b.y1)-150),beam=Y(c.y)-top;ctx.save();ctx.fillStyle="rgba(156,255,143,.14)";ctx.beginPath();ctx.moveTo(cx-18,top+22);ctx.lineTo(cx-95,Y(c.y)+55);ctx.lineTo(cx+95,Y(c.y)+55);ctx.lineTo(cx+18,top+22);ctx.closePath();ctx.fill();ctx.fillStyle="#9aa7b6";ctx.beginPath();ctx.ellipse(cx,top,48,15,0,0,TAU);ctx.fill();ctx.fillStyle="#9cff8f";ctx.beginPath();ctx.ellipse(cx,top-8,22,11,0,Math.PI,true);ctx.fill();
+    for(const e of XFX.data.list||[]){const q=xEntityCenter(e),lift=Math.sin(Math.min(1,xt*1.4)*Math.PI/2)*beam*.72;ctx.strokeStyle="rgba(156,255,143,.75)";ctx.beginPath();ctx.moveTo(X(q.x),Y(q.y)-lift);ctx.lineTo(cx,top+12);ctx.stroke();}
+    ctx.restore();
+  }
+  if(XFX.kind==="ufoEmpty"&&XFX.data){ctx.strokeStyle="#9cff8f";ctx.lineWidth=3;ctx.beginPath();ctx.arc(X(XFX.data.c.x),Y(XFX.data.c.y),25+xt*90,0,TAU);ctx.stroke();}
+  if(XFX.kind==="gremlins" && XFX.data){
+    const pts=XFX.data.pts||[];for(let i=0;i<pts.length;i++){const p=pts[i],hop=Math.abs(Math.sin(xt*TAU*5+i))*18,sx=X(p.x)+(i%3-1)*12,sy=Y(p.y)-hop;ctx.strokeStyle="#b8ff73";ctx.lineWidth=2;ctx.beginPath();ctx.arc(sx,sy-12,5,0,TAU);ctx.moveTo(sx,sy-7);ctx.lineTo(sx,sy+5);ctx.moveTo(sx,sy-3);ctx.lineTo(sx-8,sy+3);ctx.moveTo(sx,sy-3);ctx.lineTo(sx+8,sy+1);ctx.moveTo(sx,sy+5);ctx.lineTo(sx-6,sy+13);ctx.moveTo(sx,sy+5);ctx.lineTo(sx+7,sy+12);ctx.stroke();}
+    ctx.fillStyle="rgba(184,255,115,"+(1-xt*.4)+")";ctx.font="900 18px Arial";ctx.textAlign="center";ctx.fillText("DO NOT FEED AFTER MIDNIGHT",W/2,38);
+  }
+  if((XFX.kind==="gremlinEmpty"||XFX.kind==="termiteEmpty")&&XFX.data){ctx.fillStyle="#b8ff73";ctx.font="900 28px Arial";ctx.textAlign="center";ctx.fillText("...crickets...",X(XFX.data.c.x),Y(XFX.data.c.y));}
+  if(XFX.kind==="termites" && XFX.data){
+    for(const p of XFX.data.pts||[]){for(let k=0;k<5;k++){const a=xt*TAU*5+k*TAU/5,sx=X(p.x)+Math.cos(a)*16,sy=Y(p.y)+Math.sin(a)*8;ctx.fillStyle="#d6a85f";ctx.beginPath();ctx.ellipse(sx,sy,4,2,a,0,TAU);ctx.fill();}ctx.strokeStyle="rgba(214,168,95,"+(1-xt)+")";ctx.beginPath();ctx.arc(X(p.x),Y(p.y),8+xt*28,0,TAU);ctx.stroke();}
+  }
+
   if(S.x.current){
     const now=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+    ctx.save();
     ctx.fillStyle="#8fd0ff";
-    let drawn=0;
-    for(const e of S.ents){
-      if(e.t!=="edge"||drawn>400) continue;
-      const R=flowRoute(e);
-      if(!R||R.length<2) continue;
-      let total=0;
-      for(let i=0;i<R.length-1;i++) total+=dist(R[i],R[i+1]);
-      if(!(total>0)) continue;
-      for(let k=0;k<3;k++){
-        let want=(((now/1400)+k/3)%1)*total, acc=0, q=R[0];
-        for(let i=0;i<R.length-1;i++){
-          const L=dist(R[i],R[i+1]);
-          if(acc+L>=want){ q=add(R[i], mul(sub(R[i+1],R[i]), L>0?(want-acc)/L:0)); break; }
-          acc+=L;
+    ctx.shadowColor="#54c7c4";
+    ctx.shadowBlur=9;
+    let drawn=0, edgeCount=0;
+    for(const e of S.ents){ if(e.t==="edge") edgeCount++; }
+    if(edgeCount){
+      for(const e of S.ents){
+        if(e.t!=="edge"||drawn>=420) continue;
+        const LYR=S.layers[e.li]; if(LYR && !LYR.on) continue;
+        const R=flowRoute(e);
+        if(!R||R.length<2) continue;
+        let total=0;
+        for(let i=0;i<R.length-1;i++) total+=dist(R[i],R[i+1]);
+        if(!(total>0)) continue;
+        for(let k=0;k<4&&drawn<420;k++){
+          let want=(((now/1050)+k/4)%1)*total, acc=0, q=R[0];
+          for(let i=0;i<R.length-1;i++){
+            const L=dist(R[i],R[i+1]);
+            if(acc+L>=want){ q=add(R[i],mul(sub(R[i+1],R[i]),L>0?(want-acc)/L:0)); break; }
+            acc+=L;
+          }
+          ctx.beginPath();ctx.arc(X(q.x),Y(q.y),2.7,0,TAU);ctx.fill();drawn++;
         }
-        ctx.beginPath(); ctx.arc(X(q.x),Y(q.y),2.4,0,TAU); ctx.fill();
-        drawn++;
+      }
+    }else{
+      /* No flow network: animate by distance along each entity path, not by raw
+         segment count. Marker strokes are resampled more densely as the view
+         changes, so a per-segment particle budget used to get consumed by
+         off-screen portions of a stroke when zoomed in. Path-length animation
+         makes Current invariant to zoom and culls only at final screen draw. */
+      outerCurrent: for(const e of xEnts()){
+        if(e.t==="edge") continue;
+        const segs=xSegs(e).filter(seg=>dist(seg.a,seg.b)>1e-9);
+        if(!segs.length) continue;
+        let total=0;
+        const lens=[];
+        for(const seg of segs){ const L=dist(seg.a,seg.b); lens.push(L); total+=L; }
+        if(!(total>1e-9)) continue;
+
+        /* A few travelling charges per entity. Long paths get a couple extra,
+           but never hundreds merely because a Marker stroke has dense samples. */
+        const chargeCount=Math.max(2,Math.min(8,Math.ceil(total/Math.max(px(180),1e-6))));
+        for(let k=0;k<chargeCount && drawn<420;k++){
+          let want=(((now/1050)+k/chargeCount+(e.id||0)*.071)%1+1)%1*total;
+          let acc=0, q=segs[0].a;
+          for(let i=0;i<segs.length;i++){
+            const L=lens[i];
+            if(acc+L>=want){
+              q=add(segs[i].a,mul(sub(segs[i].b,segs[i].a),(want-acc)/L));
+              break;
+            }
+            acc+=L;
+          }
+          const sx=X(q.x), sy=Y(q.y);
+          /* Keep the animation budget for things the user can actually see. */
+          if(sx<-12||sx>W+12||sy<-12||sy>H+12) continue;
+          ctx.beginPath();ctx.arc(sx,sy,2.8,0,TAU);ctx.fill();
+          drawn++;
+        }
       }
     }
+    ctx.restore();
   }
   for(const q of XFX.parts){
     const a=Math.max(0,Math.min(1,q.life/Math.max(1,q.max)));
@@ -6840,6 +7590,9 @@ const XPICK={
   xraintest:p=>xRain(p),
   xsonar:p=>xSonar(p),
   xstamp:p=>xStamp(p),
+  xblackhole:p=>xBlackHole(p),
+  xwreck:p=>xWreckingBall(p),
+  xlightning:p=>xLightning(p),
   xbulldozer:p=>{
     if(!S.pending.length){ S.pending=[p]; setPrompt(); draw(); return; }
     const a=S.pending[0]; S.pending=[];
@@ -6857,6 +7610,12 @@ const XTOOLDEF={
     svg:'<circle cx="10" cy="10" r="1.6"/><circle cx="10" cy="10" r="5"/><circle cx="10" cy="10" r="8.2"/>'},
   xstamp:{label:"Stamp", alias:"XSTAMP", prompts:["Place the stamp"],
     svg:'<path d="M4.4 16.6h11.2v-2H4.4z"/><path d="M6.6 14.6V12h6.8v2.6"/><path d="M8 12V6.4a2 2 0 014 0V12"/>'},
+  xblackhole:{label:"Black Hole", alias:"XHOLE", prompts:["Place event horizon"],
+    svg:'<circle cx="10" cy="10" r="2.2"/><circle cx="10" cy="10" r="5.4"/><path d="M2 10h3M15 10h3M10 2v3M10 15v3"/>'},
+  xwreck:{label:"Wrecking Ball", alias:"XWRECK", prompts:["Pick impact point"],
+    svg:'<path d="M4 3h8l-2 4"/><path d="M10 7l2 4"/><circle cx="13.5" cy="14.5" r="3.2"/>'},
+  xlightning:{label:"Lightning", alias:"XZAP", prompts:["Pick strike point"],
+    svg:'<path d="M11.5 2.5L5.5 11h4l-1 6.5 6-9h-4z"/>'},
   xbulldozer:{label:"Bulldozer", alias:"XDOZE", prompts:["Corridor start","Corridor end"],
     svg:'<path d="M2.6 14.6h11.8"/><circle cx="5.4" cy="16" r="1.6"/><circle cx="11.4" cy="16" r="1.6"/><path d="M4.4 12.6h9V9.4h-4l-1.4-2.8h-3.6z"/><path d="M16.4 6v8.6"/>'}
 };
@@ -6867,6 +7626,18 @@ for(const [id,T] of Object.entries(XTOOLDEF)){
   if(T.alias) ALIAS[T.alias.toLowerCase()]=id;
 }
 Object.assign(ACTIONS,{
+  xsurfer:{label:"Line Surfer", alias:"XSURF",
+    svg:'<path d="M2 15q5 2 10 0t6 0"/><circle cx="10" cy="5" r="2"/><path d="M10 7l-1 4 4 1M9 9l-3 2M9 11l-2 3M12 12l3 2"/>',
+    run:()=>xArmSurferPick()},
+  xpac:{label:"Line Muncher", alias:"XNOM",
+    svg:'<path d="M17 10a7 7 0 11-2.2-5.1L10 10z"/><circle cx="10" cy="5.8" r=".8"/>',
+    run:()=>xPacEater()},
+  xgremlins:{label:"Gremlins", alias:"XGREMLIN",
+    svg:'<circle cx="10" cy="10" r="5"/><path d="M6 6L3 3l1 6M14 6l3-3-1 6M7.5 10h.1M12.5 10h.1M7.5 13q2.5 2 5 0"/>',
+    run:()=>xGremlins()},
+  xtermites:{label:"Termites", alias:"XTERMITE",
+    svg:'<path d="M3 14h14"/><circle cx="7" cy="10" r="2"/><circle cx="11" cy="10" r="2"/><path d="M5 8L3 6M13 8l2-2M7 12l-2 3M11 12l2 3"/>',
+    run:()=>xTermites()},
   xmagnet:{label:"Magnet", alias:"XMAG",
     svg:'<path d="M5.4 16.4V9a4.6 4.6 0 019.2 0v7.4"/><path d="M3 16.4h4.8M12.2 16.4H17"/><path d="M5.4 12.4h2.4M12.2 12.4h2.4"/>',
     run:()=>xMagnet()},
@@ -6900,6 +7671,12 @@ Object.assign(ACTIONS,{
   xwrap:{label:"Shrink Wrap", alias:"XWRAP",
     svg:'<path d="M10 2.6l6.6 4.2-2.4 8.6H5.8L3.4 6.8z"/><circle cx="8.4" cy="9.4" r="1.4"/><circle cx="12.4" cy="11" r="1.4"/>',
     run:()=>xShrinkWrap()},
+  xblender:{label:"Blender", alias:"XBLEND",
+    svg:'<path d="M6 3h8l-1 4H7z"/><path d="M7 7l1 8h4l1-8"/><path d="M8 17h4"/><path d="M9 9l2 4M11 9l-2 4"/>',
+    run:()=>xBlender()},
+  xconfetti:{label:"Confetti Cannon", alias:"XCONFETTI",
+    svg:'<path d="M3 15l5-5 3 3-5 5z"/><path d="M10 7l1-3M13 8l3-2M12 11l4 1M7 6L6 3"/>',
+    run:()=>xConfettiCannon()},
   xtimelapse:{label:"Time-lapse", alias:"XLAPSE",
     svg:'<circle cx="10" cy="10" r="7.4"/><path d="M10 5.6V10l3 2"/><path d="M2.8 6.4l2.6.6.6-2.6"/>',
     run:()=>xTimelapse()},
@@ -6910,8 +7687,8 @@ Object.assign(ACTIONS,{
     svg:'<path d="M2.6 7q3-2.4 6 0t6 0 2.8-1.2"/><path d="M2.6 12q3-2.4 6 0t6 0 2.8-1.2"/><path d="M11.4 15.4l2.2 1.4-2.2 1.4"/>',
     run:()=>xCurrent()}
 });
-const XACTIONS=new Set(["xmagnet","xvacuum","xiron","xcentrifuge","xxray","xquake","xants",
-  "xgravity","xrepel","xspring","xwrap","xtimelapse","xspotlight","xcurrent"]);
+const XACTIONS=new Set(["xsurfer","xpac","xgremlins","xtermites","xmagnet","xvacuum","xiron","xcentrifuge","xxray","xquake","xants",
+  "xgravity","xrepel","xspring","xwrap","xblender","xconfetti","xtimelapse","xspotlight","xcurrent"]);
 function xWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
   const mk=(label,title,get,set,step)=>{
@@ -6963,6 +7740,7 @@ function xSetExperimental(on){
   try{ localStorage.setItem("b2db.experimental.v1", S.experimental?"1":"0"); }catch(_){}
   if(!S.experimental){
     xfxStop();
+    xCurrentLoopStop();
     S.x.xray=false; S.x.spotlight=false; S.x.current=false;
     if(ribbonTab==="Experimental Features") ribbonTab="Home";
     if(TOOLS[S.tool] && TOOLS[S.tool].experimental) setTool("select");
@@ -7053,12 +7831,13 @@ const RIBBON={
     {name:"Labs", custom:"xtoggle"}
   ],
   "Experimental Features":[
-    {name:"Cleanup",      big:"xmagnet",   small:["xvacuum","xiron","xcentrifuge","xlevel"]},
-    {name:"Diagnostics",  big:"xfloodfill",small:["xraintest","xxray","xsonar","xquake","xants","xbulldozer"]},
-    {name:"Layout",       big:"xrepel",    small:["xgravity","xspring","xwrap"]},
-    {name:"Presentation", big:"xstamp",    small:["xtimelapse","xspotlight","xcurrent"]},
-    {name:"Settings",     custom:"xsettings"},
-    {name:"Combat",       custom:"punch"}
+    {name:"Arcade",       big:"xsurfer",   small:["xpac","xgremlins","xtermites"]},
+    {name:"Mayhem",       big:"xblackhole",small:["xwreck","xlightning","xbulldozer","xblender","xconfetti","xquake"]},
+    {name:"Physics Toys", big:"xgravity",  small:["xrepel","xspring","xcentrifuge","xmagnet","xwrap"]},
+    {name:"Weird Stuff",  big:"xvacuum",   small:["xiron","xraintest","xsonar","xants","xstamp","xcurrent"]},
+    {name:"Back Room",    big:"xfloodfill",small:["xxray","xlevel","xtimelapse","xspotlight"]},
+    {name:"Combat",       custom:"punch"},
+    {name:"Settings",     custom:"xsettings"}
   ]
 };
 let ribbonTab="Home";
