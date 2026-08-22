@@ -250,6 +250,19 @@
   .licon{width:16px;text-align:center;color:var(--ink-faint);font-size:10px;background:none;border:none;border-radius:2px;cursor:pointer;font-family:var(--ui)}
   .licon:hover{color:var(--ink);background:var(--raised)}.licon.on{color:var(--pen-strong)}.layer.hidden .lname{color:#68717d;text-decoration:line-through}
 
+  #mklist{overflow-y:auto;flex:0 1 auto;max-height:30%;background:#20252b}
+  #app.manage-active #mklist{max-height:none;overflow:auto;min-height:0}
+  .mkfilter{display:flex;gap:4px;padding:4px 7px;border-bottom:1px solid #292f36;background:#1c2127}
+  .mkfilter select,.mkfilter input{flex:1;min-width:0;background:#191e24;border:1px solid var(--rule);border-radius:3px;color:var(--ink);font:inherit;font-size:10px;padding:1px 3px;height:19px}
+  .mkfilter select:focus,.mkfilter input:focus{outline:1px solid var(--pen);outline-offset:-1px;border-color:var(--pen)}
+  .mkrowx{display:flex;align-items:center;gap:5px;padding:4px 7px;cursor:pointer;border-bottom:1px solid #292f36;background:#20252b}
+  .mkrowx:hover{background:#292f37}
+  .mkrowx.sel{background:#26394a;box-shadow:inset 2px 0 0 var(--pen)}
+  .mkrowx .mkname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:#c1c8d1}
+  .mkrowx.sel .mkname{color:#e5f2ff;font-weight:600}
+  .mkrowx .mkmeta{font-size:9.5px;color:#68717d;flex:0 0 auto}
+  .mkdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;border:1px solid #69737f}
+  .mkempty{padding:8px 7px;font-size:10px;color:#68717d}
   #props{flex:1;overflow-y:auto;padding:0 0 8px;background:#20252b}
   .row{display:grid;grid-template-columns:82px minmax(0,1fr);align-items:center;gap:0;padding:0;font-size:10.5px;border-bottom:1px solid #2a3037;min-height:25px}
   .row label{color:#7f8996;padding:5px 7px;font-size:9.8px;text-transform:none;border-right:1px solid #2d343c;height:100%;display:flex;align-items:center}
@@ -478,6 +491,8 @@
     <div id="layers"></div>
     <div class="sect-head"><span>Line Styles</span><button id="btn-addstyle" title="Add line style&#10;&#10;Creates a new weight, colour and dash combination for new geometry.">+</button></div>
     <div id="styles"></div>
+    <div class="sect-head"><span>Markups</span><button id="btn-mkzoom" title="Zoom to filtered&#10;&#10;Fit the view around every markup currently listed below.">⌖</button></div>
+    <div id="mklist"></div>
     <div class="sect-head"><span id="prop-title">Drawing</span></div>
     <div id="props"></div>
   </div>
@@ -545,6 +560,9 @@ const S = {
   /* Flood area measurement. Temporary like the rest of Measure: never an entity. */
   areaResult: null,
   areaUnit: "auto",
+  /* Review state overlay. On by default: a status you cannot see is a status
+     nobody sets. Never drawn into an export. */
+  mkStatusShow: true,
   groupSeq: 1,
   pending: [],        // picked points for the active tool
   base: null,         // move/copy base point
@@ -911,7 +929,7 @@ function applyBlob(t){
   if(d.gs) S.groupSeq=d.gs;
   if(d.es) entSeq=Math.max(entSeq, d.es|0);
   reseedEntSeq();
-  paintLayers(); paintStyles();
+  paintLayers(); paintStyles(); paintMarkupList();
 }
 function recBytes(r){
   if(r.k==="full") return r.blob.length;
@@ -1343,7 +1361,10 @@ const ACTIONS={
   group:{label:"Group", alias:"GRP", svg:'<rect x="3" y="4" width="8" height="8"/><rect x="9" y="8" width="8" height="8"/><path d="M6 15h-3v-3M14 5h3v3"/>', run:()=>groupSelection()},
   ungroup:{label:"Ungroup", alias:"UNGRP", svg:'<rect x="3" y="4" width="8" height="8"/><rect x="9" y="8" width="8" height="8"/><path d="M5 15l-3 3M15 5l3-3"/>', run:()=>ungroupSelection()},
   exportdxf:{label:"DXF", alias:"DXF", svg:'<path d="M10 2.5v9M6.5 8L10 11.5 13.5 8"/><path d="M3.5 13v4.5h13V13"/>', run:()=>exportDXF()},
-  exportsvg:{label:"SVG", alias:"SVG", svg:'<path d="M3 16.5l4.5-7 3 4 2.5-3.5 4 6.5z"/><circle cx="6" cy="5.5" r="1.6"/>', run:()=>exportSVG()}
+  exportsvg:{label:"SVG", alias:"SVG", svg:'<path d="M3 16.5l4.5-7 3 4 2.5-3.5 4 6.5z"/><circle cx="6" cy="5.5" r="1.6"/>', run:()=>exportSVG()},
+  exportmarkupcsv:{label:"Markup CSV", alias:"MCSV",
+    svg:'<path d="M4 2.8h8l4 4v10.4H4z"/><path d="M12 2.8v4h4"/><path d="M6.4 10.4h7.2M6.4 13.2h7.2M9.2 9v5.6"/>',
+    run:()=>exportMarkupCSV()}
 };
 const SELOPS=["move","copy","mirror","rotate","scale","array","explode"];
 // scale intentionally not pts:1 any more - see feed()/commit() for its own point-count logic
@@ -3629,6 +3650,98 @@ T("selIds / selectByIds survive a reorder", ()=>{
   } finally { S.ents=keepEnts; S.sel=keepSel; }
 });
 
+T("csvCell: quotes only when it has to", ()=>{
+  tEq(csvCell("plain"),"plain","plain");
+  tEq(csvCell("has,comma"),'"has,comma"',"comma");
+  tEq(csvCell('say "hi"'),'"say ""hi"""',"embedded quotes doubled");
+  tEq(csvCell(null),"","null");
+});
+T("csvCell: neutralises spreadsheet formula injection", ()=>{
+  tEq(csvCell("=1+1"),"'=1+1","equals");
+  tEq(csvCell("+SUM(A1)"),"'+SUM(A1)","plus");
+  tEq(csvCell("-3"),"'-3","minus");
+  tEq(csvCell("@cmd"),"'@cmd","at");
+  tEq(csvCell("a=1"),"a=1","only leading is dangerous");
+});
+T("csvCell: newlines collapse so a row stays a row", ()=>{
+  tEq(csvCell("one\ntwo"),"one two","newline");
+});
+T("csvRows: CRLF terminated, header first", ()=>{
+  tEq(csvRows([["a","b"],[1,2]]),"a,b\r\n1,2\r\n","two rows");
+});
+T("mkMeasureOf: closed rect reports area and perimeter", ()=>{
+  const e={t:"mshape",k:"rect",a:V(0,0),b:V(30,20),li:0,mk:{}};
+  const q=mkMeasureOf(e);
+  tNear(q.area,600,1e-6,"area");
+  tNear(q.len,100,1e-6,"perimeter");
+});
+T("mkMeasureOf: open ink has length but no area", ()=>{
+  const e={t:"ink",pts:[V(0,0),V(10,0),V(10,10)],closed:false,li:0,mk:{}};
+  const q=mkMeasureOf(e);
+  tNear(q.len,20,1e-6,"length");
+  tEq(q.area,null,"no area on an open path");
+});
+T("mkStatusOf: unknown and none read as no status", ()=>{
+  tEq(mkStatusOf({st:"open"}),"open","valid");
+  tEq(mkStatusOf({st:"none"}),null,"none");
+  tEq(mkStatusOf({st:"banana"}),null,"unknown");
+  tEq(mkStatusOf({}),null,"absent");
+});
+T("sanStatus: only the closed vocabulary survives a reload", ()=>{
+  tEq(sanStatus({st:"resolved"},{}).st,"resolved","valid kept");
+  tEq(sanStatus({st:"banana"},{}).st,undefined,"unknown dropped");
+  tEq(sanStatus({st:"none"},{}).st,undefined,"none not stored");
+  tEq(sanStatus({st:{}},{}).st,undefined,"non-string dropped");
+});
+
+T("mkListMatches: filters by type, status and text", ()=>{
+  const kEnts=S.ents, kSel=S.sel, kF=S.mkFilter;
+  try{
+    S.ents=[
+      {t:"ink",pts:[V(0,0),V(1,1)],li:0,mk:{col:"#f00"}},
+      {t:"mshape",k:"rect",a:V(0,0),b:V(5,5),li:0,mk:{},st:"open"},
+      {t:"mtext",p:V(2,2),s:"check the riser",h:2,li:0,mk:{},st:"resolved"},
+      {t:"line",a:V(0,0),b:V(9,9),li:0,si:0}
+    ];
+    S.sel=new Set();
+    S.mkFilter={type:"",status:"",text:""};
+    tEq(mkListMatches().length,3,"CAD line excluded");
+    S.mkFilter={type:"mtext",status:"",text:""};
+    tEq(mkListMatches().length,1,"type filter");
+    S.mkFilter={type:"",status:"open",text:""};
+    tEq(mkListMatches().length,1,"status filter");
+    S.mkFilter={type:"",status:"none",text:""};
+    tEq(mkListMatches().length,1,"unset status is filterable");
+    S.mkFilter={type:"",status:"",text:"RISER"};
+    tEq(mkListMatches().length,1,"text filter is case insensitive");
+    S.mkFilter={type:"",status:"",text:"nothingmatches"};
+    tEq(mkListMatches().length,0,"no match");
+  } finally { S.ents=kEnts; S.sel=kSel; S.mkFilter=kF; }
+});
+T("mkRowLabel: text is truncated, empties are named", ()=>{
+  tEq(mkRowLabel({t:"mtext",s:"short"}),"short","short text");
+  tEq(mkRowLabel({t:"mtext",s:"   "}),"(empty text)","whitespace only");
+  tTrue(mkRowLabel({t:"mtext",s:"x".repeat(80)}).length<=34,"truncated");
+  tEq(mkRowLabel({t:"mshape",k:"cloud"}),"Revision cloud","shape name");
+  tEq(mkRowLabel({t:"ink",closed:true}),"Freehand loop","closed ink");
+});
+T("mkSummaryRows: one row per markup, CAD excluded", ()=>{
+  const kEnts=S.ents;
+  try{
+    S.ents=[
+      {t:"mshape",k:"rect",a:V(0,0),b:V(30,20),li:0,mk:{col:"#ff0000",w:1,alpha:1},st:"open"},
+      {t:"line",a:V(0,0),b:V(1,1),li:0,si:0}
+    ];
+    const r=mkSummaryRows();
+    tEq(r.length,2,"header plus one row");
+    tEq(r[0][0],"#","header first cell");
+    const areaCol=r[0].indexOf("Area mm2");
+    tEq(r[1][areaCol],fmt(600),"area reported");
+    const stCol=r[0].indexOf("Status");
+    tEq(r[1][stCol],"Open","status reported");
+  } finally { S.ents=kEnts; }
+});
+
 function runSelfTest(){
   const fails=[];
   let ran=0;
@@ -3735,8 +3848,31 @@ Object.assign(ACTIONS,{
     run:()=>mkToggleLayer()},
   mkclear:{label:"Clear Markup", alias:"MCLR",
     svg:'<rect x="5" y="6" width="10" height="11" rx="1"/><path d="M3.5 6h13M8 3.2h4M8.6 9v5M11.4 9v5"/>',
-    run:()=>mkClearAll()}
+    run:()=>mkClearAll()},
+  mkstatus:{label:"Set Status", alias:"MST",
+    svg:'<circle cx="10" cy="10" r="6.4"/><path d="M7.3 10.2l1.9 1.9 3.5-3.9"/>',
+    run:()=>mkAskStatus()},
+  mkstatusshow:{label:"Status Dots", alias:"MSTD",
+    svg:'<circle cx="6" cy="6.4" r="2.2"/><circle cx="6" cy="13.6" r="2.2"/><path d="M10.4 6.4H17M10.4 13.6H17"/>',
+    run:()=>{ S.mkStatusShow=!S.mkStatusShow; draw();
+      echo(S.mkStatusShow?"Status dots shown":"Status dots hidden"); }}
 });
+/* Prompted because there are six statuses and a ribbon button each would cost
+   more space than the feature is worth. Applies to the markup in the current
+   selection, or to every markup entity if nothing is selected. */
+function mkAskStatus(){
+  const sel=[...S.sel].map(i=>S.ents[i]).filter(mkIsEnt);
+  const list=sel.length? sel : S.ents.filter(mkIsEnt);
+  if(!list.length) return echo("No markup to set a status on","warn");
+  const keys=MK_STATUS.map(r=>r[0]).join(" / ");
+  requestString("Status ("+keys+")", sel.length? (mkStatusOf(sel[0])||"open") : "open", v=>{
+    const k=String(v||"").trim().toLowerCase();
+    if(!MK_STATUS_SET.has(k)) return echo("Unknown status. One of: "+keys,"warn");
+    const n=mkSetStatus(list,k);
+    echo(n+" markup "+(n===1?"entity":"entities")+" set to "+mkStatusLabel(k)
+        +(sel.length?"":" (whole drawing - nothing was selected)"));
+  });
+}
 
 /* ---- markup state ---------------------------------------------------- */
 S.mk={
@@ -3762,6 +3898,32 @@ let mkDraw=null;      // live stroke: {tool,kind,ent,...}
 /* ---- helpers --------------------------------------------------------- */
 function mkIsTool(t){ return !!MK_TOOLS[t]; }
 function mkIsEnt(e){ return !!e && (e.t==="ink"||e.t==="mshape"||e.t==="mtext"); }
+
+/* ---- markup status ------------------------------------------------------
+   A review state carried on the markup itself rather than in a side list, so
+   it survives save, copy, undo and export with no extra plumbing. The set is
+   fixed: a free-text status is a filter you cannot rely on. "none" is stored
+   as absent so untouched drawings gain no bytes.                            */
+const MK_STATUS=[
+  ["none",    "No status", null],
+  ["open",    "Open",      "#ff9f43"],
+  ["resolved","Resolved",  "#4fd1a5"],
+  ["rejected","Rejected",  "#ff5b5b"],
+  ["info",    "For info",  "#7fc4ff"],
+  ["action",  "Action",    "#c48cff"]
+];
+const MK_STATUS_SET=new Set(MK_STATUS.map(r=>r[0]));
+const mkStatusOf=e=>(e&&MK_STATUS_SET.has(e.st)&&e.st!=="none")? e.st : null;
+function mkStatusLabel(k){ const r=MK_STATUS.find(x=>x[0]===k); return r? r[1] : "No status"; }
+function mkStatusColor(k){ const r=MK_STATUS.find(x=>x[0]===k); return r? r[2] : null; }
+function mkSetStatus(list,k){
+  const ents=(list||[]).filter(mkIsEnt);
+  if(!ents.length) return 0;
+  snapEntList(ents,"status");
+  for(const e of ents){ if(k&&k!=="none") e.st=k; else delete e.st; }
+  draw(); updateProps();
+  return ents.length;
+}
 function mkPen(t){
   if(!S.mk.per[t]) S.mk.per[t]={size:3, alpha:1};
   return S.mk.per[t];
@@ -4016,6 +4178,24 @@ function mkPaintEnt(e){
     mkHead(e.b,e.a,e);
     if(e.k==="darrow") mkHead(e.a,e.b,e);
   }
+  ctx.restore();
+  mkPaintStatus(e);
+}
+/* A status dot at the markup's top-right corner. Deliberately drawn in screen
+   space at a fixed size: it is a review marker, not part of the annotation, so
+   it should stay legible at any zoom and must never scale into the drawing.
+   Suppressed during export for the same reason grips are. */
+function mkPaintStatus(e){
+  if(S.exporting || !S.mkStatusShow) return;
+  const k=mkStatusOf(e); if(!k) return;
+  const col=mkStatusColor(k); if(!col) return;
+  const b=entBox(e); if(!b||!isFinite(b.x0)) return;
+  const r=4.5, x=X(b.x1)+r+2, y=Y(b.y1)-r-2;
+  ctx.save();
+  ctx.globalAlpha=1; ctx.globalCompositeOperation="source-over";
+  ctx.beginPath(); ctx.arc(x,y,r,0,TAU);
+  ctx.fillStyle=col; ctx.fill();
+  ctx.lineWidth=1.25; ctx.strokeStyle="rgba(16,18,22,.85)"; ctx.stroke();
   ctx.restore();
 }
 function mkPaintSelection(e){
@@ -4367,8 +4547,100 @@ function mkPropRows(e,H){
     if(e.tw) rows.push(H.num("Box width", e.tw, v=>{snap();e.tw=Math.max(px(40),v);}));
     if(e.lead) rows.push(H.info("Leader","Yes"));
   }
+  rows.push(H.choice("Status", mkStatusOf(e)||"none",
+    MK_STATUS.map(r=>[r[0],r[1]]),
+    v=>{ if(v&&v!=="none") e.st=v; else delete e.st; }));
   if(e.t==="ink") rows.push(H.info("Points", String(e.pts.length)));
   return rows;
+}
+
+/* ---- markup summary export ----------------------------------------------
+   The report Bluebeam charges Core tier for. Cheap here because annotations
+   are already a typed array rather than PDF annotation objects, so the whole
+   feature is a projection of S.ents.
+
+   Geometry is reported in millimetres, matching world units. Screen-relative
+   values (pen width) are converted back to px at the current zoom so the
+   number matches what the properties panel showed when it was drawn.        */
+function csvCell(v){
+  let t = v==null? "" : String(v);
+  t=t.replace(/\r?\n/g," ");
+  /* A leading =, +, - or @ makes Excel and Sheets treat the cell as a formula.
+     Prefixing a single quote is the standard neutralisation and survives a
+     round trip through both. */
+  if(/^[=+\-@]/.test(t)) t="'"+t;
+  return /[",]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t;
+}
+function csvRows(rows){ return rows.map(r=>r.map(csvCell).join(",")).join("\r\n")+"\r\n"; }
+/* The outline of a markup entity as a point list.
+   flatten() is no good here: entPoints("mshape") returns the two drag corners
+   because that is what grips need, so a rect would come back as a two-point
+   diagonal and measure zero area. Build the real outline instead. */
+function mkOutline(e){
+  if(!e) return [];
+  if(e.t==="ink") return Array.isArray(e.pts)? e.pts.slice() : [];
+  if(e.t!=="mshape") return [];
+  if(e.k==="rect"||e.k==="cloud") return mkRectPts(e.a,e.b);
+  if(e.k==="ellipse"){
+    const c=mul(add(e.a,e.b),.5);
+    return ellPts({c, rx:Math.abs(e.b.x-e.a.x)/2, ry:Math.abs(e.b.y-e.a.y)/2, rot:0, a0:0, sw:TAU});
+  }
+  return [e.a,e.b];
+}
+function polyArea(P){
+  if(!P||P.length<3) return null;
+  let a2=0;
+  for(let i=0;i<P.length;i++){ const q=P[i], r=P[(i+1)%P.length]; a2+=q.x*r.y-r.x*q.y; }
+  return Math.abs(a2)/2;
+}
+function polyLength(P,closed){
+  if(!P||P.length<2) return null;
+  let L=0;
+  for(let i=0;i<P.length-1;i++) L+=dist(P[i],P[i+1]);
+  if(closed&&P.length>2) L+=dist(P[P.length-1],P[0]);
+  return L;
+}
+/* Length along an entity, and enclosed area when it is a closed shape.
+   Returns nulls rather than zeros so an empty cell means "not applicable"
+   instead of "measured zero". */
+function mkMeasureOf(e){
+  const P=mkOutline(e), closed=mkClosed(e);
+  return { len: polyLength(P,closed), area: closed? polyArea(P) : null };
+}
+const MK_KIND_LABEL={ink:"Freehand", mshape:"Shape", mtext:"Text"};
+function mkSummaryRows(){
+  const head=["#","Type","Kind","Layer","Status","Colour","Width px","Opacity %",
+              "Text","X mm","Y mm","Length mm","Area mm2","Points"];
+  const rows=[head];
+  let n=0;
+  S.ents.forEach(e=>{
+    if(!mkIsEnt(e)) return;
+    const L=S.layers[e.li], m=e.mk||{}, b=entBox(e);
+    const q=mkMeasureOf(e);
+    rows.push([
+      ++n,
+      MK_KIND_LABEL[e.t]||e.t,
+      e.t==="mshape"? (e.k||"") : (e.t==="mtext"? (e.kind||"text") : (e.closed?"closed":"open")),
+      L? L.name : "",
+      mkStatusLabel(mkStatusOf(e)||"none"),
+      m.col||"",
+      m.w!=null? fmt(m.w*S.view.s) : "",
+      m.alpha!=null? Math.round(m.alpha*100) : 100,
+      e.t==="mtext"? String(e.s||"") : "",
+      (b&&isFinite(b.x0))? fmt((b.x0+b.x1)/2) : "",
+      (b&&isFinite(b.y0))? fmt((b.y0+b.y1)/2) : "",
+      q.len!=null? fmt(q.len) : "",
+      q.area!=null? fmt(q.area) : "",
+      Array.isArray(e.pts)? e.pts.length : ""
+    ]);
+  });
+  return rows;
+}
+function exportMarkupCSV(){
+  const rows=mkSummaryRows();
+  if(rows.length<2) return echo("No markup to summarise","warn");
+  download(csvRows(rows), "markup-summary.csv", "text/csv;charset=utf-8");
+  echo("Exported "+(rows.length-1)+" markup "+(rows.length===2?"entity":"entities")+" to CSV");
 }
 
 /* ---- export ---------------------------------------------------------- */
@@ -6502,6 +6774,12 @@ function sanEnd(v){
 }
 const NODE_KINDS=new Set(["proc","dec","term","data","note","lane"]);
 const SHAPE_KINDS=new Set(["line","arrow","darrow","rect","ellipse","cloud"]);
+/* Status is a closed vocabulary, so an unknown value from a file is dropped
+   rather than clamped to something that looks deliberate. */
+function sanStatus(src,out){
+  if(src && typeof src.st==="string" && MK_STATUS_SET.has(src.st) && src.st!=="none") out.st=src.st;
+  return out;
+}
 function sanEnt(e,nLayers,nStyles){
   if(!e || typeof e!=="object") return null;
   /* Both ends of the range: a negative index passed the old upper-bound-only
@@ -6529,14 +6807,14 @@ function sanEnt(e,nLayers,nStyles){
       off:safeNum(e.off,0), h:Math.abs(safeNum(e.h,2.5))||2.5}) : null; }
     case "ink": {
       const pts=sanPts(e.pts);
-      return pts.length? Object.assign(base,{t:"ink",pts,closed:!!e.closed,cloud:!!e.cloud,
-        bump:Math.abs(safeNum(e.bump,0)), mk:sanMk(e.mk)}) : null;
+      return pts.length? sanStatus(e,Object.assign(base,{t:"ink",pts,closed:!!e.closed,cloud:!!e.cloud,
+        bump:Math.abs(safeNum(e.bump,0)), mk:sanMk(e.mk)})) : null;
     }
     case "mshape": {
       const a=P("a"), b=P("b");
       if(!a||!b||!SHAPE_KINDS.has(e.k)) return null;
-      return Object.assign(base,{t:"mshape",k:e.k,a,b,
-        hl:Math.abs(safeNum(e.hl,0)), bump:Math.abs(safeNum(e.bump,0)), mk:sanMk(e.mk)});
+      return sanStatus(e,Object.assign(base,{t:"mshape",k:e.k,a,b,
+        hl:Math.abs(safeNum(e.hl,0)), bump:Math.abs(safeNum(e.bump,0)), mk:sanMk(e.mk)}));
     }
     case "mtext": {
       const p=P("p");
@@ -6553,7 +6831,7 @@ function sanEnt(e,nLayers,nStyles){
         mk:sanMk(e.mk)});
       const lead=P("lead"); o.lead=lead||null;
       if(e.boxCol!=null) o.boxCol=okColor(e.boxCol,null);
-      return o;
+      return sanStatus(e,o);
     }
     case "node": {
       const p=P("p");
@@ -9038,6 +9316,7 @@ const RIBBON={
     {name:"Shapes",   big:"mkarrow",  small:["mkline","mkdarrow","mkrect","mkellipse","mkcloud"]},
     {name:"Text",     big:"mktext",   small:["mkcallout","mksticky"]},
     {name:"Pen",      custom:"pen"},
+    {name:"Review",   big:"mkstatus", small:["mkstatusshow"]},
     {name:"Markup",   big:"mkselect", small:["mkpick","mkapply","mkshow","mkclear"]}
   ],
   Draw:[
@@ -9061,7 +9340,7 @@ const RIBBON={
     {name:"Drawing", big:"savedwg", small:["opendwg","newdwg","undo","redo","wipelocal"]},
     {name:"Reference", big:"refimage", small:["imgnext","imgmove","imgcal","imgstraight","imgcrop","imglock","imgtoggle","imgresetcrop","imgremove"]},
     {name:"Import", big:"opendxf", small:["openpdf"]},
-    {name:"Export", big:"exportpng", small:["copyimage","exportsvg","exportdxf"]},
+    {name:"Export", big:"exportpng", small:["copyimage","exportsvg","exportdxf","exportmarkupcsv"]},
     {name:"Image", custom:"png"}
   ],
   Manage:[
@@ -9198,6 +9477,8 @@ const HINTS={
   mkselect:"Select markup only, ignoring CAD geometry and flow nodes underneath.",
   mkshow:"Show or hide every markup entity at once, without touching layers.",
   mkclear:"Delete all markup in the drawing. Undoable.",
+  mkstatus:"Set a review status on the selected markup: open, resolved, rejected, for info or action. With nothing selected it applies to every markup in the drawing. The status rides on the markup itself, so it survives save, copy and undo, and it is a column in the markup summary export.",
+  mkstatusshow:"Show or hide the coloured status dots. They are drawn at a fixed screen size and never appear in an export, because they are a review marker rather than part of the annotation.",
   pen:"Colour, width, opacity and fill for the markup tools. Width is in screen pixels and converted to world units as you draw.",
 
   /* --- Flow ------------------------------------------------------------ */
@@ -9243,6 +9524,7 @@ const HINTS={
   exportpng:"Export a raster image at the width, background, margin and grid set in the Image panel.",
   copyimage:"Copy the drawing to the system clipboard as an image, for pasting into an email or a ticket.",
   exportsvg:"Export scalable vector graphics. Visually faithful, not re-editable here.",
+  exportmarkupcsv:"Export every markup entity as a spreadsheet row: type, layer, status, colour, position, length and enclosed area. The report you hand to whoever has to action the redlines. Text cells starting with = or + are quoted so Excel treats them as text, not formulas.",
   exportdxf:"Export DXF R12 for widest compatibility. Splines and ellipses are flattened to polylines and markup styling is lost.",
   png:"Width, background, margin and grid options for PNG export and Copy Image.",
 
@@ -9805,6 +10087,129 @@ function paintOptbar(){
 }
 
 /* ============================================================ layers UI */
+/* ============================================================ markups list
+   A filtered view of the markup entities in S.ents. Bluebeam charges for this
+   at every tier; it is cheap here only because annotations are already a typed
+   array rather than PDF annotation objects, so the panel is a projection with
+   no parallel data structure to keep in sync.
+
+   Rows hold eids, not indices, so the list survives an undo, an erase or
+   anything else that reorders the array. Selection round-trips through
+   selectByIds for the same reason.                                          */
+S.mkFilter={ type:"", status:"", text:"" };
+function mkRowLabel(e){
+  if(e.t==="mtext"){
+    const t=String(e.s||"").replace(/\s+/g," ").trim();
+    return t? (t.length>34? t.slice(0,33)+"\u2026" : t) : "(empty text)";
+  }
+  if(e.t==="mshape") return (MK_SHAPE_LABEL[e.k]||e.k||"Shape");
+  return e.closed? "Freehand loop" : "Freehand";
+}
+const MK_SHAPE_LABEL={line:"Line",arrow:"Arrow",darrow:"Double arrow",
+  rect:"Rectangle",ellipse:"Ellipse",cloud:"Revision cloud"};
+function mkListMatches(){
+  const f=S.mkFilter, needle=(f.text||"").trim().toLowerCase();
+  const out=[];
+  S.ents.forEach((e,i)=>{
+    if(!mkIsEnt(e)) return;
+    if(f.type && e.t!==f.type) return;
+    if(f.status){
+      const k=mkStatusOf(e)||"none";
+      if(k!==f.status) return;
+    }
+    if(needle){
+      const L=S.layers[e.li];
+      const hay=(mkRowLabel(e)+" "+(L?L.name:"")+" "+(e.t==="mtext"?String(e.s||""):"")).toLowerCase();
+      if(hay.indexOf(needle)<0) return;
+    }
+    out.push(i);
+  });
+  return out;
+}
+/* The filter bar is built once and the rows are rebuilt on every repaint.
+   Rebuilding the whole panel on each keystroke would tear the search field out
+   of the DOM mid-word and drop focus, which is the classic way a filter box
+   ends up unusable. */
+function mkFilterBar(){
+  const bar=document.createElement("div"); bar.className="mkfilter"; bar.id="mkfilter";
+  const f=S.mkFilter;
+  const sel=(opts,val,set,title)=>{
+    const el=document.createElement("select"); el.title=title;
+    for(const [v,l] of opts){
+      const o=document.createElement("option"); o.value=v; o.textContent=l;
+      if(v===val) o.selected=true; el.append(o);
+    }
+    el.onchange=()=>{ set(el.value); paintMarkupRows(); };
+    return el;
+  };
+  bar.append(sel([["","All types"],["ink","Freehand"],["mshape","Shapes"],["mtext","Text"]],
+    f.type, v=>f.type=v, "Filter by markup type"));
+  bar.append(sel([["","Any status"]].concat(MK_STATUS.map(r=>[r[0],r[1]])),
+    f.status, v=>f.status=v, "Filter by review status"));
+  const q=document.createElement("input");
+  q.type="text"; q.placeholder="Find"; q.value=f.text; q.id="mkfind";
+  q.title="Filter by text content or layer name";
+  q.oninput=()=>{ f.text=q.value; paintMarkupRows(); };
+  bar.append(q);
+  return bar;
+}
+function paintMarkupRows(){
+  const host=document.getElementById("mkrows");
+  if(!host) return;
+  host.innerHTML="";
+  const idxs=mkListMatches();
+  if(!idxs.length){
+    const d=document.createElement("div"); d.className="mkempty";
+    d.textContent=S.ents.some(mkIsEnt)? "No markup matches this filter." : "No markup in this drawing yet.";
+    host.append(d); return;
+  }
+  for(const i of idxs){
+    const e=S.ents[i], L=S.layers[e.li];
+    const d=document.createElement("div");
+    d.className="mkrowx"+(S.sel.has(i)?" sel":"");
+    const dot=document.createElement("span"); dot.className="mkdot";
+    const stk=mkStatusOf(e);
+    dot.style.background=stk? mkStatusColor(stk) : ((e.mk&&e.mk.col)||"#69737f");
+    const nm=document.createElement("span"); nm.className="mkname"; nm.textContent=mkRowLabel(e);
+    const meta=document.createElement("span"); meta.className="mkmeta"; meta.textContent=L? L.name : "";
+    d.append(dot,nm,meta);
+    d.title=mkRowLabel(e)+"\n\n"+mkStatusLabel(stk||"none")
+      +(L?"  \u00B7  layer "+L.name:"")+"\n\nClick to select. Double-click to zoom to it.";
+    d.onclick=()=>{ selectEntities([e]); updateProps(); draw(); };
+    d.ondblclick=()=>{ selectEntities([e]); zoomToEntities([e]); updateProps(); };
+    host.append(d);
+  }
+}
+function paintMarkupList(){
+  const host=document.getElementById("mklist");
+  if(!host) return;
+  if(!document.getElementById("mkfilter")){
+    host.innerHTML="";
+    host.append(mkFilterBar());
+    const rows=document.createElement("div"); rows.id="mkrows";
+    host.append(rows);
+  }
+  paintMarkupRows();
+}
+/* Fit the view to a set of entities with a margin, reusing the same view
+   fields zoomExtents drives so the two cannot disagree. */
+function zoomToEntities(list){
+  const b=rgnBox(list||[]);
+  if(!b) return;
+  const w=Math.max(b.x1-b.x0,1e-6), h=Math.max(b.y1-b.y0,1e-6);
+  const vw=cv.width/(window.devicePixelRatio||1), vh=cv.height/(window.devicePixelRatio||1);
+  S.view.cx=(b.x0+b.x1)/2; S.view.cy=(b.y0+b.y1)/2;
+  S.view.s=Math.min(vw/(w*1.6), vh/(h*1.6));
+  if(!isFinite(S.view.s)||S.view.s<=0) S.view.s=1;
+  draw();
+}
+function mkZoomFiltered(){
+  const list=mkListMatches().map(i=>S.ents[i]);
+  if(!list.length) return echo("Nothing listed to zoom to","warn");
+  zoomToEntities(list);
+  echo("Zoomed to "+list.length+" markup "+(list.length===1?"entity":"entities"));
+}
+
 function paintLayers(){
   if(ribbonTab==="Draw") paintRibbon();
   const host=document.getElementById("layers"); host.innerHTML="";
@@ -9888,6 +10293,7 @@ document.getElementById("btn-addstyle").onclick=()=>{
 /* ============================================================ properties */
 function updateProps(){
   if(S.tool==="select") paintOptbar();
+  paintMarkupList();
   const host=document.getElementById("props"), title=document.getElementById("prop-title");
   host.innerHTML="";
   if(S.sel.size===1){
@@ -11107,6 +11513,7 @@ auditReferences();
 reseedEntSeq();
 applyToggleTitles();
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
+document.getElementById("btn-mkzoom").onclick=()=>mkZoomFiltered();
 setWorkspaceMode("whiteboard");
 resize(); readout();
 cmdin.value=""; cmdin.defaultValue="";

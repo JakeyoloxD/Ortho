@@ -3,7 +3,9 @@
 Written so a cold session can pick up mid-build without re-deriving anything.
 Read this, then `README.md`, then the file.
 
-**Build this document describes:** 11,132 lines / 548 KB.
+**Build this document describes:** 11,539 lines / 568 KB.
+**Phase 1 progress:** 1.1, 1.2, 1.3 landed. 1.4–1.7 outstanding.
+**Suite:** 27 tests, 142 hints, 0 audit problems.
 Line numbers drift; every anchor below is a function or constant name.
 
 ---
@@ -124,19 +126,19 @@ but it is the document a future session reads first.
 Greenlit. Each item is independently shippable; do them in any order, verify
 after each. None of these needs the open decisions resolved.
 
-### 1.1 Markup summary export (CSV)
+### 1.1 Markup summary export (CSV) — DONE
 Honours the previously chosen build order. `S.ents` → rows: type, layer, colour,
 text, position, area/length where applicable, status. Reuse the existing
 download helper. Emit CSV only for now; XML if asked.
 *Touches:* new action in `ACTIONS`, `HINTS` entry, `RIBBON` Insert › Export.
 
-### 1.2 Markup status field
+### 1.2 Markup status field — DONE
 A `status` string on markup entities plus a colour map. Bluebeam ships custom
 statuses at Core tier.
 *Touches:* `sanEnt` (accept and clamp the string), `mkPropRows`, paint routine
 for the status tint, `.b2db` round-trip is automatic once `sanEnt` allows it.
 
-### 1.3 Markups List panel
+### 1.3 Markups List panel — DONE
 Filterable table over `S.ents`. Cheap here and expensive for Bluebeam because
 your annotations are already a typed array. Filter by type, layer, colour,
 status; click a row to select and zoom.
