@@ -51,9 +51,9 @@
     --optbar-h:31px;
     --status-h:26px;
     --cmd-h:34px;
-    display:grid;grid-template-columns:1fr 238px;
+    display:grid;grid-template-columns:1fr;
     grid-template-rows:34px var(--ribbon-h) var(--optbar-h) minmax(0,1fr) var(--status-h) var(--cmd-h);
-    grid-template-areas:"top top" "ribbon ribbon" "optbar optbar" "canvas right" "status right" "cmd cmd";
+    grid-template-areas:"top" "ribbon" "optbar" "canvas" "status" "cmd";
     height:100%;background:var(--panel-2);
   }
 
@@ -170,10 +170,7 @@
 
   /* ---- canvas ---- */
   #stage{grid-area:canvas;position:relative;overflow:hidden;background:var(--ground);box-shadow:inset 0 0 0 1px rgba(255,255,255,.012)}
-  #stage::before{
-    content:"MODEL";position:absolute;left:9px;top:8px;z-index:2;pointer-events:none;color:#687381;font-size:9px;font-weight:600;
-    letter-spacing:.08em;background:rgba(25,28,33,.72);border:1px solid #303741;border-radius:3px;padding:3px 5px;
-  }
+  #app.whiteboard #stage{background:#ffffff;box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)}
   canvas{display:block;width:100%;height:100%;cursor:crosshair;font-family:var(--draft)}
   canvas.panning{cursor:grabbing}canvas.picking{cursor:default}
 
@@ -210,10 +207,27 @@
   .tg:focus-visible{outline:1px solid var(--pen);outline-offset:1px}
 
   /* ---- right properties palette ---- */
-  #right{
-    grid-area:right;background:#21262d;border-left:1px solid var(--rule);display:flex;flex-direction:column;overflow:hidden;
-    box-shadow:-6px 0 18px rgba(0,0,0,.06);
+  #right{display:none;background:#21262d;overflow:hidden;}
+  /* Manage is a ribbon workspace, but the original palette stays in its
+     original DOM home. We reveal and restyle that exact palette over the
+     ribbon instead of reparenting it. This preserves every existing handler. */
+  #app.manage-active #right{
+    display:grid!important;position:fixed;z-index:60;left:6px;right:6px;top:67px;height:156px;
+    grid-template-columns:minmax(210px,260px) minmax(230px,300px) minmax(360px,1fr);
+    grid-template-rows:24px minmax(0,1fr);
+    border:1px solid var(--rule);border-radius:5px;background:#20252b;box-shadow:var(--shadow);overflow:hidden;
   }
+  #app.manage-active #right>:nth-child(1){grid-column:1;grid-row:1}
+  #app.manage-active #right>:nth-child(2){grid-column:1;grid-row:2}
+  #app.manage-active #right>:nth-child(3){grid-column:2;grid-row:1}
+  #app.manage-active #right>:nth-child(4){grid-column:2;grid-row:2}
+  #app.manage-active #right>:nth-child(5){grid-column:3;grid-row:1}
+  #app.manage-active #right>:nth-child(6){grid-column:3;grid-row:2}
+  #app.manage-active #layers,#app.manage-active #styles,#app.manage-active #props{max-height:none;overflow:auto;min-height:0}
+  #app.manage-active #props{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));align-content:start}
+  #app.manage-active #props>.hint{grid-column:1/-1}
+  #app.manage-active .row{min-height:24px}
+  #app.manage-active .sect-head{padding:4px 7px}
   .sect-head{
     display:flex;align-items:center;justify-content:space-between;padding:6px 8px 5px;font-size:10.5px;font-weight:600;color:#cbd2dc;
     background:#272c33;border-top:1px solid rgba(255,255,255,.02);border-bottom:1px solid var(--rule-soft);
@@ -264,6 +278,7 @@
   }
   #inline-editor.flow-edit{background:rgba(245,248,252,.97);color:#16202b;border-color:#4f93ca;box-shadow:0 0 0 2px rgba(79,147,202,.18),0 8px 22px rgba(0,0,0,.3)}
   #inline-editor.markup-edit{background:rgba(25,30,36,.96);border-color:currentColor}
+  #app.whiteboard #inline-editor.markup-edit{background:rgba(255,255,255,.92);border:1px dashed rgba(70,80,90,.38);box-shadow:none}
   #echo.warn{color:var(--alert)}
 
   /* ---------------- touch and mobile mode ----------------
@@ -416,6 +431,7 @@
   @keyframes punch-fatal{
     0%{opacity:0; transform:scale(2.4)} 12%{opacity:1; transform:scale(1)}
     16%{transform:scale(1.06)} 20%{transform:scale(1)} 82%{opacity:1} 100%{opacity:0; transform:scale(1)} }
+  #app.mobile.manage-active #right{left:4px;right:4px;top:70px;height:180px;grid-template-columns:1fr 1fr 1.25fr;}
 </style>
 </head>
 <body>
@@ -423,7 +439,7 @@
 
   <div id="top">
     <div class="brand"><b>BackToTheDrawingBoard</b></div>
-    <span class="workspace-tag">Draft &middot; Markup &middot; Flow</span>
+    <span class="workspace-tag">Whiteboard &middot; Draw &middot; Flow</span>
     <div class="doc-tab"><span class="filename" id="fname">untitled.dxf &middot; units mm</span></div>
     <span class="spacer"></span>
     <span class="filename" id="counts"></span>
@@ -437,7 +453,7 @@
 
   <div id="optbar"></div>
 
-  <div id="stage">
+  <div id="stage" data-mode="WHITEBOARD">
     <canvas id="cv"></canvas>
     <textarea id="inline-editor" spellcheck="true" aria-label="Edit drawing text"></textarea>
     <div class="shell-resizer shell-resizer-top" id="resize-top" role="separator" aria-orientation="horizontal" aria-label="Resize ribbon" tabindex="0" title="Drag to resize ribbon · double-click to reset"></div>
@@ -509,8 +525,9 @@ const S = {
   tool: "select",
   punch: false,        // Test Your Might: click canvas objects to destroy them
   ortho: false,
-  gridShow: true,      // grid visibility, independent of grid snapping
-  gridSnap: true,
+  gridShow: false,     // whiteboard starts clean; drafting view enables the grid
+  gridSnap: false,
+  workspaceMode: "whiteboard",
   osnap: true,
   gridStep: 10,
   textHeight: 2.5,
@@ -764,7 +781,7 @@ function finishInlineTextEdit(commit=true){
   const T=textEdit, e=T.ent;
   if(commit){
     e.s=inlineEditor.value;
-    if(e.t==="node" && e.autoSize!==false) flowFit(e);
+    if(e.t==="node" && e.autoSize!==false) flowFitTight(e);
     if(T.emptyDeletes && !String(e.s||"").trim()){
       const i=textEntityIndex(e); if(i>=0) S.ents.splice(i,1);
     }
@@ -787,7 +804,7 @@ function startInlineTextEdit(ent,opt={}){
 }
 inlineEditor.addEventListener("input",()=>{
   if(!textEdit) return; const e=textEdit.ent; e.s=inlineEditor.value;
-  if(e.t==="node" && e.autoSize!==false) flowFit(e);
+  if(e.t==="node" && e.autoSize!==false) flowFitTight(e);
   draw(); positionInlineEditor();
 });
 inlineEditor.addEventListener("keydown",ev=>{
@@ -1877,6 +1894,9 @@ function draw(){
       +(autoStamp?(" \u00B7 "+autoStamp):"");
   }
   ctx.clearRect(0,0,W,H);
+  if(!S.exporting && S.workspaceMode==="whiteboard"){
+    ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,W,H);
+  }
   if(S.exporting && S.exporting.bg && S.exporting.bg!=="transparent"){
     ctx.fillStyle=S.exporting.bg; ctx.fillRect(0,0,W,H);
   }
@@ -1907,8 +1927,9 @@ function draw(){
       return;
     }
     const st = styleOf(e);
-    ctx.strokeStyle = selected ? getCSS("--pen") : hot ? getCSS("--snap")
-                    : aciColor(st? st.aci : L.aci);
+    const rawAci=st?st.aci:L.aci;
+    const baseCol=(S.workspaceMode==="whiteboard" && rawAci===7)?"#20252b":aciColor(rawAci);
+    ctx.strokeStyle = selected ? getCSS("--pen") : hot ? getCSS("--snap") : baseCol;
     ctx.fillStyle   = ctx.strokeStyle;
     ctx.lineWidth   = (selected||hot) ? 2 : (st? Math.max(1, st.w*MM) : 1.15);
     ctx.setLineDash(selected?[6,3]:hot?[3,3]:(st&&st.pat? st.pat.map(v=>v*MM) : []));
@@ -1949,7 +1970,7 @@ function styleOf(e){ return (e.si!=null && S.styles[e.si]) ? S.styles[e.si] : nu
 function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
 
 function drawGrid(){
-  if(!S.gridShow) return;
+  if(S.workspaceMode!=="drafting" || !S.gridShow) return;
   if(S.exporting && !S.exporting.grid) return;
   const g=gridPitch();
   const x0=wX(0), x1=wX(W), y0=wY(H), y1=wY(0);
@@ -2754,7 +2775,7 @@ function handleCommand(raw){
     case "experimental": case "labs": xSetExperimental(!S.experimental); return;
     case "restore": return offerRestore();
     case "clearautosave": return clearAutosave();
-    case "grid": case "gridshow": case "showgrid": return toggle("gridShow");
+    case "grid": case "gridshow": case "showgrid": return S.workspaceMode!=="drafting"?setWorkspaceMode("drafting"):toggle("gridShow");
     case "snap": case "gridsnap": return toggle("gridSnap");
     case "osnap": return toggle("osnap");
     case "all": S.sel=new Set(S.ents.map((_,i)=>i)); draw(); updateProps(); return echo(S.sel.size+" selected");
@@ -2784,7 +2805,10 @@ function toggle(k){
   draw();
 }
 document.getElementById("tg-ortho").onclick=()=>toggle("ortho");
-document.getElementById("tg-gridshow").onclick=()=>toggle("gridShow");
+document.getElementById("tg-gridshow").onclick=()=>{
+  if(S.workspaceMode!=="drafting") return setWorkspaceMode("drafting");
+  toggle("gridShow");
+};
 document.getElementById("tg-snap").onclick =()=>toggle("gridSnap");
 document.getElementById("tg-osnap").onclick=()=>toggle("osnap");
 document.getElementById("tg-edge").onclick =()=>toggle("edgeAssist");
@@ -2835,8 +2859,6 @@ const MK_TOOLS={
 
   mktext:{kind:"text", label:"Free Text", alias:"MTEXT", size:2,
     svg:'<path d="M3 5h14M10 5v11M6.5 16h7"/>'},
-  mktextbox:{kind:"textbox", label:"Text Box", alias:"MTBOX", size:2,
-    svg:'<rect x="2.6" y="3.6" width="14.8" height="12.8" rx="1.4"/><path d="M5.5 7h9M5.5 10h7M5.5 13h8"/>'},
   mkcallout:{kind:"callout", label:"Callout", alias:"CALL", size:2,
     svg:'<rect x="5.4" y="3.4" width="11.6" height="7.6" rx="1.4"/><path d="M8 11l-5 6"/><path d="M3 17l.3-3.2L6.5 14z"/><path d="M8 5.8h6M8 8.2h4"/>'},
   mksticky:{kind:"sticky", label:"Sticky Note", alias:"MSTICKY", size:2,
@@ -2872,7 +2894,7 @@ S.mk={
   fill:false,
   fillAlpha:0.18,
   textPx:15,
-  textBox:true,
+  textBox:false,
   textWidthPx:180,
   textBold:false, textItalic:false, textUnderline:false, textAlign:"left",
   textBg:"#ffffff", textBgAlpha:.88, textBorder:true,
@@ -3186,7 +3208,7 @@ function mkConstrain(a,p,shift,kind){
 }
 function mkPointerDown(e){
   const T=MK_TOOLS[S.tool], p=mkRaw();
-  if(T.kind==="pick"||T.kind==="apply"||T.kind==="text"||T.kind==="textbox"||T.kind==="callout"||T.kind==="sticky"){
+  if(T.kind==="pick"||T.kind==="apply"||T.kind==="text"||T.kind==="callout"||T.kind==="sticky"){
     mkDraw={tool:S.tool, kind:T.kind, a:p, b:p, moved:false};
     return;
   }
@@ -3237,7 +3259,7 @@ function mkPointerUp(e){
   }
   if(D.kind==="pick")  return mkPickStyle(D.a);
   if(D.kind==="apply") return mkApplyStyle(D.a);
-  if(D.kind==="text"||D.kind==="textbox"||D.kind==="callout"||D.kind==="sticky") return mkPlaceText(D);
+  if(D.kind==="text"||D.kind==="callout"||D.kind==="sticky") return mkPlaceText(D);
   if(D.kind==="ink"){
     let P=D.ent.pts;
     if(P.length<2){ draw(); return; }
@@ -3279,13 +3301,10 @@ function mkPlaceText(D){
   const T=MK_TOOLS[D.tool], h=S.mk.textPx/S.view.s;
   const isCall=T.kind==="callout" && D.moved;
   let p=isCall?D.b:D.a, lead=isCall?D.a:null, tw=null, kind=T.kind;
-  if(T.kind==="textbox"){
-    const x0=Math.min(D.a.x,D.b.x), x1=Math.max(D.a.x,D.b.x), y1=Math.max(D.a.y,D.b.y);
-    p=V(x0+px(6),y1-h*1.05); tw=Math.max(px(60),x1-x0);
-  } else if(T.kind==="sticky") tw=S.mk.textWidthPx/S.view.s;
+  if(T.kind==="sticky") tw=S.mk.textWidthPx/S.view.s;
   else if(isCall) tw=S.mk.textWidthPx/S.view.s;
   const ent={t:"mtext",li:markupLayer(),p,s:"",h,lead,tw,kind,
-    box:T.kind!=="text" ? true : S.mk.textBox, hl:S.mk.headPx/S.view.s,
+    box:T.kind!=="text", hl:S.mk.headPx/S.view.s,
     bold:S.mk.textBold,italic:S.mk.textItalic,underline:S.mk.textUnderline,align:S.mk.textAlign,
     bg:T.kind==="sticky"?"#ffe98a":S.mk.textBg,bgAlpha:S.mk.textBgAlpha,border:S.mk.textBorder,
     mk:mkNewStyle(D.tool)};
@@ -3853,8 +3872,8 @@ function flowFitTight(e){
   const fs=e.fs;
   if(!L.length){ e.w=Math.max(fs*4, S.flow.w/S.view.s*0.5); e.h=Math.max(fs*2.6, e.fs*3); return; }
   const widest=Math.max(...L.map(l=>flowTextW(l,fs)));
-  e.w=(widest+fs*1.6)/(e.k==="dec"?0.62:1);
-  e.h=(L.length*fs*1.32+fs*1.2)*(e.k==="dec"?1.8:1);
+  e.w=Math.max(fs*5,(widest+fs*1.6)/(e.k==="dec"?0.62:1));
+  e.h=Math.max(fs*3.2,(L.length*fs*1.32+fs*1.2)*(e.k==="dec"?1.8:1));
 }
 
 /* ---- painting -------------------------------------------------------- */
@@ -8101,7 +8120,7 @@ function xSetExperimental(on){
     xfxStop();
     xCurrentLoopStop();
     S.x.xray=false; S.x.spotlight=false; S.x.current=false;
-    if(ribbonTab==="Experimental Features") ribbonTab="Home";
+    if(ribbonTab==="Experimental Features") ribbonTab="Draw";
     if(TOOLS[S.tool] && TOOLS[S.tool].experimental) setTool("select");
   }
   paintRibbon(); paintOptbar(); draw();
@@ -8124,7 +8143,7 @@ window.addEventListener("keydown",e=>{
   }
   if(e.key==="F8"){ e.preventDefault(); return toggle("ortho"); }
   if(e.key==="F9"){ e.preventDefault(); return toggle("gridSnap"); }
-  if(e.key==="F7"){ e.preventDefault(); return toggle("gridShow"); }
+  if(e.key==="F7"){ e.preventDefault(); return S.workspaceMode!=="drafting"?setWorkspaceMode("drafting"):toggle("gridShow"); }
   if(e.key==="F3"){ e.preventDefault(); return toggle("osnap"); }
   if(e.key==="F4"){ e.preventDefault(); return toggle("weld"); }
   if(e.key==="F6"){ e.preventDefault(); return toggle("edgeAssist"); }
@@ -8155,7 +8174,14 @@ window.addEventListener("keydown",e=>{
 
 /* ============================================================ ribbon UI */
 const RIBBON={
-  Home:[
+  Markup:[
+    {name:"Freehand", big:"mkpencil", small:["mkmarker","mkhighlight","mklasso","mkerase"]},
+    {name:"Shapes",   big:"mkarrow",  small:["mkline","mkdarrow","mkrect","mkellipse","mkcloud"]},
+    {name:"Text",     big:"mktext",   small:["mkcallout","mksticky"]},
+    {name:"Pen",      custom:"pen"},
+    {name:"Markup",   big:"mkselect", small:["mkpick","mkapply","mkshow","mkclear"]}
+  ],
+  Draw:[
     {name:"Draw", big:"line",
       small:["pline","rect","circle","arc","ellipse","pellipse","polygon","arccenter","spline","pickLines"]},
     {name:"Modify", big:"move",
@@ -8164,13 +8190,6 @@ const RIBBON={
     {name:"Measure", big:"measurebetween", small:["measurealong"]},
     {name:"Line Style", custom:"style"},
     {name:"Layers", custom:"layers", small:["dellayer"]}
-  ],
-  Markup:[
-    {name:"Freehand", big:"mkpencil", small:["mkmarker","mkhighlight","mklasso","mkerase"]},
-    {name:"Shapes",   big:"mkarrow",  small:["mkline","mkdarrow","mkrect","mkellipse","mkcloud"]},
-    {name:"Text",     big:"mktext",   small:["mktextbox","mkcallout","mksticky"]},
-    {name:"Pen",      custom:"pen"},
-    {name:"Markup",   big:"mkselect", small:["mkpick","mkapply","mkshow","mkclear"]}
   ],
   Flow:[
     {name:"Nodes",   big:"fnproc", small:["fndec","fnterm","fndata","fnnote","fnlane"]},
@@ -8186,7 +8205,11 @@ const RIBBON={
     {name:"Export", big:"exportpng", small:["copyimage","exportsvg","exportdxf"]},
     {name:"Image", custom:"png"}
   ],
+  Manage:[
+    {name:"Layers · Line Styles · Properties", custom:"rightdock"}
+  ],
   View:[
+    {name:"Workspace", custom:"workspace"},
     {name:"Navigate", big:"zoomext", small:["mobileui"]},
     {name:"Drafting aids", custom:"toggles"},
     {name:"Snaps", custom:"snaps"},
@@ -8202,7 +8225,7 @@ const RIBBON={
     {name:"Settings",     custom:"xsettings"}
   ]
 };
-let ribbonTab="Home";
+let ribbonTab="Markup";
 function itemOf(id){ return TOOLS[id] || ACTIONS[id]; }
 
 /* All ribbon clicks go through one dispatcher. This is deliberately the only
@@ -8264,15 +8287,22 @@ function paintRibbon(){
     for(const name of want){
       const b=document.createElement("button");
       b.className="rtab"; b.textContent=name; b.setAttribute("role","tab");
-      b.onclick=()=>{ ribbonTab=name; paintRibbon(); };
+      b.onclick=()=>{
+        ribbonTab=name;
+        if(typeof appShell!=="undefined" && !appShell.classList.contains("ribbon-compact")){
+          appShell.style.setProperty("--ribbon-h", (name==="Manage" ? 205 : expandedRibbonHeight)+"px");
+        }
+        paintRibbon();
+      };
       tabs.append(b);
     }
   }
-  if(!want.includes(ribbonTab)) ribbonTab=want[0]||"Home";
+  if(!want.includes(ribbonTab)) ribbonTab=want[0]||"Markup";
   [...tabs.children].forEach(b=>b.setAttribute("aria-selected",String(b.textContent===ribbonTab)));
 
   const host=document.getElementById("rpanels");
   host.innerHTML="";
+  document.getElementById("app").classList.toggle("manage-active", ribbonTab==="Manage");
   for(const P of RIBBON[ribbonTab]){
     const panel=document.createElement("div"); panel.className="rpanel";
     const body=document.createElement("div"); body.className="rpanel-body";
@@ -8294,12 +8324,21 @@ function paintRibbon(){
     if(P.custom==="toggles") body.append(toggleWidget());
     if(P.custom==="punch")   body.append(punchWidget());
     if(P.custom==="grid")    body.append(gridWidget());
+    if(P.custom==="workspace") body.append(workspaceWidget());
     if(P.custom==="pen")     body.append(penWidget());
     if(P.custom==="flow")    body.append(flowWidget());
     if(P.custom==="png")     body.append(pngWidget());
     if(P.custom==="snaps")   body.append(snapWidget());
     if(P.custom==="xtoggle") body.append(xExperimentalToggle());
     if(P.custom==="xsettings") body.append(xWidget());
+    if(P.custom==="rightdock"){
+      /* The live palette is overlaid into this ribbon region via CSS. */
+      const hint=document.createElement("div");
+      hint.className="hint";
+      hint.textContent="Layers · Line Styles · Properties";
+      body.append(hint);
+      updateProps(); paintLayers(); paintStyles();
+    }
     const lab=document.createElement("div"); lab.className="rpanel-label"; lab.textContent=P.name;
     panel.append(body,lab); host.append(panel);
   }
@@ -8493,6 +8532,28 @@ function punchAt(e){
   }
   draw();
 }
+function setWorkspaceMode(mode){
+  mode = mode==="drafting" ? "drafting" : "whiteboard";
+  S.workspaceMode=mode;
+  const app=document.getElementById("app"), stage=document.getElementById("stage");
+  if(app) app.classList.toggle("whiteboard", mode==="whiteboard");
+  if(stage) stage.dataset.mode=mode==="whiteboard" ? "WHITEBOARD" : "MODEL";
+  if(mode==="drafting"){ S.gridShow=true; S.gridSnap=true; }
+  else { S.gridShow=false; S.gridSnap=false; }
+  syncToggles(); paintRibbon(); draw();
+  echo(mode==="whiteboard" ? "Whiteboard workspace" : "Drafting workspace · grid on");
+}
+function workspaceWidget(){
+  const wrap=document.createElement("div"); wrap.className="rstack";
+  const b=document.createElement("button"); b.className="big"; b.type="button";
+  const drafting=S.workspaceMode==="drafting";
+  b.setAttribute("aria-pressed",String(drafting));
+  b.title=drafting?"Return to the clean whiteboard":"Switch to drafting view with grid and grid snap";
+  b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14M7 3v14M11 3v14M15 3v14M3 3h14M3 7h14M3 11h14M3 15h14"/></svg><span>'+(drafting?'Whiteboard':'Drafting View')+'</span>';
+  b.onclick=()=>setWorkspaceMode(drafting?"whiteboard":"drafting");
+  const l=document.createElement("div"); l.style.cssText="font-size:10px;color:var(--ink-faint);text-align:center";
+  l.textContent=drafting?"grid workspace on":"clean canvas"; wrap.append(b,l); return wrap;
+}
 function gridWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
   const i=document.createElement("input"); i.type="number"; i.step="any"; i.value=S.gridStep;
@@ -8628,7 +8689,7 @@ function paintOptbar(){
 
 /* ============================================================ layers UI */
 function paintLayers(){
-  if(ribbonTab==="Home") paintRibbon();
+  if(ribbonTab==="Draw") paintRibbon();
   const host=document.getElementById("layers"); host.innerHTML="";
   S.layers.forEach((L,i)=>{
     const d=document.createElement("div");
@@ -8674,7 +8735,7 @@ function nextPattern(p){
   return PAT_PRESETS[(idx+1+PAT_PRESETS.length)%PAT_PRESETS.length];
 }
 function paintStyles(){
-  if(ribbonTab==="Home") paintRibbon();
+  if(ribbonTab==="Draw") paintRibbon();
   const host=document.getElementById("styles"); host.innerHTML="";
   S.styles.forEach((st,i)=>{
     const d=document.createElement("div");
@@ -9849,6 +9910,7 @@ if(window.ResizeObserver) new ResizeObserver(resize).observe(document.getElement
 else window.addEventListener("resize",resize);
 auditRibbonButtons();
 paintRibbon(); paintLayers(); paintStyles(); paintOptbar(); updateProps(); setPrompt();
+setWorkspaceMode("whiteboard");
 resize(); readout();
 cmdin.value=""; cmdin.defaultValue="";
 cmdin.focus();
@@ -9858,7 +9920,7 @@ setDocName(S.docName);
      There is deliberately no visible ribbon control or help text advertising it. */
   S.experimental=false;
   try{ localStorage.removeItem("b2db.experimental.v1"); }catch(_){}
-  if(ribbonTab==="Experimental Features") ribbonTab="Home";
+  if(ribbonTab==="Experimental Features") ribbonTab="Draw";
   paintRibbon();
 })();
 (function initMobile(){
