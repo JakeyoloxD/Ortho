@@ -30,9 +30,22 @@
     --pen-soft:#263c50;
     --snap:#54c7c4;
     --alert:#ef8178;
+    /* Drawing-board surface is intentionally independent of Theme Forge.
+       Theme Forge skins the application chrome; the canvas remains a stable
+       physical work surface so drawings never change character with UI themes. */
+    --board:#e1dfd6;
+    --board-fibre:rgba(72,70,64,.018);
+    --board-edge:rgba(60,62,61,.055);
+    --paper-ink:#292b2c;
+    /* Keep the shell/theme grid tokens for Theme Forge compatibility. The
+       drawing-board grid below is deliberately stable across UI themes. */
     --grid-minor:#22272e;
     --grid-major:#2d343d;
     --axis:#46515e;
+    --board-grid-minor:#d2d0c7;
+    --board-grid-major:#bcbdb7;
+    --board-axis:#999c98;
+    --cross:#777b79;
     --ui:"Segoe UI Variable", "Segoe UI", Inter, Arial, sans-serif;
     --mono:"Cascadia Mono", Consolas, "Courier New", monospace;
     --draft:"Arial", "Segoe UI", sans-serif;
@@ -225,8 +238,15 @@
   #optbar .swatch{width:11px;height:11px;border-radius:2px;border:1px solid #59636f;flex:0 0 auto}
 
   /* ---- canvas ---- */
+  /* Drafting keeps the original dark CAD model space. Whiteboard alone uses
+     the warmer physical drawing-board surface. */
   #stage{grid-area:canvas;position:relative;overflow:hidden;background:var(--ground);box-shadow:inset 0 0 0 1px rgba(255,255,255,.012)}
-  #app.whiteboard #stage{background:#ffffff;box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)}
+  #app.whiteboard #stage{
+    /* Fallback only. The actual Whiteboard material is painted into the canvas
+       so references can sit beneath tracing paper. */
+    background:var(--board-stage,#e1dfd6);
+    box-shadow:inset 0 0 0 1px rgba(60,62,61,.055);
+  }
   canvas{display:block;width:100%;height:100%;cursor:crosshair;font-family:var(--draft)}
   canvas.panning{cursor:grabbing}canvas.picking{cursor:default}
 
@@ -692,6 +712,7 @@ const S = {
   gridShow: false,     // whiteboard starts clean; drafting view enables the grid
   gridSnap: false,
   workspaceMode: "whiteboard",
+  boardSurface: "board", // Whiteboard-only visual material; never changes CAD model space
   osnap: true,
   gridStep: 10,
   textHeight: 2.5,
@@ -2805,6 +2826,92 @@ function nudge(dx,dy,e){
   if(!w) echo("Nudge "+fmt(nudgeSum.x)+", "+fmt(nudgeSum.y)+"   step "+fmt(st));
 }
 
+/* ============================================================ whiteboard material
+   Deliberately independent from CAD model-space colours and Theme Forge.
+   The board is rendered inside the canvas so references can be below a
+   translucent sheet instead of merely sitting on top of a CSS background. */
+const BOARD_PRESETS={
+  board:{
+    label:"Drawing Board", base:"#dedbd0", sheet:"#ebe7dc", sheetAlpha:.34,
+    grain:.018, vignette:.026, ink:"#292b2c", stage:"#dedbd0",
+    hint:"Warm neutral architect's board. Subtle paper tooth, no sepia."
+  },
+  drafting:{
+    label:"Drafting Paper", base:"#dfe2df", sheet:"#edf0ec", sheetAlpha:.42,
+    grain:.013, vignette:.018, ink:"#25292a", stage:"#dfe2df",
+    hint:"Cool technical paper. Cleaner and slightly brighter than Drawing Board."
+  },
+  tracing:{
+    label:"Tracing Paper", base:"#c9ccc8", sheet:"#eef0e9", sheetAlpha:.66,
+    grain:.010, vignette:.014, ink:"#252829", stage:"#d9dcd7",
+    hint:"Translucent sheet over reference images. Best for tracing underlays."
+  },
+  white:{
+    label:"Clean White", base:"#ffffff", sheet:"#ffffff", sheetAlpha:0,
+    grain:0, vignette:0, ink:"#242628", stage:"#ffffff",
+    hint:"Original clean white canvas, retained as an explicit option."
+  }
+};
+let boardGrainTile=null, boardGrainKey="";
+function boardPreset(){ return BOARD_PRESETS[S.boardSurface]||BOARD_PRESETS.board; }
+function hexRGB(hex){
+  const m=/^#([0-9a-f]{6})$/i.exec(hex||""); if(!m) return [225,223,214];
+  const n=parseInt(m[1],16); return [(n>>16)&255,(n>>8)&255,n&255];
+}
+function boardGrain(p){
+  if(!p.grain) return null;
+  const key=p.label+":"+p.grain; if(boardGrainTile&&boardGrainKey===key) return boardGrainTile;
+  const c=document.createElement("canvas"), n=96; c.width=c.height=n;
+  const g=c.getContext("2d"), im=g.createImageData(n,n), d=im.data;
+  // deterministic xorshift. Bidirectional noise keeps the requested paper tone centred.
+  let x=0x6d2b79f5;
+  for(let i=0;i<n*n;i++){
+    x^=x<<13; x^=x>>>17; x^=x<<5;
+    const u=((x>>>0)/4294967295)*2-1;
+    const a=Math.round(Math.abs(u)*255*p.grain);
+    const v=u>0?255:0, j=i*4; d[j]=d[j+1]=d[j+2]=v; d[j+3]=a;
+  }
+  g.putImageData(im,0,0); boardGrainTile=c; boardGrainKey=key; return c;
+}
+function paintBoardBase(){
+  const p=boardPreset();
+  ctx.save(); ctx.fillStyle=p.base; ctx.fillRect(0,0,W,H);
+  // broad neutral illumination, not a visible radial "effect"
+  const gl=ctx.createLinearGradient(0,0,W,H);
+  gl.addColorStop(0,"rgba(255,255,255,.045)"); gl.addColorStop(.55,"rgba(255,255,255,0)");
+  gl.addColorStop(1,"rgba(35,38,36,.018)"); ctx.fillStyle=gl; ctx.fillRect(0,0,W,H);
+  ctx.restore();
+}
+function paintBoardSheet(){
+  const p=boardPreset(); if(!p.sheetAlpha) return;
+  ctx.save(); ctx.globalAlpha=p.sheetAlpha; ctx.fillStyle=p.sheet; ctx.fillRect(0,0,W,H); ctx.restore();
+}
+function paintBoardFinish(){
+  const p=boardPreset();
+  const tile=boardGrain(p);
+  if(tile){ ctx.save(); ctx.globalCompositeOperation="source-over"; ctx.globalAlpha=.72;
+    ctx.fillStyle=ctx.createPattern(tile,"repeat"); ctx.fillRect(0,0,W,H); ctx.restore(); }
+  if(p.vignette){
+    ctx.save(); const r=Math.max(W,H)*.72, g=ctx.createRadialGradient(W*.5,H*.47,r*.18,W*.5,H*.47,r);
+    g.addColorStop(0,"rgba(0,0,0,0)"); g.addColorStop(1,`rgba(28,30,28,${p.vignette})`);
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H); ctx.restore();
+  }
+}
+function syncBoardStage(){
+  const p=boardPreset(), stage=document.getElementById("stage");
+  if(stage) stage.style.setProperty("--board-stage",p.stage);
+}
+function setBoardSurface(id,quiet){
+  if(!BOARD_PRESETS[id]) id="board"; S.boardSurface=id; boardGrainTile=null; boardGrainKey="";
+  syncBoardStage();
+  try{ localStorage.setItem("b2db.boardSurface.v1",id); }catch(_){}
+  if(!quiet){ paintRibbon(); draw(); echo("Whiteboard surface: "+BOARD_PRESETS[id].label); }
+}
+function restoreBoardSurface(){
+  let id="board"; try{ id=localStorage.getItem("b2db.boardSurface.v1")||id; }catch(_){}
+  setBoardSurface(id,true);
+}
+
 /* ============================================================ render */
 function draw(){
   if(!S.exporting){
@@ -2815,13 +2922,20 @@ function draw(){
       +(autoStamp?(" \u00B7 "+autoStamp):"");
   }
   ctx.clearRect(0,0,W,H);
-  if(!S.exporting && S.workspaceMode==="whiteboard"){
-    ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,W,H);
+  const wb = S.workspaceMode==="whiteboard" && !S.exporting;
+  if(wb){
+    paintBoardBase();
+    /* References are literally beneath the sheet in Whiteboard. */
+    drawReferenceImage();
+    paintBoardSheet();
+    paintBoardFinish();
+  } else {
+    /* CAD/model-space and deterministic export backgrounds keep the old path. */
+    if(S.exporting && S.exporting.bg && S.exporting.bg!=="transparent"){
+      ctx.fillStyle=S.exporting.bg; ctx.fillRect(0,0,W,H);
+    }
+    drawReferenceImage();
   }
-  if(S.exporting && S.exporting.bg && S.exporting.bg!=="transparent"){
-    ctx.fillStyle=S.exporting.bg; ctx.fillRect(0,0,W,H);
-  }
-  drawReferenceImage();
   drawGrid();
   /* Lanes are the backdrop a diagram stands on, so they are painted before
      everything else regardless of the order they were drawn in. */
@@ -2849,7 +2963,10 @@ function draw(){
     }
     const st = styleOf(e);
     const rawAci=st?st.aci:L.aci;
-    const baseCol=(S.workspaceMode==="whiteboard" && rawAci===7)?"#20252b":aciColor(rawAci);
+    /* ACI 7 stays light in dark Drafting model space and becomes technical
+       charcoal only on the light Whiteboard surface. Export adapts to the
+       requested raster background without changing drawing data. */
+    const baseCol=adaptiveAciColor(rawAci);
     ctx.strokeStyle = selected ? getCSS("--pen") : hot ? getCSS("--snap") : baseCol;
     ctx.fillStyle   = ctx.strokeStyle;
     ctx.lineWidth   = (selected||hot) ? 2 : (st? Math.max(1, st.w*MM) : 1.15);
@@ -2892,6 +3009,17 @@ function paintReference(R){
 }
 function styleOf(e){ return (e.si!=null && S.styles[e.si]) ? S.styles[e.si] : null; }
 function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
+function adaptiveAciColor(i){
+  if(i!==7) return aciColor(i);
+  if(!S.exporting) return S.workspaceMode==="whiteboard" ? boardPreset().ink : aciColor(i);
+  const bg=String(S.exporting.bg||"").trim();
+  if(!bg || bg.toLowerCase()==="transparent") return aciColor(i);
+  const m=/^#([0-9a-f]{6})$/i.exec(bg);
+  if(!m) return "#292b2c";
+  const n=parseInt(m[1],16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  const lum=.2126*r+.7152*g+.0722*b;
+  return lum>150 ? "#292b2c" : aciColor(i);
+}
 
 function drawGrid(){
   if(S.workspaceMode!=="drafting" || !S.gridShow) return;
@@ -10713,6 +10841,7 @@ function setWorkspaceMode(mode){
   const app=document.getElementById("app"), stage=document.getElementById("stage");
   if(app) app.classList.toggle("whiteboard", mode==="whiteboard");
   if(stage) stage.dataset.mode=mode==="whiteboard" ? "WHITEBOARD" : "MODEL";
+  syncBoardStage();
   if(mode==="drafting"){ S.gridShow=true; S.gridSnap=true; }
   else { S.gridShow=false; S.gridSnap=false; }
   syncToggles(); paintRibbon(); draw();
@@ -10729,7 +10858,14 @@ function workspaceWidget(){
   b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14M7 3v14M11 3v14M15 3v14M3 3h14M3 7h14M3 11h14M3 15h14"/></svg><span>'+(drafting?'Whiteboard':'Drafting View')+'</span>';
   b.onclick=()=>setWorkspaceMode(drafting?"whiteboard":"drafting");
   const l=document.createElement("div"); l.style.cssText="font-size:10px;color:var(--ink-faint);text-align:center";
-  l.textContent=drafting?"grid workspace on":"clean canvas"; wrap.append(b,l); return wrap;
+  l.textContent=drafting?"grid workspace on":"clean canvas"; wrap.append(b,l);
+  if(!drafting){
+    const sel=document.createElement("select"); sel.style.cssText="width:118px;max-width:118px;height:21px;margin-top:2px";
+    sel.title="Whiteboard surface\n\nChanges only the Whiteboard material. Drafting/model space stays dark.";
+    for(const [id,p] of Object.entries(BOARD_PRESETS)){ const o=document.createElement("option"); o.value=id; o.textContent=p.label; o.selected=id===S.boardSurface; sel.append(o); }
+    sel.onchange=()=>setBoardSurface(sel.value); wrap.append(sel);
+  }
+  return wrap;
 }
 function gridWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
@@ -12371,6 +12507,7 @@ window.addEventListener("keydown",e=>{ if(e.key==="Escape" && flyout) closeRibbo
 
 restoreShellPrefs();
 themeRestore();
+restoreBoardSurface();
 
 /* DOM/ribbon integrity check. Runs after all tool registrations are complete. */
 function auditRibbonButtons(){
