@@ -415,6 +415,19 @@
   #app.whiteboard #inline-editor.markup-edit{background:rgba(255,255,255,.92);border:1px dashed rgba(70,80,90,.38);box-shadow:none}
   #echo.warn{color:var(--alert)}
 
+  /* ---- dynamic input: the typed value follows the cursor ------------- */
+  #dyninput{
+    position:absolute;z-index:56;display:none;pointer-events:none;
+    font-family:var(--mono);font-size:11px;line-height:1.15;white-space:nowrap;
+    padding:3px 6px;border-radius:3px;
+    background:rgba(18,22,27,.95);color:#eef5fb;
+    border:1px solid var(--pen);box-shadow:0 4px 14px rgba(0,0,0,.42);
+  }
+  #dyninput b{color:#ffd479;font-weight:600}
+  #dyninput.bad{border-color:var(--alert);color:#ffb3ad}
+  #app.whiteboard #dyninput{background:rgba(255,255,255,.96);color:#16202b;border-color:#4f93ca}
+  #app.whiteboard #dyninput b{color:#b3541e}
+
   /* ---------------- touch and mobile mode ----------------
      touch-action:none is the load-bearing line: without it the browser eats
      every drag as a page scroll and every pinch as a page zoom. */
@@ -432,6 +445,31 @@
   }
   #mact button[aria-pressed="true"]{background:var(--pen);color:#0b0e12;border-color:var(--pen)}
   #mact button:disabled{opacity:.32}
+  /* ---- mobile numeric entry ------------------------------------------ */
+  #mpad{
+    position:absolute;z-index:58;display:none;
+    left:50%;transform:translateX(-50%);bottom:8px;
+    grid-template-columns:repeat(4,56px);gap:5px;
+    padding:8px;border-radius:9px;
+    background:rgba(14,18,23,.96);border:1px solid var(--pen);
+    box-shadow:0 10px 30px rgba(0,0,0,.5);
+  }
+  #app.mobile #mpad.open{display:grid}
+  #mpad button{
+    height:42px;font-family:var(--mono);font-size:16px;
+    background:#1b2129;color:#eef5fb;border:1px solid #2c353f;border-radius:6px;
+  }
+  #mpad button:active{background:var(--pen);color:#0b0e12}
+  #mpad .wide{grid-column:span 2}
+  #mpad .val{
+    grid-column:span 4;height:30px;line-height:30px;padding:0 8px;
+    font-family:var(--mono);font-size:13px;color:#ffd479;
+    background:#0e1216;border:1px solid #2c353f;border-radius:5px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;
+  }
+  #app.whiteboard #mpad{background:rgba(250,251,253,.98);border-color:#4f93ca}
+  #app.whiteboard #mpad button{background:#eef2f7;color:#16202b;border-color:#c6d2de}
+  #app.whiteboard #mpad .val{background:#fff;color:#b3541e;border-color:#c6d2de}
   #msheet{
     position:absolute;left:0;right:0;bottom:0;z-index:40;height:64%;
     background:var(--panel-2);border-top:1px solid var(--rule);
@@ -638,6 +676,7 @@
   <div id="stage" data-mode="WHITEBOARD">
     <canvas id="cv"></canvas>
     <textarea id="inline-editor" spellcheck="true" aria-label="Edit drawing text"></textarea>
+    <div id="dyninput" aria-hidden="true"></div>
     <div class="shell-resizer shell-resizer-top" id="resize-top" role="separator" aria-orientation="horizontal" aria-label="Resize ribbon" tabindex="0" title="Drag to resize ribbon · double-click to reset"></div>
     <div class="shell-resizer shell-resizer-bottom" id="resize-bottom" role="separator" aria-orientation="horizontal" aria-label="Resize command and status area" tabindex="0" title="Drag to resize bottom controls · double-click to reset"></div>
   </div>
@@ -648,7 +687,7 @@
     <span class="toggles">
       <button class="tg" id="tg-ortho" aria-pressed="false" title="Ortho (F8)">Ortho</button>
       <button class="tg" id="tg-gridshow" aria-pressed="true" title="Grid (F7)">Grid</button>
-      <button class="tg" id="tg-snap" aria-pressed="true" title="Grid snap (F9)">Snap</button>
+      <button class="tg" id="tg-snap" aria-pressed="true" title="Grid lattice (F9)&#10;&#10;Quantises every pick onto a fixed lattice. Not the same as the Grid intersection object snap, which lets you hover a visible grid crossing without moving anything else.">Lattice</button>
       <button class="tg" id="tg-osnap" aria-pressed="true" title="Object snap (F3)">Osnap</button>
       <button class="tg" id="tg-edge" aria-pressed="true" title="Reference edge assist (F6)">Edge</button>
       <button class="tg" id="tg-weld" aria-pressed="true" title="Weld (F4)">Weld</button>
@@ -714,7 +753,13 @@ const S = {
   workspaceMode: "whiteboard",
   boardSurface: "board", // Whiteboard-only visual material; never changes CAD model space
   osnap: true,
+  typedPt: null,       // live point parsed from the command line while picking
   gridStep: 10,
+  /* AutoCAD keeps GRIDUNIT and SNAPUNIT apart, and SNAPUNIT is a fixed model
+     distance that never changes with zoom. gridStep drives the drawn grid,
+     which is allowed to subdivide on screen; snapStep drives where the cursor
+     is allowed to land, and it does not. */
+  snapStep: 10,
   textHeight: 2.5,
   refs: [],            // tracing underlays, back to front; see REFERENCES
   refActive: null,     // rid of the reference the image tools act on
@@ -1238,20 +1283,51 @@ function resolveSnap(w){
       const best=S.snapList[S.snapCycle];
       S.snapHit={p:best.p, kind:best.kind, label:best.label,
                  index:S.snapCycle, count:S.snapList.length};
+      snapTrackNote(S.snapHit);
       return best.p;
     }
     S.snapCycle=0;
-  } else S.snapList=[];
+    snapTrackNote(null);
+  } else { S.snapList=[]; snapTrackNote(null); }
   if(S.edgeAssist && S.refImage && S.refImage.visible){
     const ep=resolveImageEdgeSnap(w);
     if(ep){ S.snapHit={p:ep,kind:"edge"}; return ep; }
   }
   if(S.gridSnap){
-    const g=gridPitch();
+    const g=snapPitch();
     return V(Math.round(w.x/g)*g, Math.round(w.y/g)*g);
   }
   return w;
 }
+/* The lattice the cursor is quantised onto. Fixed in model space: the same
+   world position resolves to the same snap point at every zoom level, so a
+   point placed zoomed out is still on the lattice zoomed in. */
+function snapPitch(){
+  const g=safeNum(S.snapStep,0);
+  return (isFinite(g) && g>1e-9) ? g : Math.max(1e-9, S.gridStep);
+}
+/* Called on every resolve with the current hit, or null. A point that was the
+   hit and no longer is has just been left behind, which is the moment it
+   becomes a tracking reference. */
+function snapTrackNote(hit){
+  const prev=S.snapLastHit;
+  if(hit && SNAP_TRACK_KINDS.has(hit.kind)){
+    if(!prev || dist(prev.p,hit.p)>1e-9) S.snapLastHit={p:V(hit.p.x,hit.p.y), kind:hit.kind};
+    return;
+  }
+  if(prev){
+    S.snapLastHit=null;
+    snapAcquire(prev.p);
+  }
+}
+function snapAcquire(p){
+  if(!p||!isFinite(p.x)||!isFinite(p.y)) return;
+  const a=S.snapAcquired;
+  for(let i=0;i<a.length;i++) if(dist(a[i],p)<1e-9){ a.splice(i,1); break; }
+  a.unshift(V(p.x,p.y));
+  while(a.length>SNAP_TRACK_MAX) a.pop();
+}
+function snapTrackClear(){ S.snapAcquired=[]; S.snapLastHit=null; }
 function applyOrtho(p, from){
   if(!S.ortho||!from) return p;
   return Math.abs(p.x-from.x) >= Math.abs(p.y-from.y) ? V(p.x, from.y) : V(from.x, p.y);
@@ -1302,9 +1378,24 @@ function constrainEllipseCircle(p){
   const axis=norm(sub(a,c)), n=perp(axis), side=(sub(p,c).x*n.x+sub(p,c).y*n.y)<0?-1:1;
   return add(c,mul(n,rx*side));
 }
+/* The point a length or angle is measured FROM, wherever the app needs one.
+   Three sources, in the order they can be active: a grip being dragged, a
+   point already picked in the current tool, or the tool's base point. Having
+   one answer is what lets typed entry, dimension snaps, alignment inference
+   and the status readout all agree during a grip drag. */
+function pickBase(){
+  if(gripDrag) return gripDrag.anchor || null;
+  if(S.pending.length) return S.pending[S.pending.length-1];
+  return S.base || null;
+}
 function cursorPoint(){
+  /* A typed value outranks the pointer entirely. AutoCAD and Revit both treat
+     the keyboard as the authoritative input once you start typing: the mouse
+     is then only supplying a direction, which parsePoint asks for separately.
+     The guard stops the direction lookup recursing back in here. */
+  if(S.typedPt && !typedDirGuard) return S.typedPt;
   const raw=V(wX(S.mouse.sx), wY(S.mouse.sy));
-  const from=S.pending.length? S.pending[S.pending.length-1] : (S.base||null);
+  const from=pickBase();
   // Reference-image placement tools normally ignore drafting snaps. Calibration keeps
   // that isolation, but Shift is a temporary H/V constraint on the second point.
   if(S.tool==="imgcal") return constrainPoint(raw,from,activePointConstraint());
@@ -1317,12 +1408,19 @@ function cursorPoint(){
   let p=resolveSnap(raw);
   if(!S.snapHit){
     const mode=activePointConstraint();
+    /* Direction is settled first, length is rounded against it second. The
+       other way round lets Ortho project a rounded length straight back off
+       its increment: 20 at 8 degrees comes out as a 19.78 horizontal. This
+       also means a Shift constraint now gets dimension snaps like everything
+       else, instead of silently dropping them. */
     if(mode!=="none") p=constrainPoint(p,from,mode);
     else {
       p=alignmentSnap(p,from);
-      p=applyDimSnap(p,from);
       if(S.ortho && from) p=applyOrtho(p,from);
     }
+    p=applyDimSnap(p,from);
+    /* Last, and deliberately after the length rounding: holding Shift on an
+       ellipse means "exactly circular", and an increment must not spoil it. */
     p=constrainEllipseCircle(p);
   }
   return p;
@@ -1704,6 +1802,12 @@ function setTool(t){
     return;
   }
   const prev=S.tool; if(isMeasureTool(prev)&&prev!==t) clearMeasurement(false);
+  /* A live typed preview belongs to the pick that was in progress. Leaving it
+     set across a tool change freezes the new tool's cursor on a stale point.
+     A hot grip is the same: it must not survive into a different tool. */
+  typedClear(true);
+  snapTrackClear();
+  if(gripDrag) gripAbort();
   S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; S.alignGuide=null;
   S.placeTurns=0; S.pickCycleList=[]; S.pickCycle=-1; S.pickCycleAnchor=null; resetNudge();
   if(["imgmove","imgrotate","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
@@ -1768,6 +1872,13 @@ function requestString(label, initial, cb){
 function setPrompt(){
   syncAskClass();
   if(S.ask){ document.getElementById("prompt").textContent=S.ask.label+":"; return; }
+  /* A held grip owns the prompt: the tool is still Select, so without this the
+     status line would claim nothing is happening. */
+  if(gripDrag){
+    document.getElementById("prompt").textContent=
+      (gripDrag.anchor && gripDrag.anchor!==gripDrag.origin ? "New point or length" : "New point or distance")+":";
+    return;
+  }
   if(S.op && S.op.prompt){ document.getElementById("prompt").textContent=S.op.prompt+":"; return; }
   const T=TOOLS[S.tool];
   if(!T.prompts){ document.getElementById("prompt").textContent="Command:"; return; }
@@ -1776,6 +1887,7 @@ function setPrompt(){
   if((S.tool==="pline"||S.tool==="spline")&&S.pending.length) txt="Next point or Enter to finish:";
   if(S.tool==="line"&&S.chain&&S.pending.length) txt="Next point or Enter to finish chain:";
   if((S.tool==="move"||S.tool==="copy")) txt = (S.base?"Destination":"Base point")+":";
+  if(S.touchUI) setTimeout(updateActionBar,0);
   if(S.tool==="measurebetween") txt=(S.pending.length?(S.measureChain?"Select next reference or double-click to finish":"Select second reference"):"Select first reference")
     +(S.snapHit?("  \u00B7  "+(S.snapHit.label||SNAP_NAME[S.snapHit.kind]||"")):"")+":";
   if(S.tool==="measurealong") txt="Select element:";
@@ -1790,6 +1902,9 @@ function echo(m,cls){
 /* commit a picked point into the active tool */
 function feed(p){
   if(S.snapOverride){ S.snapOverride=null; paintOptbar(); }
+  typedClear(true);
+  /* Tracking references belong to the pick that just finished. */
+  snapTrackClear();
   snapCycleReset();
   if(XPICK[S.tool] && S.experimental){ xUiReact(S.tool,"hit",p); XPICK[S.tool](p); return; }
   const T=TOOLS[S.tool];
@@ -2042,6 +2157,14 @@ function finishChain(){
 }
 function cancel(){
   if(S.x&&S.x.surferPick){S.x.surferPick=false;cv.classList.remove("picking");}
+  /* One Esc abandons a half-typed value and leaves the tool where it was.
+     Only the next Esc backs the tool out, so a typo never costs you a point. */
+  if(S.typedPt || cmdin.value){
+    typedClear(); setPrompt(); echo("Typed entry cleared"); return;
+  }
+  /* A hot grip goes back exactly where it came from. The undo record was
+     already taken in gripBegin, so putting the point back is enough. */
+  if(gripDrag){ gripAbort(); return; }
   if(S.ask){ S.ask=null; setPrompt(); echo(""); return; }
   if(isMeasureTool(S.tool)){
     const active=S.pending.length||S.measureSegs.length||S.measureTotal>0||S.areaResult;
@@ -2306,12 +2429,24 @@ const RGN_UNITS={
   "cm2":{lab:"cm\u00B2", k:1e2},
   "m2" :{lab:"m\u00B2",  k:1e6}
 };
+/* Switchover points for Auto, in mm\u00B2. Drawing units are millimetres, so
+   1e4 mm\u00B2 is 100 cm\u00B2 and 1e5 mm\u00B2 is a tenth of a square metre.
+   The m\u00B2 switchover sits at 0.1 m\u00B2 rather than a full 1 m\u00B2 because a
+   drawn square metre floods a shade under 1e6 and would otherwise report as
+   9928 cm\u00B2: right at the boundary the raster error was choosing the unit. */
+const RGN_AUTO_CM2=1e4, RGN_AUTO_M2=1e5;
 function rgnAreaText(area,unit){
   const u=RGN_UNITS[unit||S.areaUnit];
   if(u) return fmt(area/u.k)+" "+u.lab;
-  if(area>=1e6) return fmt(area/1e6)+" m\u00B2";
-  if(area>=1e4) return fmt(area/1e4)+" cm\u00B2";
-  return fmt(area)+" mm\u00B2";
+  /* Auto used to carry its own divisors, and they drifted from the table:
+     cm\u00B2 divided by 1e4 instead of 1e2, so every automatic area came out a
+     hundred times too small. Deriving the divisor from RGN_UNITS is what stops
+     that happening again - there is now only one place the factors live. */
+  const a=Math.abs(area);
+  const pick = a>=RGN_AUTO_M2 ? RGN_UNITS.m2
+             : a>=RGN_AUTO_CM2 ? RGN_UNITS.cm2
+             : RGN_UNITS.mm2;
+  return fmt(area/pick.k)+" "+pick.lab;
 }
 /* Flood from a world point using the smallest window that contains the region.
    Returns {R,F,tries,full} - full=true means the window is the whole drawing,
@@ -2804,7 +2939,7 @@ const fmt = n => { const s=n.toFixed(4).replace(/\.?0+$/,""); return s==="-0"?"0
 let nudgeAt=0, nudgeSum=null;
 function resetNudge(){ nudgeAt=0; nudgeSum=null; }
 function nudgeStep(e){
-  let s = S.gridSnap ? gridPitch() : Math.max(1e-9, S.gridStep);
+  let s = S.gridSnap ? snapPitch() : Math.max(1e-9, S.gridStep);
   if(e.shiftKey) s*=10;
   if(e.ctrlKey||e.metaKey) s/=10;
   return s;
@@ -3047,6 +3182,29 @@ function drawGrid(){
   if(ax>0&&ax<W){ctx.moveTo(ax,0);ctx.lineTo(ax,H);}
   if(ay>0&&ay<H){ctx.moveTo(0,ay);ctx.lineTo(W,ay);}
   ctx.stroke();
+  drawSnapLattice(g);
+}
+/* The drawn grid adapts to the zoom; the snap lattice does not. When the two
+   disagree the cursor lands on intersections that are nowhere on screen, so
+   the lattice is dotted in wherever it is legible and different. */
+function drawSnapLattice(drawnPitch){
+  if(!S.gridSnap || S.exporting) return;
+  const g=snapPitch();
+  if(!(g>1e-9)) return;
+  if(Math.abs(g-drawnPitch) < 1e-9) return;      // already drawn as the grid
+  const sp=g*S.view.s;
+  if(sp < 7 || sp > 240) return;                 // unreadable, or so coarse it is noise
+  const x0=wX(0), x1=wX(W), y0=wY(H), y1=wY(0);
+  if((x1-x0)/g > 400 || (y1-y0)/g > 400) return; // never carpet the screen
+  ctx.save();
+  ctx.fillStyle=getCSS("--snap")||"#ffb02e";
+  ctx.globalAlpha=.55;
+  const r=sp>=18?1.6:1.1;
+  for(let x=Math.ceil(x0/g)*g; x<=x1; x+=g)
+    for(let y=Math.ceil(y0/g)*g; y<=y1; y+=g){
+      ctx.beginPath(); ctx.arc(Math.round(X(x))+.5, Math.round(Y(y))+.5, r, 0, TAU); ctx.fill();
+    }
+  ctx.restore();
 }
 function paintEnt(e){
   ctx.beginPath();
@@ -3397,7 +3555,23 @@ function drawBand(){
   ctx.fillRect(x,y,w,h); ctx.strokeRect(x,y,w,h);
   ctx.setLineDash([]);
 }
+/* Acquired references are invisible otherwise, and an invisible constraint is
+   indistinguishable from a bug. */
+function drawSnapTracking(){
+  if(!S.snapAcquired.length || !S.osnap || S.exporting) return;
+  ctx.save();
+  ctx.strokeStyle=getCSS("--snap"); ctx.lineWidth=1.2; ctx.globalAlpha=.75;
+  ctx.setLineDash([]);
+  for(const t of S.snapAcquired){
+    const x=Math.round(X(t.x))+.5, y=Math.round(Y(t.y))+.5, r=4;
+    ctx.beginPath();
+    ctx.moveTo(x-r,y); ctx.lineTo(x+r,y); ctx.moveTo(x,y-r); ctx.lineTo(x,y+r);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function drawAlignmentGuide(){
+  drawSnapTracking();
   const g=S.alignGuide; if(!g) return;
   ctx.save();
   ctx.strokeStyle=getCSS("--snap"); ctx.fillStyle=getCSS("--snap");
@@ -3429,6 +3603,26 @@ function drawAlignmentGuide(){
   }
 
   ctx.setLineDash([]);
+  if(g.kind==="polar" && g.a && g.dir){
+    /* Polar tracking is only legible if you can see the ray you locked onto
+       and read the angle off it. Rounding the number silently was the reason
+       the angle lock felt like drift rather than a constraint. */
+    ctx.setLineDash([7,5]); ctx.globalAlpha=.8; ctx.lineWidth=1;
+    infiniteRay(g.a,g.dir);
+    ctx.setLineDash([]);
+    if(g.at){
+      const sx=X(g.at.x), sy=Y(g.at.y);
+      const txt=(g.label||"")+"";
+      ctx.font='600 10px '+getCSS("--ui"); ctx.textAlign="left"; ctx.textBaseline="middle";
+      const wpx=ctx.measureText(txt).width;
+      ctx.globalAlpha=.92; ctx.fillStyle=getCSS("--panel")||"#12161b";
+      ctx.fillRect(sx+11,sy-19,wpx+8,14);
+      ctx.globalAlpha=1; ctx.strokeStyle=getCSS("--snap"); ctx.lineWidth=1;
+      ctx.strokeRect(sx+11.5,sy-18.5,wpx+7,13);
+      ctx.fillStyle=getCSS("--snap");
+      ctx.fillText(txt,sx+15,sy-12);
+    }
+  }
   if(g.src && (g.sourceKind==="mid" || g.sourceKind==="center")){
     const sx=X(g.src.x), sy=Y(g.src.y), r=5;
     ctx.lineWidth=1.5; ctx.beginPath();
@@ -3732,6 +3926,8 @@ cv.addEventListener("pointerdown",e=>{
   }
   if(mkIsTool(S.tool)){ mkPointerDown(e); return; }
   if(flowIsTool(S.tool)){ flowPointerDown(e); return; }
+  /* A hot grip from a previous click takes this one as its destination. */
+  if(gripDrag && gripDrag.sticky){ gripApplyPoint(cursorPoint()); return; }
   if(gripBegin(S.mouse.sx,S.mouse.sy)) return;
   downAt={sx:S.mouse.sx, sy:S.mouse.sy, w:cursorPoint(), shift:!!(e.shiftKey||S.stickyShift),
     selMode:selectionMode(!!(e.ctrlKey||e.metaKey),!!(e.shiftKey||S.stickyShift))};
@@ -3748,9 +3944,13 @@ window.addEventListener("pointermove",e=>{
     draw(); return;
   }
   if(mkDraw){ mkPointerMove(e); return; }
-  if(gripDrag){ gripMove(); return; }
+  if(gripDrag){
+    if(!gripDrag.sticky && Math.hypot(S.mouse.sx-gripDrag.downSx, S.mouse.sy-gripDrag.downSy)>4) gripDrag.moved=true;
+    gripMove(); return;
+  }
   if(flowResize){ flowApplyResize(cursorPoint()); readout(); draw(); return; }
   if(flowDraw){ flowPointerMove(e); return; }
+  if(dynBox && dynBox.style.display!=="none") typedPlace();
   if(downAt && !dragging && Math.hypot(S.mouse.sx-downAt.sx,S.mouse.sy-downAt.sy)>4) dragging=true;
   if(downAt && dragging && S.tool==="select"){
     S.band={a:downAt.w, b:V(wX(S.mouse.sx),wY(S.mouse.sy))};
@@ -3765,7 +3965,19 @@ window.addEventListener("pointerup",e=>{
   if(punchTap){ punchTap=false; punchAt(e); return; }
   if(panning){ panning=false; panFrom=null; cv.classList.remove("panning"); return; }
   if(mkDraw){ mkPointerUp(e); return; }
-  if(gripDrag){ gripEnd(); return; }
+  if(gripDrag){
+    /* Drag-and-release commits, as before. A click that never moved instead
+       leaves the grip hot, which is AutoCAD's model and the only way to type
+       a value without needing a third hand to hold the mouse button down. */
+    if(gripDrag.moved || gripDrag.sticky) gripEnd();
+    else {
+      gripDrag.sticky=true;
+      setPrompt();
+      echo("Grip held \u00B7 move and click to place, or type a length \u00B7 Esc to cancel");
+      draw();
+    }
+    return;
+  }
   if(flowResize){ flowResize=null; draw(); updateProps(); echo("Resized node"); return; }
   if(flowDraw){ flowPointerUp(e); return; }
   if(!downAt) return;
@@ -3844,12 +4056,21 @@ function readout(){
   const c=cursorPoint();
   document.getElementById("rx").textContent=c.x.toFixed(3);
   document.getElementById("ry").textContent=c.y.toFixed(3);
-  const from=S.pending.length?S.pending[S.pending.length-1]:S.base;
+  const from=pickBase();
   const ex=document.getElementById("rextra");
   if(from){
     const d=dist(from,c), a=wrap(ang(from,c));
-    ex.innerHTML="L <b>"+d.toFixed(3)+"</b>&nbsp;&nbsp;A <b>"+deg(a).toFixed(2)+"&deg;</b>";
-  } else ex.innerHTML="1:"+ (1/S.view.s).toFixed(3) + " &nbsp; grid "+gridPitch()+"mm";
+    let tail="";
+    /* Show the increment actually in force, not the whole list. Without this
+       the zoom-adaptive pick is invisible and feels like drift. */
+    if(S.dimSnap && !S.snapHit){
+      const li=dimSnapLenActive();
+      tail=" &nbsp; <span style=\"opacity:.7\">inc "+fmt(li)+
+           (S.dimSnapAngLock?"/"+fmt(dimSnapAngActive(Math.max(li,d)))+"°":"")+"</span>";
+    }
+    ex.innerHTML="L <b>"+d.toFixed(3)+"</b>&nbsp;&nbsp;A <b>"+deg(a).toFixed(2)+"&deg;</b>"+tail;
+  } else ex.innerHTML="1:"+ (1/S.view.s).toFixed(3) + " &nbsp; grid "+gridPitch()+"mm"+
+      (S.gridSnap?" &nbsp; snap "+fmt(snapPitch())+"mm":"");
 }
 
 /* ============================================================ zoom helpers */
@@ -3881,8 +4102,12 @@ cmdin.addEventListener("keydown",e=>{
   if(e.key!=="Enter") return;
   e.preventDefault();
   const raw=cmdin.value.trim(); cmdin.value="";
+  /* Drop the preview before dispatch: feed() re-reads cursorPoint() and would
+     otherwise be handed the point we are in the middle of committing. */
+  S.typedPt=null; if(dynBox) dynBox.style.display="none";
   if(S.ask){ const {cb}=S.ask; S.ask=null; cb(raw); setPrompt(); return; }
   if(!raw){
+    if(gripDrag){ gripApplyPoint(cursorPoint()); return; }
     if(S.tool==="measurebetween"&&S.measureChain) finishMeasureChain();
     else if(S.tool==="pline"||S.tool==="spline") finishPline();
     else if(S.tool==="line"&&S.chain) finishChain();
@@ -3892,7 +4117,7 @@ cmdin.addEventListener("keydown",e=>{
 });
 function parsePoint(str){
   const s=str.replace(/\s+/g,"");
-  const last=S.pending.length?S.pending[S.pending.length-1]:S.base;
+  const last=pickBase();
   /* [\d.]+ happily matches a lone "." and parseFloat(".") is NaN, so ".,."
      used to parse as a real point. Line survived on dist()>1e-9 being false
      for NaN, but Rect and Polygon built entities with NaN corners. Guarding
@@ -3913,11 +4138,86 @@ function parsePoint(str){
     if(!last) return null;
     const d=parseFloat(m[1]);
     if(!isFinite(d)) return null;
-    const dir=norm(sub(applyOrtho(V(wX(S.mouse.sx),wY(S.mouse.sy)),last),last));
+    /* Direct distance entry: you type the length, the cursor supplies the
+       direction. That direction should be the one you can see, so it runs
+       through the full snap pipeline (alignment lines, Ortho, angle lock)
+       rather than the bare pointer position. */
+    const dir=norm(sub(typedDirPoint(last),last));
     if(!isFinite(dir.x)||(dir.x===0&&dir.y===0)) return null;
     return ok(add(last,mul(dir,d)));
   }
   return null;
+}
+
+/* ---- dynamic input ------------------------------------------------------
+   The command line already understood x,y  @dx,dy  len<ang and a bare length.
+   What was missing was reach: you had to click into the box at the bottom of
+   the window, and nothing previewed until you pressed Enter. These three
+   pieces close that gap without a second parser. Typing anywhere on the
+   canvas routes here, the value previews live on the rubber band, and a
+   readout tracks the cursor. */
+let typedDirGuard=false;
+function typedDirPoint(last){
+  if(typedDirGuard) return applyOrtho(V(wX(S.mouse.sx),wY(S.mouse.sy)),last);
+  typedDirGuard=true;
+  try { return cursorPoint(); } finally { typedDirGuard=false; }
+}
+const dynBox=document.getElementById("dyninput");
+function typedClear(silent){
+  const had=!!S.typedPt || !!cmdin.value;
+  S.typedPt=null;
+  if(cmdin.value) cmdin.value="";
+  if(dynBox) dynBox.style.display="none";
+  if(had && !silent){ readout(); draw(); }
+}
+function typedIsPointish(str){ return /^[@\-.\d]/.test(str); }
+function typedRefresh(){
+  const raw=cmdin.value.trim();
+  const live = raw && !S.ask && snapPickActive() && typedIsPointish(raw);
+  S.typedPt = live ? parsePoint(raw) : null;
+  if(dynBox){
+    if(!live){ dynBox.style.display="none"; }
+    else {
+      const from=pickBase();
+      let label=raw;
+      if(S.typedPt && from){
+        const d=dist(from,S.typedPt), a=deg(wrap(ang(from,S.typedPt)));
+        label=raw+"  →  <b>"+fmt(d)+"</b> @ <b>"+a.toFixed(1)+"°</b>";
+      } else if(S.typedPt) label=raw+"  →  <b>"+fmt(S.typedPt.x)+", "+fmt(S.typedPt.y)+"</b>";
+      dynBox.innerHTML=label;
+      dynBox.className=S.typedPt?"":"bad";
+      dynBox.style.display="block";
+      typedPlace();
+    }
+  }
+  readout(); draw();
+}
+function typedPlace(){
+  if(!dynBox || dynBox.style.display==="none") return;
+  const stage=document.getElementById("stage"); if(!stage) return;
+  const sw=stage.clientWidth, sh=stage.clientHeight;
+  const bw=dynBox.offsetWidth||120, bh=dynBox.offsetHeight||20;
+  /* Below-right of the cursor, folded back inside the stage at the edges so
+     the value never falls off screen mid-entry. */
+  let x=S.mouse.sx+16, y=S.mouse.sy+18;
+  if(x+bw>sw-6) x=Math.max(6,S.mouse.sx-bw-16);
+  if(y+bh>sh-6) y=Math.max(6,S.mouse.sy-bh-14);
+  dynBox.style.left=x+"px"; dynBox.style.top=y+"px";
+}
+cmdin.addEventListener("input",typedRefresh);
+cmdin.addEventListener("blur",()=>{ if(dynBox) dynBox.style.display="none"; });
+/* Keys typed with the canvas focused are pushed into the command line rather
+   than swallowed, so precise entry never needs a trip to the mouse. */
+function typedCapture(e){
+  if(e.ctrlKey||e.metaKey||e.altKey) return false;
+  if(!snapPickActive()) return false;
+  if(!/^[0-9.@<,\-]$/.test(e.key)) return false;
+  if(!cmdin.value && !/^[0-9.@\-]$/.test(e.key)) return false;
+  e.preventDefault();
+  cmdin.focus();
+  cmdin.value+=e.key;
+  typedRefresh();
+  return true;
 }
 /* Object.create(null), not {}: a plain object inherits constructor, toString
    and friends, so ALIAS["constructor"] came back truthy and handleCommand
@@ -3958,6 +4258,9 @@ function handleCommand(raw){
     return echo("Reference rotated by "+s+"\u00B0");
   }
   const p=parsePoint(raw);
+  /* A held grip consumes the point before the tool table is consulted, since
+     the tool is Select and Select would otherwise throw the value away. */
+  if(p && gripDrag){ gripApplyPoint(p); readout(); return; }
   if(p && S.tool!=="select" && !TOOLS[S.tool].pick && !TOOLS[S.tool].markup && !TOOLS[S.tool].flow){ feed(p); readout(); return; }
   if(ALIAS[s]==="erase") return eraseSel();
   if(ALIAS[s]) return setTool(ALIAS[s]);
@@ -4108,6 +4411,26 @@ T("rgnAreaText: explicit unit does not auto-switch", ()=>{
   tEq(rgnAreaText(1e6,"m2"), fmt(1)+" m\u00B2", "1 m2");
   tEq(rgnAreaText(1e3,"m2"), fmt(0.001)+" m\u00B2", "small value stays in m2");
   tEq(rgnAreaText(1e6,"mm2"), fmt(1e6)+" mm\u00B2", "forced mm2");
+});
+T("rgnAreaText: Auto converts with the same factors as the explicit units", ()=>{
+  /* The bug this covers: a 1000x1000 box read 99.5474 cm\u00B2 instead of
+     9954.74, because Auto divided by 1e4 where the cm\u00B2 entry says 1e2.
+     Auto and explicit must agree on every value, whichever unit Auto lands on. */
+  const k={u:S.areaUnit};
+  try{
+    S.areaUnit="auto";
+    tEq(rgnAreaText(5e4),    rgnAreaText(5e4,"cm2"),   "Auto agrees with explicit cm2");
+    tEq(rgnAreaText(2500),   rgnAreaText(2500,"mm2"),   "Auto agrees with explicit mm2");
+    tEq(rgnAreaText(12e6),   rgnAreaText(12e6,"m2"),    "Auto agrees with explicit m2");
+    tEq(rgnAreaText(2500),   fmt(2500)+" mm\u00B2",     "small detail stays in mm2");
+    tEq(rgnAreaText(1e4),    fmt(100)+" cm\u00B2",      "at the cm2 switchover");
+    tEq(rgnAreaText(1e6),    fmt(1)+" m\u00B2",         "exactly one square metre");
+    tEq(rgnAreaText(0),      fmt(0)+" mm\u00B2",        "zero stays in mm2");
+    /* A drawn square metre floods a little under 1e6. Both of the readings
+       seen in practice must now land in m2 rather than four-figure cm2. */
+    tEq(rgnAreaText(995474),    fmt(0.9955)+" m\u00B2", "1m box, first raster");
+    tEq(rgnAreaText(992889.95), fmt(0.9929)+" m\u00B2", "1m box, coarser raster");
+  } finally { S.areaUnit=k.u; }
 });
 T("rgnSegs: a closed pline yields the closing segment", ()=>{
   const e={t:"pline", pts:[V(0,0),V(10,0),V(10,10),V(0,10)], closed:true, li:0, si:0};
@@ -4279,6 +4602,97 @@ T("crossVisible: touch keeps it while a finger is down, in either mode", ()=>{
   } finally { ptrs.clear(); S.workspaceMode=kW; S.touchUI=kT; }
 });
 
+T("dimSnapList: sorts coarse to fine, drops junk, keeps a fallback", ()=>{
+  tEq(dimSnapList([1,100,10],[5]).join(","), "100,10,1", "descending");
+  tEq(dimSnapList([10,10,1],[5]).join(","), "10,1", "duplicates collapse");
+  tEq(dimSnapList([0,-4,NaN,"x"],[5]).join(","), "5", "all junk falls back");
+  tEq(dimSnapList(null,[5,1]).join(","), "5,1", "non-array falls back");
+});
+T("dimSnapPick: smallest increment still legible on screen", ()=>{
+  const L=[100,10,1,0.1];
+  /* 8px threshold. At 1px per unit only 100 and 10 clear it, so 10 wins. */
+  tEq(dimSnapPick(L,1), 10, "mid zoom");
+  tEq(dimSnapPick(L,100), 0.1, "zoomed right in, finest is pickable");
+  tEq(dimSnapPick(L,0.001), 100, "zoomed right out, coarsest is all there is");
+});
+T("applyDimSnap: rounds length, leaves direction alone by default", ()=>{
+  const k={d:S.dimSnap, a:S.dimSnapAngLock, L:S.dimSnapLens, s:S.view.s};
+  try{
+    S.dimSnap=true; S.dimSnapAngLock=false; S.dimSnapLens=[10]; S.view.s=1;
+    const from=V(3,7);                       // deliberately off any lattice
+    const p=applyDimSnap(V(3+23,7),from);
+    tNear(p.x,23,1e-9,"length rounded to 20 from a non-round origin");
+    tNear(p.y,7,1e-9,"direction untouched");
+    const q=applyDimSnap(V(3+14.2,7+14.2),from);
+    tNear(dist(from,q),20,1e-9,"diagonal length rounds too");
+    tNear(ang(from,q),Math.PI/4,1e-9,"diagonal angle survives");
+  } finally { S.dimSnap=k.d; S.dimSnapAngLock=k.a; S.dimSnapLens=k.L; S.view.s=k.s; }
+});
+T("gridQuant: lands on the number the grid shows, without float dust", ()=>{
+  tEq(gridQuant(0.34,0.1), 0.3, "tenths");
+  tEq(gridQuant(1000.4,100), 1000, "hundreds");
+  tEq(gridQuant(-37,10), -40, "negatives round properly");
+  tEq(gridQuant(2.5,1), 3, "halves round up");
+});
+T("gridSnapPitch: steps up to the major grid when the minor is tighter than the aperture", ()=>{
+  const k={m:S.workspaceMode,g:S.gridShow,s:S.view.s,st:S.gridStep,t:S.touchUI};
+  try{
+    S.workspaceMode="drafting"; S.gridShow=true; S.gridStep=10; S.touchUI=false;
+    /* gridPitch keeps the drawn minor between 7 and 70 screen px. Wherever it
+       lands, the offered pitch must clear roughly twice the 11px aperture. */
+    for(const sc of [0.02,0.35,1,4,37,250]){
+      S.view.s=sc;
+      const g=gridSnapPitch();
+      tTrue(g>0, "something is always offered at scale "+sc);
+      tTrue(g*S.view.s >= px(tolPx(22))*S.view.s - 1e-9, "pitch clears the aperture at scale "+sc);
+      const minor=gridPitch();
+      tTrue(Math.abs(g-minor)<1e-9 || Math.abs(g-minor*10)<1e-9, "minor or major, nothing invented");
+    }
+    S.gridShow=false;   tEq(gridSnapPitch(),0,"no grid drawn, no grid snap");
+    S.gridShow=true; S.workspaceMode="whiteboard";
+    tEq(gridSnapPitch(),0,"whiteboard has no grid to snap to");
+  } finally { S.workspaceMode=k.m; S.gridShow=k.g; S.view.s=k.s; S.gridStep=k.st; S.touchUI=k.t; }
+});
+T("Grid intersection ranks under real geometry and over Nearest", ()=>{
+  tTrue(SNAP_RANK.grid < SNAP_RANK.end, "endpoint wins");
+  tTrue(SNAP_RANK.grid < SNAP_RANK.mid, "midpoint wins");
+  tTrue(SNAP_RANK.grid < SNAP_RANK.tan, "tangent wins");
+  tTrue(SNAP_RANK.grid > SNAP_RANK.near, "beats nearest");
+  tEq(SNAP_CODE.sw, "grid", "Revit's SW override reaches it");
+});
+T("Dimension snap goes free below one increment instead of clamping up", ()=>{
+  const k={d:S.dimSnap,a:S.dimSnapAngLock,L:S.dimSnapLens,s:S.view.s};
+  try{
+    S.dimSnap=true; S.dimSnapAngLock=false; S.dimSnapLens=[10]; S.view.s=1;
+    const from=V(0,0);
+    tNear(dist(from,applyDimSnap(V(4,0),from)),4,1e-9,"under half an increment stays put");
+    tNear(dist(from,applyDimSnap(V(6,0),from)),10,1e-9,"over half still rounds up");
+    tNear(dist(from,applyDimSnap(V(23,0),from)),20,1e-9,"normal case unaffected");
+  } finally { S.dimSnap=k.d; S.dimSnapAngLock=k.a; S.dimSnapLens=k.L; S.view.s=k.s; }
+});
+T("Ortho settles direction before the length is rounded", ()=>{
+  /* The other order projects a rounded length back off its increment, so
+     Ortho plus dimension snap produced 19.78 where 20 was asked for. */
+  const k={d:S.dimSnap,a:S.dimSnapAngLock,L:S.dimSnapLens,s:S.view.s,o:S.ortho};
+  try{
+    S.dimSnap=true; S.dimSnapAngLock=false; S.dimSnapLens=[10]; S.view.s=1; S.ortho=true;
+    const from=V(0,0);
+    let p=applyOrtho(V(20,3),from);      // direction first
+    p=applyDimSnap(p,from);              // then length
+    tNear(dist(from,p),20,1e-9,"ortho run keeps a whole increment");
+    tNear(p.y,0,1e-9,"and stays on the axis");
+  } finally { S.dimSnap=k.d; S.dimSnapAngLock=k.a; S.dimSnapLens=k.L; S.view.s=k.s; S.ortho=k.o; }
+});
+T("snapPitch: fixed in model space, ignores zoom", ()=>{
+  const k={s:S.snapStep, v:S.view.s};
+  try{
+    S.snapStep=25;
+    S.view.s=0.01; tEq(snapPitch(),25,"zoomed out");
+    S.view.s=400;  tEq(snapPitch(),25,"zoomed in");
+    S.snapStep=0;  tEq(snapPitch(),Math.max(1e-9,S.gridStep),"blank follows grid step");
+  } finally { S.snapStep=k.s; S.view.s=k.v; }
+});
+
 function runSelfTest(){
   const fails=[];
   let ran=0;
@@ -4297,7 +4711,7 @@ function runSelfTest(){
 
 /* ============================================================ toggles */
 const TGID={ortho:"tg-ortho",gridShow:"tg-gridshow",gridSnap:"tg-snap",osnap:"tg-osnap",edgeAssist:"tg-edge",weld:"tg-weld"};
-const TGNAME={ortho:"Ortho",gridShow:"Grid",gridSnap:"Grid snap",osnap:"Object snap",edgeAssist:"Reference edge assist",weld:"Weld",punch:"Punch mode",experimental:"Experimental Features"};
+const TGNAME={ortho:"Ortho",gridShow:"Grid",gridSnap:"Grid lattice",osnap:"Object snap",edgeAssist:"Reference edge assist",weld:"Weld",punch:"Punch mode",experimental:"Experimental Features"};
 function toggle(k){
   S[k]=!S[k];
   syncToggles();
@@ -6216,7 +6630,8 @@ function serializeDrawing(withImage){
     ents:S.ents, layers:S.layers, styles:S.styles, cur:S.cur, curStyle:S.curStyle,
     view:S.view, gridStep:S.gridStep, gridShow:S.gridShow, gridSnap:S.gridSnap,
     ortho:S.ortho, osnap:S.osnap, weld:S.weld, edgeAssist:S.edgeAssist, edgeThreshold:S.edgeThreshold,
-    snapOn:S.snapOn, snapSubdiv:S.snapSubdiv, dimSnap:S.dimSnap, dimSnapLen:S.dimSnapLen, dimSnapAng:S.dimSnapAng,
+    snapOn:S.snapOn, snapSubdiv:S.snapSubdiv, snapStep:S.snapStep,
+    dimSnap:S.dimSnap, dimSnapLens:S.dimSnapLens, dimSnapAngs:S.dimSnapAngs, dimSnapAngLock:S.dimSnapAngLock,
     x:{weldR:S.x.weldR, ironTol:S.x.ironTol, repelPad:S.x.repelPad, wrapOffset:S.x.wrapOffset,
        corridor:S.x.corridor, sonarRays:S.x.sonarRays, stampWord:S.x.stampWord},
     textHeight:S.textHeight, groupSeq:S.groupSeq,
@@ -6233,14 +6648,21 @@ function applyDrawing(raw,label){
   S.cur=Math.max(0,Math.min(d.cur|0, S.layers.length-1));
   S.curStyle=Math.max(0,Math.min(d.curStyle|0, S.styles.length-1));
   if(d.view && isFinite(d.view.s) && d.view.s>0) S.view={cx:d.view.cx,cy:d.view.cy,s:d.view.s};
-  for(const k of ["gridStep","gridShow","gridSnap","ortho","osnap","weld","edgeAssist","edgeThreshold","textHeight","groupSeq"])
+  for(const k of ["gridStep","snapStep","gridShow","gridSnap","ortho","osnap","weld","edgeAssist","edgeThreshold","textHeight","groupSeq"])
     if(d[k]!==undefined) S[k]=d[k];
   if(d.snapOn) for(const [k] of SNAP_KINDS) if(typeof d.snapOn[k]==="boolean") S.snapOn[k]=d.snapOn[k];
   if(typeof d.snapSubdiv==="boolean") S.snapSubdiv=d.snapSubdiv;
   if(d.x) Object.assign(S.x, sanX(d.x));
   if(typeof d.dimSnap==="boolean") S.dimSnap=d.dimSnap;
-  if(d.dimSnapLen!=null) S.dimSnapLen=Math.max(0,Math.min(1e6,safeNum(d.dimSnapLen,0)));
-  if(d.dimSnapAng!=null) S.dimSnapAng=Math.max(0,Math.min(180,safeNum(d.dimSnapAng,0)));
+  if(typeof d.dimSnapAngLock==="boolean") S.dimSnapAngLock=d.dimSnapAngLock;
+  if(Array.isArray(d.dimSnapLens)) S.dimSnapLens=dimSnapList(d.dimSnapLens,DIMSNAP_LENS);
+  if(Array.isArray(d.dimSnapAngs)) S.dimSnapAngs=dimSnapList(d.dimSnapAngs,DIMSNAP_ANGS);
+  /* Files written before dimension snaps became a list carried one fixed
+     increment. Seed the list from it so an old drawing keeps its behaviour. */
+  if(!Array.isArray(d.dimSnapLens) && safeNum(d.dimSnapLen,0)>0) S.dimSnapLens=[safeNum(d.dimSnapLen,0)];
+  if(!Array.isArray(d.dimSnapAngs) && safeNum(d.dimSnapAng,0)>0){
+    S.dimSnapAngs=[safeNum(d.dimSnapAng,0)]; S.dimSnapAngLock=true;
+  }
   mergePlain(S.flow,d.flow); mergePlain(S.mk,d.mk); mergePlain(S.png,d.png);
   S.sel.clear(); histReset(); S.op={}; S.pending=[]; S.base=null;
   entSeq=1; reseedEntSeq();
@@ -6481,32 +6903,39 @@ function deleteLayer(i){
    drag loop never needs to know what kind of thing it is holding.            */
 let gripDrag=null;
 
+/* The `anchor` a grip carries is the point a typed length is measured FROM,
+   which is what makes "drag this end and type 2400" mean the wall is 2400
+   long rather than that it moved 2400. Where an entity has no natural
+   reference the drag falls back to where the grip started, which is the
+   AutoCAD stretch behaviour. */
 function gripSet(e){
-  const G=[], push=(p,set)=>{ if(p && isFinite(p.x) && isFinite(p.y)) G.push({x:p.x,y:p.y,set}); };
+  const G=[], push=(p,set,anchor)=>{ if(p && isFinite(p.x) && isFinite(p.y)) G.push({x:p.x,y:p.y,set,anchor:anchor||null}); };
   switch(e.t){
     case "line":
-      push(e.a,q=>e.a=q); push(e.b,q=>e.b=q); break;
+      push(e.a,q=>e.a=q,e.b); push(e.b,q=>e.b=q,e.a); break;
     case "pline": case "spline":
-      e.pts.forEach((p,k)=>push(p,q=>{ e.pts[k]=q; })); break;
+      /* Measured from the neighbouring vertex, so a typed value is the length
+         of the segment you are actually holding. */
+      e.pts.forEach((p,k)=>push(p,q=>{ e.pts[k]=q; }, e.pts[k>0?k-1:1]||null)); break;
     case "circle":
       push(e.c,q=>e.c=q);
-      push(V(e.c.x+e.r,e.c.y), q=>{ e.r=Math.max(1e-9,dist(e.c,q)); }); break;
+      push(V(e.c.x+e.r,e.c.y), q=>{ e.r=Math.max(1e-9,dist(e.c,q)); }, e.c); break;
     case "arc": {
       push(e.c,q=>e.c=q);
-      push(V(e.c.x+e.r*Math.cos(e.a0), e.c.y+e.r*Math.sin(e.a0)), q=>{ e.a0=wrap(ang(e.c,q)); });
-      push(V(e.c.x+e.r*Math.cos(e.a1), e.c.y+e.r*Math.sin(e.a1)), q=>{ e.a1=wrap(ang(e.c,q)); });
+      push(V(e.c.x+e.r*Math.cos(e.a0), e.c.y+e.r*Math.sin(e.a0)), q=>{ e.a0=wrap(ang(e.c,q)); }, e.c);
+      push(V(e.c.x+e.r*Math.cos(e.a1), e.c.y+e.r*Math.sin(e.a1)), q=>{ e.a1=wrap(ang(e.c,q)); }, e.c);
       const mid=wrap(e.a0+wrap(e.a1-e.a0)/2);
-      push(V(e.c.x+e.r*Math.cos(mid), e.c.y+e.r*Math.sin(mid)), q=>{ e.r=Math.max(1e-9,dist(e.c,q)); });
+      push(V(e.c.x+e.r*Math.cos(mid), e.c.y+e.r*Math.sin(mid)), q=>{ e.r=Math.max(1e-9,dist(e.c,q)); }, e.c);
       break; }
     case "ellipse": {
       const ax=V(Math.cos(e.rot||0),Math.sin(e.rot||0)), ny=perp(ax);
       push(e.c,q=>e.c=q);
-      push(add(e.c,mul(ax,e.rx)), q=>{ e.rx=Math.max(1e-9,dist(e.c,q)); });
-      push(add(e.c,mul(ny,e.ry)), q=>{ e.ry=Math.max(1e-9,dist(e.c,q)); });
+      push(add(e.c,mul(ax,e.rx)), q=>{ e.rx=Math.max(1e-9,dist(e.c,q)); }, e.c);
+      push(add(e.c,mul(ny,e.ry)), q=>{ e.ry=Math.max(1e-9,dist(e.c,q)); }, e.c);
       break; }
     case "text": push(e.p,q=>e.p=q); break;
     case "dim": {
-      push(e.a,q=>e.a=q); push(e.b,q=>e.b=q);
+      push(e.a,q=>e.a=q,e.b); push(e.b,q=>e.b=q,e.a);
       const d=norm(sub(e.b,e.a)), nn=perp(d), mid=mul(add(e.a,e.b),.5);
       push(add(mid,mul(nn,e.off||0)), q=>{
         const dd=norm(sub(e.b,e.a)), n2=perp(dd), v=sub(q,e.a);
@@ -6515,11 +6944,11 @@ function gripSet(e){
       break; }
     case "ink":
       if(e.pts.length){
-        push(e.pts[0], q=>{ e.pts[0]=q; });
-        push(e.pts[e.pts.length-1], q=>{ e.pts[e.pts.length-1]=q; });
+        push(e.pts[0], q=>{ e.pts[0]=q; }, e.pts[1]||null);
+        push(e.pts[e.pts.length-1], q=>{ e.pts[e.pts.length-1]=q; }, e.pts[e.pts.length-2]||null);
       }
       break;
-    case "mshape": push(e.a,q=>e.a=q); push(e.b,q=>e.b=q); break;
+    case "mshape": push(e.a,q=>e.a=q,e.b); push(e.b,q=>e.b=q,e.a); break;
     case "mtext":  push(e.p,q=>e.p=q); if(e.lead) push(e.lead,q=>e.lead=q); break;
     case "node":
       for(const [g,hx,hy] of [["nw",-1,1],["ne",1,1],["se",1,-1],["sw",-1,-1]])
@@ -6579,7 +7008,13 @@ function gripBegin(sx,sy){
   if(!h) return false;
   /* A grip drag only ever edits the one entity it is holding. */
   snapEnts([h.i]);
+  /* Where the grip started, used as the measuring reference when the entity
+     offers no better one, and to restore it if the drag is abandoned. */
+  h.origin=V(h.g.x,h.g.y);
+  h.anchor=(h.g.anchor && isFinite(h.g.anchor.x)) ? V(h.g.anchor.x,h.g.anchor.y) : h.origin;
+  h.downSx=sx; h.downSy=sy; h.moved=false; h.sticky=false;
   gripDrag=h;
+  setPrompt();
   return true;
 }
 function gripMove(){
@@ -6589,9 +7024,32 @@ function gripMove(){
   g.set(q);
   readout(); draw();
 }
+/* Committing a typed value while holding a grip: same path the pointer takes,
+   then the drag is over. Lets you grab a wall end and type the length. */
+function gripApplyPoint(q){
+  if(!gripDrag) return false;
+  const g=gripDrag.g;
+  if(g.ghost && !g._made){ g._made=true; g.insert(q); }
+  g.set(q);
+  gripEnd();
+  return true;
+}
+/* Abandon a held grip and restore the point it started from. */
+function gripAbort(){
+  if(!gripDrag) return;
+  const g=gripDrag.g, o=gripDrag.origin;
+  gripDrag=null;
+  typedClear(true);
+  try{ if(o && g && typeof g.set==="function") g.set(V(o.x,o.y)); }catch(_){}
+  setPrompt(); draw(); updateProps();
+  echo("Grip released \u00B7 nothing moved");
+}
 function gripEnd(){
   const e=gripDrag.e;
   gripDrag=null;
+  typedClear(true);
+  snapTrackClear();
+  setPrompt();
   if(e && e.t==="node") flowFit(e);
   draw(); updateProps();
   echo("Edited "+(e? (flowIsEnt(e)? flowEntName(e).toLowerCase() : mkIsEnt(e)? mkEntName(e).toLowerCase() : e.t) : "object"));
@@ -6746,25 +7204,68 @@ function snapWidget(){
   sub.append(sc,st);
   const dim=document.createElement("label");
   dim.style.display="flex"; dim.style.alignItems="center"; dim.style.gap="4px";
-  dim.title="Round the rubber band to fixed length and angle increments";
+  dim.title="Dimension snap\n\nRounds the LENGTH from the last point to an increment. Position stays free, so you can start anywhere and still finish on a round number. This is what Revit uses instead of a grid.";
   const dc=document.createElement("input"); dc.type="checkbox"; dc.checked=!!S.dimSnap;
   dc.onchange=()=>{ S.dimSnap=dc.checked; paintRibbon(); draw(); };
-  const dt=document.createElement("span"); dt.className="oh"; dt.textContent="Increments";
+  const dt=document.createElement("span"); dt.className="oh"; dt.textContent="Dimension snap";
   dim.append(dc,dt);
   row.append(sub,dim);
   wrap.append(row);
+
+  /* Lattice spacing lives here rather than with the drawn grid on purpose:
+     it is a snapping setting, and it is deliberately not the display pitch. */
+  const gr=document.createElement("div"); gr.className="rrow"; gr.style.gap="4px";
+  const gl=document.createElement("label"); gl.style.display="flex"; gl.style.alignItems="center"; gl.style.gap="3px";
+  gl.title="Grid lattice spacing\n\nFixed model distance the cursor is quantised onto, like AutoCAD SNAPUNIT. It does not change with zoom. Blank or 0 follows the drawing grid step.\n\nThis is the F9 lattice, not the Grid intersection snap above.";
+  const gs=document.createElement("span"); gs.className="oh"; gs.textContent="Lattice @";
+  const gi=document.createElement("input"); gi.type="number"; gi.step="any"; gi.min="0";
+  gi.value=safeNum(S.snapStep,0)||""; gi.placeholder=String(S.gridStep); gi.style.maxWidth="66px";
+  gi.onchange=()=>{
+    const v=parseFloat(gi.value);
+    S.snapStep=(isFinite(v)&&v>0)?Math.min(1e6,v):0;
+    markDirty(); draw();
+  };
+  gl.append(gs,gi); gr.append(gl); wrap.append(gr);
+
   if(S.dimSnap){
-    const r2=document.createElement("div"); r2.className="rrow"; r2.style.gap="4px";
-    const mk=(label,get,set)=>{
-      const l=document.createElement("label"); l.style.display="flex"; l.style.alignItems="center"; l.style.gap="3px";
-      const sp=document.createElement("span"); sp.className="oh"; sp.textContent=label;
-      const i=document.createElement("input"); i.type="number"; i.step="any"; i.value=get(); i.style.maxWidth="56px";
-      i.onchange=()=>{ const v=parseFloat(i.value); if(isFinite(v)) set(Math.max(0,v)); draw(); };
+    /* A list, not a single value. The view picks the smallest entry that is
+       still worth more than a few pixels on screen, which is how Revit gives
+       you coarse steps zoomed out and fine steps zoomed in. */
+    const mkList=(label,get,set,fallback,title)=>{
+      const l=document.createElement("div"); l.className="rrow"; l.style.gap="3px";
+      const sp=document.createElement("span"); sp.className="oh"; sp.textContent=label; sp.title=title;
+      const i=document.createElement("input"); i.type="text"; i.spellcheck=false;
+      i.value=get().join(", "); i.style.maxWidth="130px"; i.title=title;
+      i.onchange=()=>{
+        const parsed=i.value.split(/[,\s]+/).map(t=>parseFloat(t)).filter(v=>isFinite(v)&&v>0);
+        set(parsed.length?parsed:fallback.slice());
+        i.value=get().join(", ");
+        markDirty(); paintRibbon(); draw();
+      };
       l.append(sp,i); return l;
     };
-    r2.append(mk("mm",()=>S.dimSnapLen,v=>S.dimSnapLen=Math.min(1e6,v)),
-              mk("deg",()=>S.dimSnapAng,v=>S.dimSnapAng=Math.min(180,v)));
-    wrap.append(r2);
+    wrap.append(mkList("Lengths",()=>dimSnapList(S.dimSnapLens,DIMSNAP_LENS),
+      v=>S.dimSnapLens=dimSnapList(v,DIMSNAP_LENS), DIMSNAP_LENS,
+      "Length increments, coarse to fine. Comma separated."));
+
+    const ar=document.createElement("div"); ar.className="rrow"; ar.style.gap="4px";
+    const al=document.createElement("label"); al.style.display="flex"; al.style.alignItems="center"; al.style.gap="4px";
+    al.title="Also round the angle\n\nOff by default. Revit leaves direction free and lets alignment lines and Ortho handle it. On, this behaves more like AutoCAD polar tracking.";
+    const ac=document.createElement("input"); ac.type="checkbox"; ac.checked=!!S.dimSnapAngLock;
+    ac.onchange=()=>{ S.dimSnapAngLock=ac.checked; markDirty(); paintRibbon(); draw(); };
+    const at=document.createElement("span"); at.className="oh"; at.textContent="Lock angle too";
+    al.append(ac,at); ar.append(al); wrap.append(ar);
+
+    if(S.dimSnapAngLock)
+      wrap.append(mkList("Angles",()=>dimSnapList(S.dimSnapAngs,DIMSNAP_ANGS),
+        v=>S.dimSnapAngs=dimSnapList(v,DIMSNAP_ANGS), DIMSNAP_ANGS,
+        "Angle increments in degrees, coarse to fine. Comma separated."));
+
+    const live=document.createElement("div"); live.className="oh"; live.style.opacity=".72";
+    const liveLen=dimSnapLenActive();
+    live.textContent="At this zoom: "+fmt(liveLen)+(S.dimSnapAngLock?"  \u00B7  "+fmt(dimSnapAngActive(liveLen*4))+"\u00B0":"");
+    live.title="Which increment from the list is currently live. Zoom in for a finer one.";
+    wrap.append(live);
   }
   return wrap;
 }
@@ -6999,6 +7500,7 @@ const MICON={
   ortho:'<path d="M3.4 16.6V6.2h10.4"/><path d="M3.4 16.6L16.6 3.4"/>',
   shift:'<path d="M10 2.6l6 6h-3.4v8.8H7.4V8.6H4z"/>',
   sheet:'<rect x="2.6" y="2.6" width="14.8" height="14.8" rx="1.6"/><path d="M2.6 12h14.8M7 12v5.4"/>',
+  keypad:'<rect x="3" y="3" width="14" height="14" rx="1.6"/><path d="M7.4 3v14M12.6 3v14M3 7.4h14M3 12.6h14"/>',
   punch:'<path d="M5 9.4V6.2a1.4 1.4 0 012.8 0V8.8"/><path d="M7.8 8.4V5.4a1.4 1.4 0 012.8 0V8.8"/><path d="M10.6 6a1.4 1.4 0 012.8 0v3"/><path d="M4.4 9.2q-1.2.4-1.2 2.2c0 2.6 1.6 5 4.6 5h2.8c2.8 0 4.8-2 4.8-4.8V8.6a1.4 1.4 0 00-2.8 0"/>'
 };
 function mBtn(id,title,svg,onclick){
@@ -7026,6 +7528,7 @@ function buildMobileShell(){
     mBtn("aim","Aim: press and slide to lift the crosshair above your fingertip. A plain tap always lands where you touched.",MICON.aim,()=>{ S.aimOffset=!S.aimOffset; updateActionBar(); draw(); }),
     mBtn("ortho","Ortho",MICON.ortho,()=>{ toggle("ortho"); updateActionBar(); }),
     mBtn("shift","Shift / constrain",MICON.shift,()=>{ S.stickyShift=!S.stickyShift; updateActionBar(); }),
+    mBtn("keypad","Type an exact value\n\nEnter a length, an angle or a coordinate without a keyboard. Works while a tool is asking for a point and while a grip is held.",MICON.keypad,()=>toggleKeypad()),
     mBtn("sheet","Layers, styles and properties",MICON.sheet,()=>toggleSheet())
   );
   /* Punch mode has a keyboard shortcut and a ribbon button, neither of which
@@ -7033,6 +7536,8 @@ function buildMobileShell(){
   if("punch" in S)
     act.append(mBtn("punch","Test your might",MICON.punch,()=>{ toggle("punch"); updateActionBar(); }));
   stage.append(act);
+
+  buildKeypad(stage);
 
   const sheet=document.createElement("div"); sheet.id="msheet";
   const grab=document.createElement("button");
@@ -7042,6 +7547,53 @@ function buildMobileShell(){
   const body=document.createElement("div"); body.className="mbody"; body.id="msheet-body";
   sheet.append(grab,body);
   stage.append(sheet);
+}
+/* Mobile numeric entry. The phone has no keyboard aimed at the canvas, so the
+   same command-line parser gets a thumb-sized front end. Nothing here parses
+   anything itself: every key edits cmdin and calls typedRefresh, so a value
+   typed on the pad previews and commits exactly as one typed on a keyboard. */
+function buildKeypad(stage){
+  if(document.getElementById("mpad")) return;
+  const pad=document.createElement("div"); pad.id="mpad";
+  const val=document.createElement("div"); val.className="val"; val.id="mpad-val";
+  pad.append(val);
+  const key=(label,fn,cls)=>{
+    const b=document.createElement("button");
+    b.type="button"; b.textContent=label; if(cls) b.className=cls;
+    b.onclick=ev=>{ ev.preventDefault(); fn(); };
+    return b;
+  };
+  const put=ch=>()=>{ cmdin.value+=ch; typedRefresh(); syncKeypad(); };
+  for(const ch of ["7","8","9","4","5","6","1","2","3"]) pad.append(key(ch,put(ch)));
+  pad.append(key("0",put("0")), key(".",put(".")), key("-",put("-")));
+  /* @ is relative, < is length<angle: the two prefixes that make the parser
+     do something a bare number cannot. */
+  pad.append(key("@",put("@")), key("<",put("<")));
+  pad.append(key("\u232B",()=>{ cmdin.value=cmdin.value.slice(0,-1); typedRefresh(); syncKeypad(); }));
+  pad.append(key("Esc",()=>{ typedClear(); syncKeypad(); }));
+  pad.append(key("Enter",()=>{
+    const raw=cmdin.value.trim();
+    if(!raw){ toggleKeypad(false); return; }
+    cmdin.value="";
+    S.typedPt=null; if(dynBox) dynBox.style.display="none";
+    handleCommand(raw);
+    syncKeypad(); updateActionBar();
+  },"wide"));
+  stage.append(pad);
+}
+function syncKeypad(){
+  const v=document.getElementById("mpad-val");
+  if(!v) return;
+  const raw=cmdin.value;
+  v.textContent = raw ? raw : (snapPickActive()? "length, @dx,dy or len<ang" : "no active pick");
+}
+function toggleKeypad(force){
+  const pad=document.getElementById("mpad");
+  if(!pad) return;
+  const open = force==null ? !pad.classList.contains("open") : !!force;
+  pad.classList.toggle("open",open);
+  if(open) syncKeypad(); else typedClear();
+  updateActionBar();
 }
 function toggleSheet(force){
   const sheet=document.getElementById("msheet");
@@ -7074,6 +7626,12 @@ function updateActionBar(){
   set("aim",S.aimOffset,false);
   set("ortho",S.ortho,false);
   set("shift",S.stickyShift,false);
+  /* Close the pad inline rather than via toggleKeypad: that calls back into
+     this function, and the pair would recurse. */
+  const pad=document.getElementById("mpad");
+  const live=snapPickActive();
+  if(pad && pad.classList.contains("open") && !live){ pad.classList.remove("open"); typedClear(true); }
+  set("keypad", !!(pad && pad.classList.contains("open")), !live);
   if("punch" in S) set("punch",S.punch,false);
 }
 function setMobileUI(on,quiet){
@@ -7513,7 +8071,10 @@ function sanitizeDoc(d){
     cur:safeInt(d.cur,0,layers.length-1),
     curStyle:safeInt(d.curStyle,0,styles.length-1),
     gridStep:Math.abs(safeNum(d.gridStep,10,1e6))||10,
-    gridShow:d.gridShow!==false, gridSnap:d.gridSnap!==false,
+    snapStep:Math.abs(safeNum(d.snapStep,0,1e6))||0,
+    /* Grid snap is opt-in, matching AutoCAD. A file that never wrote the key
+       predates that and must not silently arrive with the lattice armed. */
+    gridShow:d.gridShow!==false, gridSnap:!!d.gridSnap,
     ortho:!!d.ortho, osnap:d.osnap!==false, weld:!!d.weld, edgeAssist:!!d.edgeAssist,
     textHeight:Math.abs(safeNum(d.textHeight,2.5,1e5))||2.5,
     groupSeq:Math.max(1,safeInt(d.groupSeq,1)),
@@ -7522,6 +8083,10 @@ function sanitizeDoc(d){
     x:sanX(d.x),
     snapSubdiv:d.snapSubdiv!==false,
     dimSnap:!!d.dimSnap,
+    dimSnapAngLock:!!d.dimSnapAngLock,
+    dimSnapLens:Array.isArray(d.dimSnapLens)?d.dimSnapLens.map(v=>safeNum(v,0,1e6)):undefined,
+    dimSnapAngs:Array.isArray(d.dimSnapAngs)?d.dimSnapAngs.map(v=>safeNum(v,0,180)):undefined,
+    /* legacy single-increment fields, read only for migration */
     dimSnapLen:Math.max(0,Math.min(1e6,safeNum(d.dimSnapLen,0))),
     dimSnapAng:Math.max(0,Math.min(180,safeNum(d.dimSnapAng,0))),
     refs:sanRefs(d,layers.length),
@@ -7569,9 +8134,16 @@ const SNAP_KINDS=[
   ["perp",  "Perpendicular", "SP"],
   ["tan",   "Tangent",       "ST"],
   ["point", "Point",         "SX"],
-  ["near",  "Nearest",       "SN"]
+  ["near",  "Nearest",       "SN"],
+  /* Revit's Work Plane Grid, and its code. Not the F9 lattice: this is an
+     attractor you hover, competing with the geometry snaps and cycled with
+     Tab, so the drawn grid is usable as a reference without quantising
+     every pick. */
+  ["grid",  "Grid intersection","SW"]
 ];
-const SNAP_RANK={end:90,int:80,mid:70,center:60,quad:55,perp:50,tan:45,point:40,near:10};
+/* Grid sits above Nearest and below Tangent: real geometry always wins, and
+   the grid catches you when there is nothing else under the cursor. */
+const SNAP_RANK={end:90,int:80,mid:70,center:60,quad:55,perp:50,tan:45,point:40,grid:25,near:10};
 const SNAP_NAME={}; const SNAP_CODE={};
 for(const [k,name,code] of SNAP_KINDS){ SNAP_NAME[k]=name; SNAP_CODE[code.toLowerCase()]=k; }
 
@@ -7582,26 +8154,36 @@ const SNAP_SUBDIV_PX=26;       // stop halving below this on-screen spacing
 const SNAP_SUBDIV_MAX=12;
 const ANNOT_TYPES=new Set(["text","mtext","node"]);
 
-S.snapOn={end:true,int:true,mid:true,center:true,quad:true,perp:true,tan:true,point:true,near:true};
+S.snapOn={end:true,int:true,mid:true,center:true,quad:true,perp:true,tan:true,point:true,near:true,grid:true};
 S.snapSubdiv=true;
 S.snapSuspend=false;
 S.snapOverride=null;
 S.snapCycle=0;
 S.snapList=[];
 S.snapAnchor=null;
+/* Revit's stock lists, coarse to fine. The zoom decides which entry is live. */
+const DIMSNAP_LENS=[100,10,1,0.1];
+const DIMSNAP_ANGS=[90,45,15,5];
 S.dimSnap=false;
-S.dimSnapLen=0;
-S.dimSnapAng=0;
+S.dimSnapLens=DIMSNAP_LENS.slice();
+S.dimSnapAngs=DIMSNAP_ANGS.slice();
+S.dimSnapAngLock=false;   // off by default: Revit leaves direction free
+/* Object snap tracking. Points the cursor has hovered and then left become
+   "acquired" and start radiating guide rays, which is how AutoCAD lets you
+   land somewhere no geometry exists. Acquiring on departure rather than on a
+   dwell timer means it needs no clock: resolveSnap only runs on movement, so
+   a timer would never fire while the pointer sat still. */
+const SNAP_TRACK_MAX=3;
+const SNAP_TRACK_KINDS=new Set(["end","mid","center","int","quad","point"]);
+S.snapAcquired=[];
+S.snapLastHit=null;
 
 function snapEnabled(k){
   if(S.snapSuspend) return false;
   if(S.snapOverride) return S.snapOverride===k;
   return !!S.snapOn[k];
 }
-function snapBase(){
-  if(S.pending.length) return S.pending[S.pending.length-1];
-  return S.base||null;
-}
+function snapBase(){ return pickBase(); }
 function projParam(p,a,b){
   const ab=sub(b,a), dd=ab.x*ab.x+ab.y*ab.y;
   if(dd<1e-18) return 0;
@@ -7754,6 +8336,20 @@ function snapCandidates(w){
     if(snapEnabled("tan"))  for(const p of tanOnEnt(e,base)) push("tan",p);
   }
 
+  /* Grid intersections. Independent of the entity scan above: the grid is not
+     an entity, and it must be offered even on an empty drawing. */
+  if(snapEnabled("grid")){
+    const g=gridSnapPitch();
+    if(g>0){
+      const cx=gridQuant(w.x,g), cy=gridQuant(w.y,g);
+      /* The 3x3 neighbourhood costs nothing and removes any dependence on
+         which side of an intersection the cursor rounded to. push() drops
+         everything outside the aperture anyway. */
+      for(let ix=-1;ix<=1;ix++) for(let iy=-1;iy<=1;iy++)
+        push("grid", V(gridQuant(cx+ix*g,g), gridQuant(cy+iy*g,g)), "Grid "+fmt(g));
+    }
+  }
+
   if(snapEnabled("int")){
     const few=ents.slice(0,SNAP_MAX_INT_ENTS);
     for(let i=0;i<few.length;i++)
@@ -7804,7 +8400,9 @@ function snapSetOverride(k){
 function alignmentSnap(p,from){
   S.alignGuide=null;
   if(!from || !S.osnap || S.snapSuspend) return p;
-  if(!(S.tool==="line" || S.tool==="pline" || S.tool==="spline")) return p;
+  /* Was limited to line/pline/spline. Every tool that asks for a point wants
+     this, and so does a grip drag, which snapPickActive now covers. */
+  if(!snapPickActive()) return p;
 
   const tolPxA=7, tolWorld=px(tolPxA);
   let best=null, bestPx=1e9, bestPri=-1;
@@ -7846,6 +8444,27 @@ function alignmentSnap(p,from){
         if(dx<=tolPxA) consider(V(q.x,p.y),{kind:"v",x:q.x,sourceKind},label,q,pri);
         if(dy<=tolPxA) consider(V(p.x,q.y),{kind:"h",y:q.y,sourceKind},label,q,pri);
       }
+    }
+  }
+
+  /* Acquired tracking references. Same H/V treatment as any other datum but
+     at the top priority, plus rays at the standard angles, which is the part
+     an ordinary alignment cannot give you: it lets the cursor land on the
+     intersection of two rays where there is no geometry at all. */
+  const trackAngles = (S.dimSnap && S.dimSnapAngLock)
+    ? dimSnapList(S.dimSnapAngs, DIMSNAP_ANGS)
+    : [0,30,45,60,90,120,135,150];
+  for(const t of S.snapAcquired){
+    refs.push({p:t,label:"TRACK",pri:8,sourceKind:"track"});
+    const dx=Math.abs(X(p.x)-X(t.x)), dy=Math.abs(Y(p.y)-Y(t.y));
+    if(dx<=tolPxA) consider(V(t.x,p.y),{kind:"v",x:t.x,sourceKind:"track"},"TRACK",t,8);
+    if(dy<=tolPxA) consider(V(p.x,t.y),{kind:"h",y:t.y,sourceKind:"track"},"TRACK",t,8);
+    for(const ad of trackAngles){
+      const th=rad(ad), u=V(Math.cos(th),Math.sin(th));
+      const q=projLine(p,t,u);
+      if(Math.hypot(X(q.x)-S.mouse.sx,Y(q.y)-S.mouse.sy)<=tolPxA)
+        consider(q,{kind:"angle",a:t,b:q,dir:u,sourceKind:"track"},
+                 "TRACK "+fmt(ad)+"\u00b0",t,8);
     }
   }
 
@@ -7926,7 +8545,8 @@ function alignmentSnap(p,from){
   if(!best) return p;
   S.alignGuide=best.guide;
   let kind="align";
-  if(best.guide.sourceKind==="mid") kind="midalign";
+  if(best.guide.sourceKind==="track") kind="track";
+  else if(best.guide.sourceKind==="mid") kind="midalign";
   else if(best.guide.sourceKind==="guideint") kind="int";
   else if(best.guide.sourceKind==="perpinf") kind="perp";
   else if(best.guide.sourceKind==="extension") kind="align";
@@ -7934,23 +8554,123 @@ function alignmentSnap(p,from){
   return best.p;
 }
 
-/* Revit rounds the rubber band to fixed length and angle increments when
-   nothing better is under the cursor. */
+/* ---- Revit dimension snaps ---------------------------------------------
+   Not a grid. A grid quantises absolute position, so you cannot start a wall
+   anywhere you like. A dimension snap quantises the LENGTH from the previous
+   point and leaves position free, which is why Revit feels fluid where a
+   lattice feels like a cage.
+
+   Revit walks a list of increments and uses the smallest one that is still
+   worth more than a couple of millimetres on screen. Zoomed out you get the
+   coarse increment because the fine one is sub-pixel and unpickable; zoomed
+   in you get the fine one. The list is the setting, the zoom picks from it. */
+const DIMSNAP_MIN_PX = 8;
+function dimSnapList(raw, fallback){
+  const out=[];
+  for(const v of (Array.isArray(raw)?raw:[])){
+    const n=safeNum(v,0);
+    if(isFinite(n) && n>1e-9) out.push(n);
+  }
+  if(!out.length) return fallback.slice();
+  /* Coarse first: the walk below keeps the last entry that is still legible,
+     which lands on the smallest usable increment. */
+  return [...new Set(out)].sort((a,b)=>b-a);
+}
+/* Pick the smallest increment whose on-screen size clears the threshold. If
+   even the coarsest is sub-threshold the view is so far out that nothing is
+   pickable, so hand back the coarsest rather than snapping to noise. */
+function dimSnapPick(list, pxPerUnit){
+  let chosen=list[0];
+  for(const inc of list){ if(inc*pxPerUnit < DIMSNAP_MIN_PX) break; chosen=inc; }
+  return chosen;
+}
+function dimSnapLenActive(){
+  if(!S.dimSnap) return 0;
+  const list=dimSnapList(S.dimSnapLens, DIMSNAP_LENS);
+  return dimSnapPick(list, S.view.s);
+}
+/* Angular increments are judged by the arc they subtend at the current rubber
+   band length, not by the angle itself: 5 degrees is easy to hit on a long
+   band and impossible on a short one. */
+function dimSnapAngActive(L){
+  if(!S.dimSnap) return 0;
+  const list=dimSnapList(S.dimSnapAngs, DIMSNAP_ANGS);
+  const radiusPx=Math.max(1e-9, L*S.view.s);
+  return dimSnapPick(list, radiusPx*Math.PI/180);
+}
 function applyDimSnap(p,from){
   if(!S.dimSnap||!from) return p;
-  let d=sub(p,from), L=len(d);
+  const d=sub(p,from);
+  let L=len(d);
   if(!(L>1e-9)) return p;
   let th=Math.atan2(d.y,d.x);
-  if(S.dimSnapAng>0){
-    const step=S.dimSnapAng*Math.PI/180;
-    th=Math.round(th/step)*step;
+  /* Length first, then angle against the rounded length, so the arc test
+     below judges the band the user is actually going to get. */
+  const li=dimSnapLenActive();
+  /* Below one increment the snap simply stops applying. Clamping up to the
+     increment instead made short elements impossible to draw without zooming
+     in first, which is not how Revit behaves: it lets the band go free down
+     there rather than refusing to be short. */
+  if(li>0){
+    const r=Math.round(L/li)*li;
+    if(r>0) L=r;
   }
-  if(S.dimSnapLen>0) L=Math.max(S.dimSnapLen,Math.round(L/S.dimSnapLen)*S.dimSnapLen);
+  if(S.dimSnapAngLock){
+    const ai=dimSnapAngActive(L);
+    if(ai>0){
+      const step=ai*Math.PI/180;
+      th=Math.round(th/step)*step;
+      /* Only claim the guide if nothing better already owns it: a real
+         alignment inference is more informative than a polar increment. */
+      if(!S.alignGuide){
+        const dir=V(Math.cos(th),Math.sin(th));
+        S.alignGuide={kind:"polar", a:from, dir,
+          at:V(from.x+L*dir.x, from.y+L*dir.y),
+          label:fmt(deg(wrap(th)))+"\u00b0  \u00b7  "+fmt(L)};
+      }
+    }
+  }
   return V(from.x+L*Math.cos(th), from.y+L*Math.sin(th));
+}
+
+/* ---- grid intersection snap --------------------------------------------
+   What you see is what you snap to: gated on the grid actually being drawn,
+   and keyed to the drawn pitch rather than the F9 lattice spacing. Zoom
+   dependence is correct here in a way it was not for the lattice, because you
+   are deliberately hovering something visible rather than having every pick
+   silently quantised. */
+function gridSnapVisible(){
+  return S.workspaceMode==="drafting" && S.gridShow && !S.exporting;
+}
+/* The drawn minor pitch can fall to 7 screen pixels, which is tighter than the
+   11 pixel aperture (28.6 on touch). Offering intersections that dense would
+   put the cage back in through the side door, so below roughly twice the
+   aperture this steps up to the major grid, which is ten times coarser and
+   always comfortably pickable. */
+function gridSnapPitch(){
+  if(!gridSnapVisible()) return 0;
+  const need=px(tolPx(22));
+  const minor=gridPitch();
+  if(minor>=need) return minor;
+  const major=minor*10;
+  return major>=need ? major : 0;
+}
+/* Math.round(v/g)*g leaves float dust: at g=0.1 it can hand back
+   0.30000000000000004, and a snap point should be the number the user sees on
+   the grid. Trim to the precision the pitch itself implies. */
+function gridQuant(v,g){
+  const r=Math.round(v/g)*g;
+  if(!isFinite(r)) return v;
+  const dp=Math.max(0, Math.min(12, Math.ceil(-Math.log10(g))+3));
+  const t=parseFloat(r.toFixed(dp));
+  return isFinite(t) ? t : r;
 }
 
 /* A snap override only makes sense while a point is being requested. */
 function snapPickActive(){
+  /* A grip drag IS a point request, even though the tool is Select. This is
+     what puts snap overrides and typed entry on grip editing. */
+  if(gripDrag) return true;
   const T=TOOLS[S.tool];
   if(!T) return false;
   if(isMeasureTool(S.tool)) return true;
@@ -9902,7 +10622,8 @@ window.addEventListener("keydown",e=>{
   if(e.key==="Control"||e.key==="Meta"){ S.ctrlDown=true; if(S.pending.length||S.base) draw(); }
   if(e.key==="Alt") S.altDown=true;
   const typing = !!S.ask || document.activeElement===cmdin || document.activeElement===inlineEditor || !!textEdit;
-  if(e.key==="Escape"){ cmdin.value=""; cancel(); return; }
+  if(e.key==="Escape"){ cancel(); return; }
+  if(!typing && !textEdit && typedCapture(e)) return;
   if(!typing && e.key==="Tab" && S.tool==="select"){ e.preventDefault(); pickCycleNext(); return; }
   if(!typing && e.key==="Tab" && S.tool!=="measurealong" && S.snapList.length>1){
     e.preventDefault(); snapCycleNext(); return;
@@ -10678,8 +11399,8 @@ const TOGGLE_DEFS=[
    "Constrains the next point to a straight horizontal or vertical run from the previous one, whichever axis you have moved further along. Only applies once there is a previous point, and an object snap always wins over it. Markup tools read it differently: there it gives 45 degree increments and makes rectangles square, the same as holding Shift."],
   ["gridShow","Show grid","F7",
    "Draws the background grid. The pitch shown adapts as you zoom so it never turns into mush. Purely visual: this does not make anything snap."],
-  ["gridSnap","Grid snap","F9",
-   "Rounds every picked point to the nearest grid intersection. This is the one that actually moves your cursor; Show grid only draws it."],
+  ["gridSnap","Grid lattice","F9",
+   "Rounds every picked point onto a fixed lattice. The spacing is a model distance set in View \u203A Snaps and does not change with zoom, so a point placed zoomed out is still on the lattice zoomed in. Off by default and rarely what you want: it quantises absolute position, which stops you starting a run wherever you like. If all you want is to land on a grid crossing you can see, leave this off and use the Grid intersection object snap instead, which attracts to the drawn grid without moving anything else. Dimension snap is usually the better tool again. Object snaps beat this when both apply."],
   ["osnap","Object snap","F3",
    "Snaps to features of existing geometry: endpoints, midpoints, centres, intersections, quadrants, perpendicular, tangent and nearest. Tab cycles between candidates under the cursor. Which snaps are live is set in View \u203A Snaps."],
   ["edgeAssist","Image edge","F6",
@@ -10842,10 +11563,13 @@ function setWorkspaceMode(mode){
   if(app) app.classList.toggle("whiteboard", mode==="whiteboard");
   if(stage) stage.dataset.mode=mode==="whiteboard" ? "WHITEBOARD" : "MODEL";
   syncBoardStage();
-  if(mode==="drafting"){ S.gridShow=true; S.gridSnap=true; }
-  else { S.gridShow=false; S.gridSnap=false; }
+  /* Drafting shows the grid and arms dimension snaps. It deliberately does
+     NOT arm grid snap: neither Revit nor a default AutoCAD profile quantises
+     position, and having the lattice on is what made drawing feel caged. */
+  if(mode==="drafting"){ S.gridShow=true; S.gridSnap=false; S.dimSnap=true; }
+  else { S.gridShow=false; S.gridSnap=false; S.dimSnap=false; }
   syncToggles(); paintRibbon(); draw();
-  echo(mode==="whiteboard" ? "Whiteboard workspace" : "Drafting workspace · grid on");
+  echo(mode==="whiteboard" ? "Whiteboard workspace" : "Drafting workspace · grid on · dimension snap on");
 }
 function workspaceWidget(){
   const wrap=document.createElement("div"); wrap.className="rstack";
