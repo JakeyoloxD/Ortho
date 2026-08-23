@@ -605,6 +605,10 @@ const S = {
   base: null,         // move/copy base point
   mouse: {x:0,y:0, sx:0, sy:0},
   shiftDown: false,    // physical Shift state for temporary point constraints
+  ctrlDown: false,     // Ctrl/Command: add selection or duplicate active transform
+  altDown: false,      // Alt remains reserved for viewport pan
+  placeTurns: 0,       // Space rotates Move/Copy placement preview in 90-degree steps
+  pickCycleList: [], pickCycle: -1, pickCycleAnchor: null,
   snapHit: null,
   alignGuide: null,       // temporary inferred alignment / parallel guide while drawing
   hover: -1,
@@ -1112,21 +1116,51 @@ function applyOrtho(p, from){
   if(!S.ortho||!from) return p;
   return Math.abs(p.x-from.x) >= Math.abs(p.y-from.y) ? V(p.x, from.y) : V(from.x, p.y);
 }
+/* ============================================================ MODIFIER POLICY
+   One vocabulary across the app. Shift constrains an active geometric pick,
+   Ctrl/Command adds to selection or duplicates a transform, Alt is viewport
+   pan, Tab cycles candidates, Space quarter-turns a placement preview, Enter
+   finishes and Esc backs out one stage before leaving the tool. */
+const MODIFIER_POLICY=Object.freeze({
+  shift:"Temporary geometric constraint",
+  ctrl:"Add selection / duplicate transform",
+  alt:"Viewport pan",
+  tab:"Cycle snap or selection candidates",
+  space:"Rotate placement preview 90°",
+  enter:"Finish / accept",
+  escape:"Back one stage / exit"
+});
+const modShift=()=>!!(S.shiftDown||S.stickyShift);
+const modCtrl=()=>!!S.ctrlDown;
 function constrainPoint(p,from,mode){
   if(!from||!mode||mode==="none") return p;
   if(mode==="ortho") return Math.abs(p.x-from.x)>=Math.abs(p.y-from.y)?V(p.x,from.y):V(from.x,p.y);
-  if(mode==="angle45"){
+  if(mode==="square"){
+    const dx=p.x-from.x, dy=p.y-from.y, q=Math.max(Math.abs(dx),Math.abs(dy));
+    return V(from.x+(dx<0?-q:q),from.y+(dy<0?-q:q));
+  }
+  const step=mode==="angle15"?Math.PI/12:mode==="angle45"?Math.PI/4:0;
+  if(step){
     const d=sub(p,from), r=Math.hypot(d.x,d.y);
     if(r<1e-12) return p;
-    const a=Math.round(Math.atan2(d.y,d.x)/(Math.PI/4))*(Math.PI/4);
+    const a=Math.round(Math.atan2(d.y,d.x)/step)*step;
     return V(from.x+Math.cos(a)*r,from.y+Math.sin(a)*r);
   }
   return p;
 }
 function activePointConstraint(){
-  if(!(S.shiftDown||S.stickyShift)) return "none";
-  if(S.tool==="imgcal") return "ortho";
+  if(!modShift()) return "none";
+  if(["imgcal","imgmove","line","pline","spline","move","copy"].includes(S.tool)) return "ortho";
+  if(["rotate","imgrotate"].includes(S.tool)) return "angle15";
+  if(S.tool==="rect") return "square";
   return "none";
+}
+function constrainEllipseCircle(p){
+  if(!modShift() || !(S.tool==="ellipse"||S.tool==="pellipse") || S.pending.length!==2) return p;
+  const c=S.pending[0], a=S.pending[1], rx=dist(c,a);
+  if(rx<1e-12) return p;
+  const axis=norm(sub(a,c)), n=perp(axis), side=(sub(p,c).x*n.x+sub(p,c).y*n.y)<0?-1:1;
+  return add(c,mul(n,rx*side));
 }
 function cursorPoint(){
   const raw=V(wX(S.mouse.sx), wY(S.mouse.sy));
@@ -1134,15 +1168,23 @@ function cursorPoint(){
   // Reference-image placement tools normally ignore drafting snaps. Calibration keeps
   // that isolation, but Shift is a temporary H/V constraint on the second point.
   if(S.tool==="imgcal") return constrainPoint(raw,from,activePointConstraint());
+  if(S.tool==="imgmove") return constrainPoint(raw,from,activePointConstraint());
   // Rotate Image deliberately follows the normal drafting snap pipeline so its
   // base/angle points can land on Grid Snap, object snaps and Draw constraints.
-  if(["imgmove","imgstraight","imgcrop"].includes(S.tool)) return raw;
+  if(["imgstraight","imgcrop"].includes(S.tool)) return raw;
   // markup is freehand annotation, not drafting - it never snaps
   if(MK_TOOLS[S.tool]) return raw;
   let p=resolveSnap(raw);
-  if(!S.snapHit) p=alignmentSnap(p,from);
-  if(!S.snapHit) p=applyDimSnap(p,from);
-  if(S.ortho && from && !S.snapHit) p=applyOrtho(p,from);
+  if(!S.snapHit){
+    const mode=activePointConstraint();
+    if(mode!=="none") p=constrainPoint(p,from,mode);
+    else {
+      p=alignmentSnap(p,from);
+      p=applyDimSnap(p,from);
+      if(S.ortho && from) p=applyOrtho(p,from);
+    }
+    p=constrainEllipseCircle(p);
+  }
   return p;
 }
 
@@ -1522,7 +1564,8 @@ function setTool(t){
     return;
   }
   const prev=S.tool; if(isMeasureTool(prev)&&prev!==t) clearMeasurement(false);
-  S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; S.alignGuide=null; resetNudge();
+  S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; S.alignGuide=null;
+  S.placeTurns=0; S.pickCycleList=[]; S.pickCycle=-1; S.pickCycleAnchor=null; resetNudge();
   if(["imgmove","imgrotate","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
   if(["imgmove","imgrotate","imgcal","imgstraight","imgcrop"].includes(t) && S.refImage && S.refImage.locked){ echo("Reference image is locked","warn"); t="select"; }
   if(SELOPS.includes(t) && !S.sel.size){
@@ -1615,17 +1658,21 @@ function feed(p){
   if(S.tool==="measurearea")    return feedMeasureArea(p);
   if(S.tool==="move"||S.tool==="copy"){
     if(!S.base){ S.base=p; setPrompt(); return; }
-    const d=sub(p,S.base); snap();
-    if(S.tool==="move"){
-      const w=applyDelta([...S.sel], d, true);
-      echo("Moved "+S.sel.size+" object(s)"+(w?"  ("+w+" joined point"+(w>1?"s":"")+" followed)":""));
-      S.base=null;
+    const d=sub(p,S.base), qturn=(S.placeTurns||0)*(Math.PI/2); snap();
+    const copyNow=S.tool==="copy" || (S.tool==="move"&&modCtrl());
+    if(!copyNow){
+      let w=0;
+      if(Math.abs(qturn)<1e-12) w=applyDelta([...S.sel], d, true);
+      else for(const i of S.sel){ rotEnt(S.ents[i],S.base,qturn); moveEnt(S.ents[i],d); }
+      echo("Moved "+S.sel.size+" object(s)"+(qturn?"  · rotated "+(S.placeTurns*90)+"°":"")+(w?"  ("+w+" joined point"+(w>1?"s":"")+" followed)":""));
+      S.base=null; S.placeTurns=0;
     } else {
-      const copies=cloneEntitiesFreshGroups([...S.sel].map(i=>S.ents[i])).map(e=>moveEnt(e,d));
+      const copies=cloneEntitiesFreshGroups([...S.sel].map(i=>S.ents[i])).map(e=>{ if(qturn) rotEnt(e,S.base,qturn); return moveEnt(e,d); });
       S.ents.push(...copies);
-      echo("Copied "+S.sel.size+" object(s)");
-      if(!S.copyMultiple){ setTool("select"); return; }
-      /* Multiple: base stays fixed, so the next click is another destination from the same origin */
+      echo("Copied "+S.sel.size+" object(s)"+(qturn?"  · rotated "+(S.placeTurns*90)+"°":""));
+      S.placeTurns=0;
+      if(S.tool==="move" || !S.copyMultiple){ setTool("select"); return; }
+      /* Multiple Copy: base stays fixed, so the next click is another destination from the same origin */
     }
     setPrompt(); draw(); updateProps();
     return;
@@ -1806,10 +1853,11 @@ function commit(){
     case "rotate":{
       const th=ang(P[0],P[1]);
       snap();
-      if(S.copyRotate) S.ents.push(...cloneEntitiesFreshGroups([...S.sel].map(i=>S.ents[i])).map(e=>rotEnt(e,P[0],th)));
+      const copyNow=S.copyRotate||modCtrl();
+      if(copyNow) S.ents.push(...cloneEntitiesFreshGroups([...S.sel].map(i=>S.ents[i])).map(e=>rotEnt(e,P[0],th)));
       else for(const i of S.sel) rotEnt(S.ents[i],P[0],th);
       S.pending=[]; draw(); updateProps();
-      echo((S.copyRotate?"Rotated a copy of ":"Rotated ")+S.sel.size+" object(s) by "+fmt(deg(wrap(th)))+"\u00B0");
+      echo((copyNow?"Rotated a copy of ":"Rotated ")+S.sel.size+" object(s) by "+fmt(deg(wrap(th)))+"\u00B0");
       return;
     }
     case "scale":{
@@ -1825,9 +1873,13 @@ function commit(){
         k=to/from; S.lastScaleFactor=k;
         desc="by "+fmt(k)+"  ("+fmt(from)+" \u2192 "+fmt(to)+")";
       }
-      for(const i of S.sel) sclEnt(S.ents[i],P[0],k);
+      const copyNow=modCtrl();
+      if(copyNow){
+        const copies=cloneEntitiesFreshGroups([...S.sel].map(i=>S.ents[i])).map(e=>sclEnt(e,P[0],k));
+        S.ents.push(...copies);
+      } else for(const i of S.sel) sclEnt(S.ents[i],P[0],k);
       S.pending=[]; draw(); updateProps();
-      echo("Scaled "+S.sel.size+" object(s) "+desc);
+      echo((copyNow?"Scaled a copy of ":"Scaled ")+S.sel.size+" object(s) "+desc);
       return;
     }
     case "text":{
@@ -1857,7 +1909,13 @@ function cancel(){
     if(S.measureEscArmed){ S.measureEscArmed=false; setTool("select"); echo(""); return; }
     S.measureEscArmed=true; echo("Esc again to exit Measure"); return;
   }
-  S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; S.alignGuide=null; mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
+  if(S.pending.length){
+    S.pending.pop(); S.placeTurns=0; setPrompt(); draw(); echo("Last point cleared · Esc again to exit"); return;
+  }
+  if(S.base){
+    S.base=null; S.placeTurns=0; setPrompt(); draw(); echo("Base point cleared · Esc again to exit"); return;
+  }
+  S.pending=[]; S.base=null; S.band=null; S.op={}; S.chainPrev=null; S.alignGuide=null; S.placeTurns=0; mkDraw=null; flowDraw=null; flowResize=null; gripDrag=null;
   if(XFX.raf||XFX.marks.length) xfxStop();
   if(S.tool!=="select") setTool("select"); else { S.sel.clear(); draw(); updateProps(); }
   echo("");
@@ -2791,9 +2849,9 @@ function drawPreview(){
   ctx.strokeStyle=getCSS("--pen"); ctx.fillStyle=getCSS("--pen"); ctx.lineWidth=1;
   ctx.setLineDash([4,3]);
   if((S.tool==="move"||S.tool==="copy")&&S.base){
-    const d=sub(c,S.base);
+    const d=sub(c,S.base), qturn=(S.placeTurns||0)*(Math.PI/2);
     ctx.save(); ctx.globalAlpha=.65;
-    for(const i of S.sel){ const g=moveEnt(JSON.parse(JSON.stringify(S.ents[i])),d); paintEnt(g); }
+    for(const i of S.sel){ const g=clone(S.ents[i]); if(qturn) rotEnt(g,S.base,qturn); moveEnt(g,d); paintEnt(g); }
     ctx.restore();
     ctx.beginPath(); ctx.moveTo(X(S.base.x),Y(S.base.y)); ctx.lineTo(X(c.x),Y(c.y)); ctx.stroke();
   }
@@ -3175,35 +3233,81 @@ function drawCross(){
 }
 
 /* ============================================================ picking */
-function pickAt(w, additive){
-  resetNudge();
-  const tol=px(tolPx(7));
+function selectionMode(ctrl,shift){
+  if(ctrl&&shift) return "toggle";
+  if(shift) return "remove";
+  if(ctrl) return "add";
+  return "replace";
+}
+function pickCycleReset(){ S.pickCycleList=[]; S.pickCycle=-1; S.pickCycleAnchor=null; }
+function pickCandidatesAt(w){
+  const tol=px(tolPx(7)), out=[];
   for(let i=S.ents.length-1;i>=0;i--){
     const e=S.ents[i], L=S.layers[e.li];
     if(!L||!L.on||L.lock) continue;
+    if(entHit(e,w,tol)) out.push(i);
+  }
+  return out;
+}
+function pickCycleNext(){
+  const w=V(wX(S.mouse.sx),wY(S.mouse.sy)), a=S.pickCycleAnchor;
+  if(!a || Math.hypot(S.mouse.sx-a.sx,S.mouse.sy-a.sy)>8 || !S.pickCycleList.length){
+    S.pickCycleList=pickCandidatesAt(w); S.pickCycle=-1;
+  }
+  if(!S.pickCycleList.length){ echo("Nothing under the cursor","warn"); return false; }
+  S.pickCycle=(S.pickCycle+1)%S.pickCycleList.length;
+  S.pickCycleAnchor={sx:S.mouse.sx,sy:S.mouse.sy};
+  S.hover=S.pickCycleList[S.pickCycle];
+  const e=S.ents[S.hover];
+  echo((e&&e.t?e.t:"Object")+"  ("+(S.pickCycle+1)+" of "+S.pickCycleList.length+")  Tab for next");
+  draw(); return true;
+}
+function cyclePickIndex(w){
+  if(S.pickCycle<0||!S.pickCycleList.length||!S.pickCycleAnchor) return -1;
+  if(Math.hypot(S.mouse.sx-S.pickCycleAnchor.sx,S.mouse.sy-S.pickCycleAnchor.sy)>8) return -1;
+  const i=S.pickCycleList[S.pickCycle];
+  return (i>=0&&S.ents[i]&&entHit(S.ents[i],w,px(tolPx(7))))?i:-1;
+}
+function applySelectionIds(ids,mode){
+  if(mode==="replace") S.sel.clear();
+  for(const j of ids){
+    if(mode==="remove") S.sel.delete(j);
+    else if(mode==="toggle") S.sel.has(j)?S.sel.delete(j):S.sel.add(j);
+    else S.sel.add(j);
+  }
+}
+function pickAt(w, mode="replace"){
+  resetNudge();
+  const cyc=cyclePickIndex(w), tol=px(tolPx(7));
+  const order=cyc>=0?[cyc]:Array.from({length:S.ents.length},(_,k)=>S.ents.length-1-k);
+  for(const i of order){
+    const e=S.ents[i], L=e&&S.layers[e.li];
+    if(!e||!L||!L.on||L.lock) continue;
     if(entHit(e,w,tol)){
-      if(!additive) S.sel.clear();
-      const ids=e.gid?groupIndices(e.gid):[i], removing=additive && ids.every(j=>S.sel.has(j));
-      for(const j of ids){ if(removing) S.sel.delete(j); else S.sel.add(j); }
-      return true;
+      const ids=e.gid?groupIndices(e.gid):[i];
+      applySelectionIds(ids,mode); pickCycleReset(); return true;
     }
   }
-  if(!additive) S.sel.clear();
-  return false;
+  if(mode==="replace") S.sel.clear();
+  pickCycleReset(); return false;
 }
-function pickBox(a,b,additive){
+function pickBox(a,b,mode="replace"){
   resetNudge();
   const cross=b.x<a.x;
   const x0=Math.min(a.x,b.x),x1=Math.max(a.x,b.x),y0=Math.min(a.y,b.y),y1=Math.max(a.y,b.y);
-  if(!additive) S.sel.clear();
+  if(mode==="replace") S.sel.clear();
+  const hits=[];
   S.ents.forEach((e,i)=>{
     const L=S.layers[e.li]; if(!L||!L.on||L.lock) return;
     const bb=entBox(e);
     const inside = bb.x0>=x0&&bb.x1<=x1&&bb.y0>=y0&&bb.y1<=y1;
     const overlap= !(bb.x1<x0||bb.x0>x1||bb.y1<y0||bb.y0>y1);
-    if(cross?overlap:inside) S.sel.add(i);
+    if(cross?overlap:inside) hits.push(i);
   });
-  expandSelectionGroups();
+  if(mode==="remove") for(const i of hits) S.sel.delete(i);
+  else if(mode==="toggle") for(const i of hits) S.sel.has(i)?S.sel.delete(i):S.sel.add(i);
+  else for(const i of hits) S.sel.add(i);
+  expandSelectionGroups(); pickCycleReset();
 }
 
 function hitIndex(p){
@@ -3340,7 +3444,7 @@ function offsetSide(p){
 let panning=false, panFrom=null, downAt=null, dragging=false;
 cv.addEventListener("contextmenu",e=>e.preventDefault());
 cv.addEventListener("pointerdown",e=>{
-  S.shiftDown=!!e.shiftKey;
+  S.shiftDown=!!e.shiftKey; S.ctrlDown=!!(e.ctrlKey||e.metaKey); S.altDown=!!e.altKey;
   cv.setPointerCapture(e.pointerId);
   const r=cv.getBoundingClientRect();
   setMouseFrom(e,r);
@@ -3365,11 +3469,12 @@ cv.addEventListener("pointerdown",e=>{
   if(mkIsTool(S.tool)){ mkPointerDown(e); return; }
   if(flowIsTool(S.tool)){ flowPointerDown(e); return; }
   if(gripBegin(S.mouse.sx,S.mouse.sy)) return;
-  downAt={sx:S.mouse.sx, sy:S.mouse.sy, w:cursorPoint(), shift:e.shiftKey||S.stickyShift};
+  downAt={sx:S.mouse.sx, sy:S.mouse.sy, w:cursorPoint(), shift:!!(e.shiftKey||S.stickyShift),
+    selMode:selectionMode(!!(e.ctrlKey||e.metaKey),!!(e.shiftKey||S.stickyShift))};
   dragging=false;
 });
 window.addEventListener("pointermove",e=>{
-  S.shiftDown=!!e.shiftKey;
+  S.shiftDown=!!e.shiftKey; S.ctrlDown=!!(e.ctrlKey||e.metaKey); S.altDown=!!e.altKey;
   const r=cv.getBoundingClientRect();
   setMouseFrom(e,r);
   if(touchMove(e)) return;
@@ -3391,6 +3496,7 @@ window.addEventListener("pointermove",e=>{
   readout(); draw();
 });
 window.addEventListener("pointerup",e=>{
+  S.shiftDown=!!e.shiftKey; S.ctrlDown=!!(e.ctrlKey||e.metaKey); S.altDown=!!e.altKey;
   if(touchUp(e)){ panning=false; panFrom=null; cv.classList.remove("panning"); return; }
   if(punchTap){ punchTap=false; punchAt(e); return; }
   if(panning){ panning=false; panFrom=null; cv.classList.remove("panning"); return; }
@@ -3425,8 +3531,8 @@ window.addEventListener("pointerup",e=>{
      from where the crosshair ended up rather than where the finger landed. */
   const slid=touchAimDrag();
   if(S.tool==="select"){
-    if(dragging && S.band){ pickBox(S.band.a,S.band.b,downAt.shift); S.band=null; }
-    else pickAt(downAt.w, downAt.shift);
+    if(dragging && S.band){ pickBox(S.band.a,S.band.b,downAt.selMode); S.band=null; }
+    else pickAt(downAt.w, downAt.selMode);
     updateProps();
   } else if(TOOLS[S.tool].pick){
     if(!dragging || slid){
@@ -3561,10 +3667,11 @@ function handleCommand(raw){
   if(S.tool==="rotate" && S.pending.length===1 && /^-?[\d.]+$/.test(s)){
     const th=rad(parseFloat(s));
     snap();
-    if(S.copyRotate) S.ents.push(...cloneEntitiesFreshGroups([...S.sel].map(i=>S.ents[i])).map(e=>rotEnt(e,S.pending[0],th)));
+    const copyNow=S.copyRotate||modCtrl();
+    if(copyNow) S.ents.push(...cloneEntitiesFreshGroups([...S.sel].map(i=>S.ents[i])).map(e=>rotEnt(e,S.pending[0],th)));
     else for(const i of S.sel) rotEnt(S.ents[i],S.pending[0],th);
     S.pending=[]; draw(); updateProps(); setPrompt();
-    return echo((S.copyRotate?"Rotated a copy of ":"Rotated ")+S.sel.size+" object(s) by "+s+"\u00B0");
+    return echo((copyNow?"Rotated a copy of ":"Rotated ")+S.sel.size+" object(s) by "+s+"\u00B0");
   }
   if(S.tool==="imgrotate" && S.pending.length===1 && /^-?[\d.]+$/.test(s)){
     const R=S.refImage;
@@ -6652,7 +6759,7 @@ function buildMobileShell(){
     mBtn("pan","One-finger pan",MICON.pan,()=>{ S.panMode=!S.panMode; updateActionBar(); }),
     mBtn("aim","Aim: press and slide to lift the crosshair above your fingertip. A plain tap always lands where you touched.",MICON.aim,()=>{ S.aimOffset=!S.aimOffset; updateActionBar(); draw(); }),
     mBtn("ortho","Ortho",MICON.ortho,()=>{ toggle("ortho"); updateActionBar(); }),
-    mBtn("shift","Add to selection",MICON.shift,()=>{ S.stickyShift=!S.stickyShift; updateActionBar(); }),
+    mBtn("shift","Shift / constrain",MICON.shift,()=>{ S.stickyShift=!S.stickyShift; updateActionBar(); }),
     mBtn("sheet","Layers, styles and properties",MICON.sheet,()=>toggleSheet())
   );
   /* Punch mode has a keyboard shortcut and a ribbon button, neither of which
@@ -9525,15 +9632,22 @@ function xVisibleTabs(){
 
 /* ============================================================ keyboard */
 window.addEventListener("keydown",e=>{
-  if(e.key==="Shift"){ S.shiftDown=true; if(S.tool==="imgcal"&&S.pending.length) draw(); }
+  if(e.key==="Shift"){ S.shiftDown=true; if(S.pending.length||S.base) draw(); }
+  if(e.key==="Control"||e.key==="Meta"){ S.ctrlDown=true; if(S.pending.length||S.base) draw(); }
+  if(e.key==="Alt") S.altDown=true;
   const typing = !!S.ask || document.activeElement===cmdin || document.activeElement===inlineEditor || !!textEdit;
   if(e.key==="Escape"){ cmdin.value=""; cancel(); return; }
+  if(!typing && e.key==="Tab" && S.tool==="select"){ e.preventDefault(); pickCycleNext(); return; }
   if(!typing && e.key==="Tab" && S.tool!=="measurealong" && S.snapList.length>1){
     e.preventDefault(); snapCycleNext(); return;
   }
   if(!typing && e.key==="Tab" && S.tool==="measurealong"){
     e.preventDefault(); S.measureTabChain=!S.measureTabChain; S.measureEscArmed=false;
     echo(S.measureTabChain?"Chain preview · click to measure connected run":"Element preview"); draw(); return;
+  }
+  if(!typing && e.code==="Space" && (S.tool==="move"||S.tool==="copy") && S.base){
+    e.preventDefault(); S.placeTurns=(S.placeTurns+1)%4;
+    echo("Placement rotated "+(S.placeTurns*90)+"° · Space for next"); draw(); return;
   }
   if(e.key==="F8"){ e.preventDefault(); return toggle("ortho"); }
   if(e.key==="F9"){ e.preventDefault(); return toggle("gridSnap"); }
@@ -9568,9 +9682,11 @@ window.addEventListener("keydown",e=>{
 
 
 window.addEventListener("keyup",e=>{
-  if(e.key==="Shift"){ S.shiftDown=false; if(S.tool==="imgcal"&&S.pending.length) draw(); }
+  if(e.key==="Shift"){ S.shiftDown=false; if(S.pending.length||S.base) draw(); }
+  if(e.key==="Control"||e.key==="Meta"){ S.ctrlDown=false; if(S.pending.length||S.base) draw(); }
+  if(e.key==="Alt") S.altDown=false;
 });
-window.addEventListener("blur",()=>{ if(S.shiftDown){ S.shiftDown=false; if(S.tool==="imgcal"&&S.pending.length) draw(); } });
+window.addEventListener("blur",()=>{ S.shiftDown=false; S.ctrlDown=false; S.altDown=false; if(S.pending.length||S.base) draw(); });
 
 /* ============================================================ ribbon UI */
 const RIBBON={
@@ -9691,11 +9807,11 @@ const HINTS={
   pickLines:"Trace a connected run of lines and offset the whole chain in one go. Pick a line, then pick the side.",
 
   /* --- Modify ---------------------------------------------------------- */
-  move:"Move the selection by a base point and a destination. With Weld on, joined endpoints of untouched entities follow.",
+  move:"Move the selection by a base point and a destination. Shift constrains H/V, Ctrl duplicates, Space rotates the placement preview 90°. With Weld on, joined endpoints of untouched entities follow.",
   copy:"Copy the selection to a destination. Multiple in the options bar keeps the base point fixed so you can drop several from one origin.",
-  rotate:"Rotate the selection around a base point.",
+  rotate:"Rotate the selection around a base point. Shift snaps to 15° increments; Ctrl rotates a copy.",
   mirror:"Mirror the selection across a two-point axis.",
-  scale:"Scale the selection about a base point, by a typed factor or a reference distance.",
+  scale:"Scale the selection about a base point, by a typed factor or a reference distance. Ctrl scales a copy; scale is uniform by design.",
   array:"Rectangular array of the selection. Asks for columns, rows and spacing.",
   explode:"Break polylines, splines, polygons and flow nodes into their component lines. Fires immediately on the current selection.",
   erase:"Delete the selection. Same as the Delete key.",
@@ -9777,7 +9893,7 @@ const HINTS={
   imgnext:"Cycle which loaded reference the image tools point at. The active one is the only one they affect.",
   imgmove:"Move the active reference by a base point and destination.",
   imgrotate:"Rotate the active reference around a base point. Pick a second point or type the angle in degrees, matching the Draw Rotate workflow.",
-  imgcal:"Set the scale of the active reference: pick two points on it, type the real distance between them. The two points are stored in image pixels, so the calibration survives every later move, rotate and crop.",
+  imgcal:"Set the scale of the active reference: pick two points on it, type the real distance between them. Hold Shift to force the second point horizontal or vertical. The two points are stored in image pixels, so calibration survives later transforms.",
   imgstraight:"Pick two points that should be level and the active reference rotates to make them so. For scans that went in crooked.",
   imgcrop:"Crop the active reference to a box. Non-destructive, the pixels are still there.",
   imgresetcrop:"Undo the crop on the active reference and show the whole image again.",
