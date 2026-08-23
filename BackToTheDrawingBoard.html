@@ -2697,6 +2697,19 @@ function offsetEnt(e,d,side){
     }
     if(!closed) pts.push(off[off.length-1].b);
     if(closed) pts.unshift(pts.pop());
+    /* Offsetting further than the shape's own width folds it inside out. The
+       intersections still solve, so it comes back as a valid-looking polygon
+       facing the wrong way: a 10x10 square offset inward by 20 returned a 30x30
+       square. A segment that now runs opposite its original direction is the
+       tell, and it is the cheap version of the self-intersection test real CAD
+       does before refusing the offset. */
+    const segCount = closed ? off.length : off.length;
+    for(let i=0;i<segCount;i++){
+      const a=pts[i], b=pts[(i+1)%pts.length];
+      if(!a||!b) continue;
+      const was=sub(segs[i].b,segs[i].a), now=sub(b,a);
+      if(was.x*now.x+was.y*now.y < 0) return null;
+    }
     return {t:"pline",li:e.li,si:e.si,closed,pts};
   }
   return null;
@@ -2747,13 +2760,17 @@ function explodeSel(){
       n++;
     } else if(e.t==="dim"){
       const {d,p1,p2,o}=dimGeom(e), nn=norm(o), h=e.h||S.textHeight;
-      out.push({t:"line",li:e.li,a:add(e.a,mul(o,.06)),b:add(p1,mul(nn,h*.6))});
-      out.push({t:"line",li:e.li,a:add(e.b,mul(o,.06)),b:add(p2,mul(nn,h*.6))});
-      out.push({t:"line",li:e.li,a:p1,b:p2});
+      /* si has to ride along or the pieces fall back to "no style": exploding a
+         pline preserved it and exploding a dim silently did not, so the same
+         dimension changed weight and colour just by being exploded. */
+      const si=e.si;
+      out.push({t:"line",li:e.li,si,a:add(e.a,mul(o,.06)),b:add(p1,mul(nn,h*.6))});
+      out.push({t:"line",li:e.li,si,a:add(e.b,mul(o,.06)),b:add(p2,mul(nn,h*.6))});
+      out.push({t:"line",li:e.li,si,a:p1,b:p2});
       const tk=h*.6;
       for(const q of [p1,p2])
-        out.push({t:"line",li:e.li,a:add(q,mul(add(d,perp(d)),tk)),b:sub(q,mul(add(d,perp(d)),tk))});
-      out.push({t:"text",li:e.li,p:mul(add(p1,p2),.5),h,s:dist(e.a,e.b).toFixed(1),rot:0});
+        out.push({t:"line",li:e.li,si,a:add(q,mul(add(d,perp(d)),tk)),b:sub(q,mul(add(d,perp(d)),tk))});
+      out.push({t:"text",li:e.li,si,p:mul(add(p1,p2),.5),h,s:dist(e.a,e.b).toFixed(1),rot:0});
       n++;
     } else out.push(e);
   });
@@ -3748,27 +3765,38 @@ cmdin.addEventListener("keydown",e=>{
 function parsePoint(str){
   const s=str.replace(/\s+/g,"");
   const last=S.pending.length?S.pending[S.pending.length-1]:S.base;
+  /* [\d.]+ happily matches a lone "." and parseFloat(".") is NaN, so ".,."
+     used to parse as a real point. Line survived on dist()>1e-9 being false
+     for NaN, but Rect and Polygon built entities with NaN corners. Guarding
+     the one exit covers every tool and every format below. */
+  const ok=v=>(v && isFinite(v.x) && isFinite(v.y)) ? v : null;
   let m;
   if((m=/^@?(-?[\d.]+)<(-?[\d.]+)$/.exec(s))){
     if(!last) return null;
     const d=parseFloat(m[1]), a=rad(parseFloat(m[2]));
-    return V(last.x+d*Math.cos(a), last.y+d*Math.sin(a));
+    return ok(V(last.x+d*Math.cos(a), last.y+d*Math.sin(a)));
   }
   if((m=/^@(-?[\d.]+),(-?[\d.]+)$/.exec(s))){
     if(!last) return null;
-    return V(last.x+parseFloat(m[1]), last.y+parseFloat(m[2]));
+    return ok(V(last.x+parseFloat(m[1]), last.y+parseFloat(m[2])));
   }
-  if((m=/^(-?[\d.]+),(-?[\d.]+)$/.exec(s))) return V(parseFloat(m[1]),parseFloat(m[2]));
+  if((m=/^(-?[\d.]+),(-?[\d.]+)$/.exec(s))) return ok(V(parseFloat(m[1]),parseFloat(m[2])));
   if((m=/^(-?[\d.]+)$/.exec(s))){
     if(!last) return null;
     const d=parseFloat(m[1]);
+    if(!isFinite(d)) return null;
     const dir=norm(sub(applyOrtho(V(wX(S.mouse.sx),wY(S.mouse.sy)),last),last));
     if(!isFinite(dir.x)||(dir.x===0&&dir.y===0)) return null;
-    return add(last,mul(dir,d));
+    return ok(add(last,mul(dir,d)));
   }
   return null;
 }
-const ALIAS={};
+/* Object.create(null), not {}: a plain object inherits constructor, toString
+   and friends, so ALIAS["constructor"] came back truthy and handleCommand
+   dispatched setTool(Object) - typing "constructor" at the command line threw.
+   A null prototype also means ALIAS["__proto__"]=x stores a key instead of
+   silently reassigning the prototype. */
+const ALIAS=Object.create(null);
 for(const [id,T] of Object.entries(TOOLS)){
   ALIAS[id]=id;
   ALIAS[id.toLowerCase()]=id;      // handleCommand lowercases, so pickLines needs picklines
