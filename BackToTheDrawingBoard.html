@@ -97,9 +97,27 @@
     grid-area:ribbon;background:var(--panel);border-bottom:1px solid var(--rule);
     display:flex;flex-direction:column;box-shadow:0 3px 10px rgba(0,0,0,.08);overflow:hidden;min-height:0;
   }
-  .rtabs{
-    display:flex;gap:2px;padding:3px 7px 0;background:var(--panel-2);border-bottom:1px solid var(--rule-soft);min-height:29px;
+  /* The tab strip is now a row so the ribbon state control can sit at its right
+     end, which is where Revit and AutoCAD put theirs. Tabs scroll rather than
+     wrap when the window is too narrow to show them all. */
+  .rtabs-row{
+    display:flex;align-items:stretch;background:var(--panel-2);border-bottom:1px solid var(--rule-soft);
+    min-height:29px;padding-right:5px;flex:0 0 auto;
   }
+  .rtabs{
+    display:flex;gap:2px;padding:3px 7px 0;min-height:29px;flex:1 1 auto;min-width:0;
+    overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
+  }
+  .rtabs::-webkit-scrollbar{display:none}
+  .rtab{flex:0 0 auto}
+  .rstate{display:flex;align-items:center;gap:2px;flex:0 0 auto;padding-left:6px;margin-left:4px;border-left:1px solid var(--rule-soft)}
+  .rstate button{
+    font:inherit;font-size:10px;background:transparent;border:1px solid transparent;border-radius:3px;
+    color:var(--ink-faint);cursor:pointer;height:20px;padding:0 7px;display:flex;align-items:center;gap:5px;
+  }
+  .rstate button:hover{background:var(--raised);color:var(--ink);border-color:var(--rule)}
+  .rstate button:focus-visible{outline:1px solid var(--pen);outline-offset:1px}
+  .rstate .glyph{font-size:9px;line-height:1;opacity:.8}
   .rtab{
     font:inherit;font-size:11px;background:transparent;border:0;border-bottom:2px solid transparent;
     color:var(--ink-dim);padding:5px 10px 6px;cursor:pointer;border-radius:3px 3px 0 0;
@@ -137,7 +155,45 @@
   .rpanel select:focus,.rpanel input:focus{outline:1px solid var(--pen);outline-offset:-1px;border-color:var(--pen)}
   .rstack{display:flex;flex-direction:column;gap:2px}
 
-  /* compact mode: keep tabs and contextual bar, surrender vertical space to drawing */
+  /* ---- ribbon overflow: collapse panels instead of scrolling them off screen
+     AutoCAD and Revit both degrade a too-wide ribbon by collapsing panels from
+     the right into a single button that drops the panel down as a flyout. That
+     is what this does, driven by a width measurement after every paint. The
+     three manual states below are the same four-state cycle those apps expose,
+     folded down to the three that are actually distinct in this app. */
+  .rpanel-stub{
+    display:none;font:inherit;font-size:9.5px;background:transparent;border:1px solid transparent;border-radius:4px;
+    color:var(--ink-dim);cursor:pointer;flex-direction:column;align-items:center;justify-content:flex-start;
+    gap:2px;width:56px;min-height:52px;padding:4px 2px 2px;line-height:1.08;text-align:center;
+  }
+  .rpanel-stub svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+  .rpanel-stub .caret{font-size:7px;opacity:.6;line-height:1}
+  .rpanel-stub:hover{color:var(--ink);background:var(--raised);border-color:#414a56}
+  .rpanel-stub:focus-visible{outline:1px solid var(--pen);outline-offset:1px}
+  .rpanel.collapsed{padding:2px 4px 0}
+  .rpanel.collapsed>.rpanel-body,.rpanel.collapsed>.rpanel-label{display:none}
+  .rpanel.collapsed>.rpanel-stub{display:flex}
+  .rpanel.collapsed[data-open="1"]>.rpanel-stub{color:#dceeff;background:var(--pen-soft);border-color:#3c6788}
+  .rpanel-flyout{
+    position:fixed;z-index:80;background:var(--panel);border:1px solid var(--rule);border-radius:5px;
+    box-shadow:var(--shadow),0 14px 32px rgba(0,0,0,.44);padding:4px 7px 2px;display:flex;flex-direction:column;
+    max-width:calc(100vw - 12px);overflow:auto;
+  }
+  .rpanel-flyout>.rpanel-body{display:flex;align-items:flex-start;gap:2px}
+  .rpanel-flyout>.rpanel-label{text-align:center;font-size:9px;color:var(--ink-faint);padding:3px 1px 1px;margin-top:3px;border-top:1px solid var(--rule-soft)}
+
+  /* state: minimise to panel buttons - every panel is a stub, laid out in a row
+     so the ribbon also gives back vertical space, not just horizontal */
+  #app.ribbon-buttons .rpanel{padding:2px 3px 0;justify-content:center}
+  #app.ribbon-buttons .rpanel>.rpanel-body,#app.ribbon-buttons .rpanel>.rpanel-label{display:none}
+  #app.ribbon-buttons .rpanel>.rpanel-stub{
+    display:flex;flex-direction:row;align-items:center;width:auto;min-height:26px;
+    padding:2px 8px 2px 5px;gap:5px;font-size:10px;text-align:left;
+  }
+  #app.ribbon-buttons .rpanel-stub svg{width:18px;height:18px}
+  #app.ribbon-buttons .rpanels{min-height:0;align-items:center;padding:3px 5px}
+
+  /* state: minimise to tabs */
   #app.ribbon-compact .rpanels{display:none}
   #app.ribbon-compact #ribbon{box-shadow:none}
   /* no ghost row when the current tool has no contextual controls */
@@ -175,15 +231,23 @@
   canvas.panning{cursor:grabbing}canvas.picking{cursor:default}
 
   /* ---- viewport splitters: resize top ribbon and bottom command/status stack ---- */
+  /* pointer-events sit on the visible grab bar only. The strip used to span the
+     full width, so the top and bottom 8px of the drawing area silently ate every
+     click that landed there. */
   .shell-resizer{
-    position:absolute;left:0;right:0;height:8px;z-index:20;cursor:row-resize;touch-action:none;
-    background:transparent;outline:none;
+    position:absolute;left:0;right:0;height:10px;z-index:20;cursor:row-resize;touch-action:none;
+    background:transparent;outline:none;pointer-events:none;
   }
   .shell-resizer-top{top:0}
   .shell-resizer-bottom{bottom:0}
   .shell-resizer::after{
-    content:"";position:absolute;left:50%;top:3px;transform:translateX(-50%);width:54px;height:2px;
-    border-radius:2px;background:#53606d;opacity:.16;transition:opacity .12s linear,width .12s linear,background .12s linear;
+    content:"";position:absolute;left:50%;top:4px;transform:translateX(-50%);width:76px;height:2px;
+    border-radius:2px;background:#53606d;opacity:.16;pointer-events:auto;cursor:row-resize;
+    transition:opacity .12s linear,width .12s linear,background .12s linear;
+  }
+  .shell-resizer::before{
+    content:"";position:absolute;left:50%;top:0;transform:translateX(-50%);width:140px;height:10px;
+    pointer-events:auto;cursor:row-resize;
   }
   .shell-resizer:hover::after,.shell-resizer:focus-visible::after,.shell-resizer.dragging::after{
     opacity:.9;width:86px;background:var(--pen);
@@ -398,6 +462,49 @@
     #app.mobile #mact{grid-template-columns:repeat(2,44px)}
   }
 
+  /* ---- narrow viewport metrics -------------------------------------------
+     Measured, not guessed: the Draw tab needs ~1860px at these metrics, so on a
+     1920 panel it clears by about 60px, which one wider system font would eat.
+     Six px off each small button is ~100px back across Draw's seven columns.
+     An ultrawide never sees this rule, so nothing changes at 3440. */
+  @media (max-width:2100px){
+    .small{min-width:78px;padding:2px 4px 2px 3px}
+    .big{width:52px}
+    .rpanel{padding:2px 5px 0}
+  }
+
+  /* ---- short viewport density -------------------------------------------
+     A maximised browser on a 1920x1080 panel leaves roughly 918px of viewport.
+     226px of fixed chrome out of that is a quarter of the screen, so every
+     strip loses a few px and the ribbon defaults shorter. Nothing reflows, the
+     rows just stop being sized for a 1440p ultrawide. */
+  @media (max-height:1000px){
+    #app{
+      --optbar-h:28px;--status-h:22px;--cmd-h:30px;
+      grid-template-rows:30px var(--ribbon-h) var(--optbar-h) minmax(0,1fr) var(--status-h) var(--cmd-h);
+    }
+    .doc-tab{height:24px;min-width:160px}
+    .top-action{height:22px}
+    #cmdin{height:21px}
+    #cmd{padding:0 6px}
+    .tg{height:18px;padding:2px 6px;min-width:34px}
+    .coord{min-width:170px}
+    .rtabs-row,.rtabs{min-height:27px}
+    .rtab{padding:4px 9px 5px}
+    .rpanels{min-height:62px;padding:2px 5px 1px}
+    .big{min-height:50px;width:52px}
+    /* Three of these stack per column, so each px here is 3px of ribbon. */
+    .small{min-height:17px;padding:1px 4px 1px 3px}
+    .rpanel-label{padding:1px 1px 0;font-size:8.5px}
+  }
+  @media (max-height:860px){
+    #app{--optbar-h:26px;--status-h:20px;--cmd-h:28px;grid-template-rows:28px var(--ribbon-h) var(--optbar-h) minmax(0,1fr) var(--status-h) var(--cmd-h)}
+    .workspace-tag{display:none}
+    .rpanels{min-height:58px}
+    .big{min-height:47px}
+    .big svg{width:21px;height:21px}
+  }
+
   @media (max-width:900px){
     #app{grid-template-columns:1fr;grid-template-areas:"top" "ribbon" "optbar" "canvas" "status" "cmd"}
     #right{display:none}.small{min-width:0}.workspace-tag{display:none}.doc-tab{min-width:140px}
@@ -497,7 +604,12 @@
   </div>
 
   <div id="ribbon">
-    <div class="rtabs" id="rtabs" role="tablist"></div>
+    <div class="rtabs-row">
+      <div class="rtabs" id="rtabs" role="tablist"></div>
+      <div class="rstate">
+        <button id="rstate-cycle" type="button" aria-label="Ribbon display state"><span class="glyph" id="rstate-glyph">&#9650;</span><span id="rstate-label">Full</span></button>
+      </div>
+    </div>
     <div class="rpanels" id="rpanels"></div>
   </div>
 
@@ -10155,7 +10267,137 @@ function themeForgeWidget(){
   body.append(swatches,preview);wrap.append(bar,body);refresh();return wrap;
 }
 
+/* ============================================================ ribbon overflow
+   The ribbon used to be a horizontal scroller. On a 3440px ultrawide every
+   panel fits and nothing looks wrong; on 1920 the Draw tab needs about 2040px
+   and the last two panels sit off screen behind a 6px scrollbar with no
+   affordance pointing at them.
+
+   AutoCAD and Revit solve this the same way: when the window cannot hold every
+   panel, panels collapse from the right edge into a single button carrying the
+   panel name, and clicking that button drops the whole panel down as a flyout.
+   fitRibbonPanels() is that rule, applied by measurement after every paint and
+   on every resize. */
+let ribbonState="full";           /* full | buttons | tabs */
+let flyout=null;                  /* {el,panel,body,anchor} */
+let fitting=false;
+/* The full-state ribbon sizes itself to its content until the user drags the
+   splitter, at which point their height wins until they double-click to reset. */
+let ribbonHeightAuto=true;
+let autoRibbonMeasured=0;
+
+function closeRibbonFlyout(){
+  if(!flyout) return;
+  const {el,panel,body,anchor}=flyout;
+  /* Return the live body to its panel before anything can discard it. The
+     widgets inside carry their own handlers, so this is a move, never a clone. */
+  try{ panel.insertBefore(body,anchor); }catch(_){ try{panel.appendChild(body);}catch(_){} }
+  el.remove();
+  delete panel.dataset.open;
+  flyout=null;
+}
+
+function openRibbonFlyout(panel,stub,panelName){
+  const alreadyOpen = flyout && flyout.panel===panel;
+  closeRibbonFlyout();
+  if(alreadyOpen) return;
+  const body=panel.querySelector(":scope > .rpanel-body");
+  if(!body) return;
+  const anchor=body.nextSibling;
+  const el=document.createElement("div");
+  el.className="rpanel-flyout";
+  const lab=document.createElement("div");
+  lab.className="rpanel-label"; lab.textContent=panelName;
+  el.append(body,lab);
+  document.body.append(el);
+  flyout={el,panel,body,anchor};
+  panel.dataset.open="1";
+  const r=stub.getBoundingClientRect();
+  const w=el.offsetWidth, h=el.offsetHeight;
+  el.style.left=Math.max(4,Math.min(r.left, window.innerWidth-w-6))+"px";
+  el.style.top=(r.bottom+h+6>window.innerHeight ? Math.max(4,r.top-h-2) : r.bottom+2)+"px";
+}
+
+function ribbonStubFor(P,panel){
+  const b=document.createElement("button");
+  b.type="button"; b.className="rpanel-stub";
+  const iconId = P.big || (P.small && P.small[0]) || null;
+  const T = iconId ? itemOf(iconId) : null;
+  const short = P.name.split("\u00b7")[0].trim();
+  b.innerHTML='<svg viewBox="0 0 20 20" aria-hidden="true">'
+    +(T && T.svg ? T.svg : '<rect x="3.5" y="3.5" width="13" height="13" rx="2"/><path d="M3.5 8h13"/>')
+    +'</svg><span>'+short+'</span><span class="caret" aria-hidden="true">\u25be</span>';
+  b.title=P.name+"\n\nPanel is collapsed because the window is too narrow to show it in full. Click to drop it down.";
+  b.setAttribute("aria-haspopup","true");
+  b.addEventListener("click",e=>{ e.stopPropagation(); openRibbonFlyout(panel,b,P.name); });
+  return b;
+}
+
+/* --ribbon-h was a magic 101px. A panel whose small buttons stack three deep
+   needs about 107px once its label is counted, so the panel labels have been
+   clipped by the ribbon's overflow:hidden this whole time - 7px on a 1440p
+   ultrawide, more once the strips get tighter. Measuring the content and
+   sizing to it removes the guess, and means any future change to button
+   metrics resizes the ribbon instead of quietly cropping it.
+
+   Panels and bodies are stretched by the flex container, so their own
+   scrollHeight tracks whatever height the ribbon already has and would feed
+   back into itself. The tallest child of each body is content-sized, and that
+   is what gets measured. */
+function autoRibbonHeight(){
+  if(ribbonState!=="full" || !ribbonHeightAuto || ribbonTab==="Manage") return;
+  const host=document.getElementById("rpanels");
+  const row=document.querySelector(".rtabs-row");
+  if(!host || !row || !host.children.length) return;
+  const hcs=getComputedStyle(host);
+  let need=0;
+  for(const pn of host.children){
+    if(!pn.classList || !pn.classList.contains("rpanel")) continue;
+    const body=pn.querySelector(":scope > .rpanel-body");
+    if(!body) continue;
+    let inner=0;
+    for(const c of body.children) inner=Math.max(inner,c.getBoundingClientRect().height);
+    const lab=pn.querySelector(":scope > .rpanel-label");
+    const pcs=getComputedStyle(pn);
+    need=Math.max(need, inner
+      + (lab ? lab.getBoundingClientRect().height : 0)
+      + parseFloat(pcs.paddingTop) + parseFloat(pcs.paddingBottom));
+  }
+  if(!need) return;
+  const h=clamp(Math.ceil(row.getBoundingClientRect().height + need
+    + parseFloat(hcs.paddingTop) + parseFloat(hcs.paddingBottom) + 1), 60, UI_LIMIT.ribbonMax);
+  const now=parseFloat(getComputedStyle(appShell).getPropertyValue("--ribbon-h"))||0;
+  if(Math.abs(h-now)<1) return;
+  autoRibbonMeasured=h;
+  appShell.style.setProperty("--ribbon-h",h+"px");
+  requestAnimationFrame(resize);
+}
+
+function fitRibbonPanels(){
+  if(fitting) return;
+  const host=document.getElementById("rpanels");
+  if(!host) return;
+  const panels=[...host.children].filter(p=>p.classList.contains("rpanel") && !p.classList.contains("manage-dock"));
+  if(!panels.length) return;
+  fitting=true;
+  /* buttons state collapses everything unconditionally; the class does that in
+     CSS, so autofit only has to run for the full state. */
+  if(ribbonState!=="full" || ribbonTab==="Manage"){
+    panels.forEach(p=>p.classList.remove("collapsed"));
+    fitting=false; return;
+  }
+  panels.forEach(p=>p.classList.remove("collapsed"));
+  /* Collapse right to left. The leftmost panel of a tab is the one you reach
+     for most, so it is the last thing to go. */
+  for(let i=panels.length-1;i>=0;i--){
+    if(host.scrollWidth<=host.clientWidth+1) break;
+    panels[i].classList.add("collapsed");
+  }
+  fitting=false;
+}
+
 function paintRibbon(){
+  closeRibbonFlyout();
   const tabs=document.getElementById("rtabs");
   const want=xVisibleTabs();
   const have=[...tabs.children].map(b=>b.textContent);
@@ -10166,8 +10408,8 @@ function paintRibbon(){
       b.className="rtab"; b.textContent=name; b.setAttribute("role","tab");
       b.onclick=()=>{
         ribbonTab=name;
-        if(typeof appShell!=="undefined" && !appShell.classList.contains("ribbon-compact")){
-          appShell.style.setProperty("--ribbon-h", (name==="Manage" ? 205 : expandedRibbonHeight)+"px");
+        if(typeof appShell!=="undefined" && ribbonState==="full" && name==="Manage"){
+          appShell.style.setProperty("--ribbon-h","205px");
         }
         paintRibbon();
       };
@@ -10222,7 +10464,12 @@ function paintRibbon(){
       body.append(right);
     }
     const lab=document.createElement("div"); lab.className="rpanel-label"; lab.textContent=P.name;
-    panel.append(body,lab); host.append(panel);
+    panel.append(body,lab);
+    /* Every panel carries a stub. It is display:none until the panel collapses,
+       so building it here costs one button and removes an entire second code
+       path for "what does this panel look like when it does not fit". */
+    if(P.custom!=="rightdock") panel.append(ribbonStubFor(P,panel));
+    host.append(panel);
     if(P.custom==="rightdock"){
       paintLayers(); paintStyles(); updateProps();
     }
@@ -10232,6 +10479,8 @@ function paintRibbon(){
     if(id && TOOLS[id]) b.setAttribute("aria-pressed",String(id===S.tool));
     else if(id) b.setAttribute("aria-pressed","false");
   });
+  fitRibbonPanels();
+  autoRibbonHeight();
   cv.className = S.tool==="select" ? "picking"
     : (MK_TOOLS[S.tool] ? (MK_TOOLS[S.tool].kind==="erase" ? "erasing" : "inking") : "");
 }
@@ -11904,47 +12153,81 @@ const compactButton=document.getElementById("btn-compact");
 const appShell=document.getElementById("app");
 const topResizer=document.getElementById("resize-top");
 const bottomResizer=document.getElementById("resize-bottom");
-const UI_DEFAULT={ribbon:101,bottom:60};
+const shortViewport=()=>window.innerHeight<=1000;
+const stateCycleBtn=document.getElementById("rstate-cycle");
+const stateGlyph=document.getElementById("rstate-glyph");
+const stateLabel=document.getElementById("rstate-label");
+const UI_DEFAULT={ribbon:101,ribbonShort:92,ribbonButtons:64,bottom:60};
 const UI_LIMIT={ribbonMin:29,ribbonMax:240,bottomMin:28,bottomMax:180};
-let expandedRibbonHeight=UI_DEFAULT.ribbon;
+let expandedRibbonHeight=shortViewport()?UI_DEFAULT.ribbonShort:UI_DEFAULT.ribbon;
 let bottomHeight=UI_DEFAULT.bottom;
+let shellDragging=false;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
+/* Neither Revit nor AutoCAD lets you drag the ribbon to an arbitrary height,
+   because the panels do not reflow: an in-between height just clips them. Both
+   expose a state cycle instead. These are those states, minus "minimise to
+   panel titles", which in this app would be indistinguishable from the panel
+   buttons state. The splitter is kept, but it now snaps into these detents
+   rather than producing a clipped ribbon nobody asked for. */
+const RIBBON_STATES=["full","buttons","tabs"];
+const RIBBON_STATE_META={
+  full:   {glyph:"\u25b2", label:"Full",  next:"buttons",
+           title:"Ribbon: full\n\nEvery panel expanded. Panels that do not fit the window collapse to a single button.\n\nClick to minimise to panel buttons."},
+  buttons:{glyph:"\u25ac", label:"Panels",next:"tabs",
+           title:"Ribbon: panel buttons\n\nEach panel is one button; click it to drop the panel down. Reclaims both ribbon height and width.\n\nClick to minimise to tabs."},
+  tabs:   {glyph:"\u25bc", label:"Tabs",  next:"full",
+           title:"Ribbon: tabs only\n\nMaximum canvas. Tools stay reachable from the command line and keyboard.\n\nClick to restore the full ribbon."}
+};
+
 function storeShellPrefs(){
-  try{ localStorage.setItem("ortho.shell.v1",JSON.stringify({ribbon:expandedRibbonHeight,bottom:bottomHeight,compact:appShell.classList.contains("ribbon-compact")})); }catch(_){}
+  try{ localStorage.setItem("ortho.shell.v1",JSON.stringify({ribbon:expandedRibbonHeight,bottom:bottomHeight,state:ribbonState,auto:ribbonHeightAuto})); }catch(_){}
 }
 function refreshCompactButton(){
-  const on=appShell.classList.contains("ribbon-compact");
-  compactButton.setAttribute("aria-pressed",String(on));
-  compactButton.textContent=on?"Expand":"Compact";
-  compactButton.title=on
-    ? "Expand ribbon\n\nRestore the full-height ribbon with icon labels."
-    : "Compact ribbon\n\nShrink the ribbon to reclaim canvas height. Buttons keep their tooltips.";
+  const m=RIBBON_STATE_META[ribbonState]||RIBBON_STATE_META.full;
+  compactButton.setAttribute("aria-pressed",String(ribbonState!=="full"));
+  compactButton.textContent=ribbonState==="full"?"Compact":"Expand";
+  compactButton.title=ribbonState==="full"
+    ? "Compact ribbon\n\nCollapse straight to tabs. Use the control at the right of the tab strip to step through states."
+    : "Expand ribbon\n\nRestore the full-height ribbon with icon labels.";
+  if(stateGlyph) stateGlyph.textContent=m.glyph;
+  if(stateLabel) stateLabel.textContent=m.label;
+  if(stateCycleBtn) stateCycleBtn.title=m.title;
 }
-function applyRibbonHeight(h,persist=true){
-  h=clamp(Math.round(h),UI_LIMIT.ribbonMin,UI_LIMIT.ribbonMax);
-  const compact=h<=34;
-  appShell.classList.toggle("ribbon-compact",compact);
-  if(compact){
-    appShell.style.setProperty("--ribbon-h",UI_LIMIT.ribbonMin+"px");
-  }else{
-    expandedRibbonHeight=h;
-    appShell.style.setProperty("--ribbon-h",h+"px");
-  }
+function setRibbonState(s,persist=true){
+  if(!RIBBON_STATES.includes(s)) s="full";
+  ribbonState=s;
+  appShell.classList.toggle("ribbon-compact", s==="tabs");
+  appShell.classList.toggle("ribbon-buttons", s==="buttons");
+  if(s==="tabs")         appShell.style.setProperty("--ribbon-h",UI_LIMIT.ribbonMin+"px");
+  else if(s==="buttons") appShell.style.setProperty("--ribbon-h",UI_DEFAULT.ribbonButtons+"px");
+  else if(ribbonTab==="Manage") appShell.style.setProperty("--ribbon-h","205px");
+  else if(ribbonHeightAuto) appShell.style.setProperty("--ribbon-h",(autoRibbonMeasured||expandedRibbonHeight)+"px");
+  else                   appShell.style.setProperty("--ribbon-h",expandedRibbonHeight+"px");
+  closeRibbonFlyout();
   refreshCompactButton();
+  /* fitRibbonPanels forces a layout read per panel. During a splitter drag that
+     is up to seven forced reflows per pointermove, so it waits for pointerup. */
+  if(!shellDragging){ fitRibbonPanels(); autoRibbonHeight(); }
   if(persist) storeShellPrefs();
   requestAnimationFrame(resize);
 }
-function setCompactRibbon(on){
-  if(on){
-    appShell.classList.add("ribbon-compact");
-    appShell.style.setProperty("--ribbon-h",UI_LIMIT.ribbonMin+"px");
-  }else{
-    appShell.classList.remove("ribbon-compact");
-    appShell.style.setProperty("--ribbon-h",expandedRibbonHeight+"px");
-  }
-  refreshCompactButton();storeShellPrefs();requestAnimationFrame(resize);
+function cycleRibbonState(){ setRibbonState(RIBBON_STATE_META[ribbonState].next); }
+
+/* Drag maps onto the detents rather than setting a raw height. Above the
+   full-ribbon floor the drag is continuous, because there the extra pixels do
+   buy taller panel bodies. */
+function applyRibbonHeight(h,persist=true){
+  h=clamp(Math.round(h),UI_LIMIT.ribbonMin,UI_LIMIT.ribbonMax);
+  if(h<=44)  return setRibbonState("tabs",persist);
+  if(h<=80)  return setRibbonState("buttons",persist);
+  /* Dragging past the full-state floor is a deliberate height choice, so the
+     content measurement stands down until the splitter is double-clicked. */
+  ribbonHeightAuto=false;
+  expandedRibbonHeight=h;
+  setRibbonState("full",persist);
 }
+function setCompactRibbon(on){ setRibbonState(on?"tabs":"full"); }
 function applyBottomHeight(total,persist=true){
   total=clamp(Math.round(total),UI_LIMIT.bottomMin,UI_LIMIT.bottomMax);
   bottomHeight=total;
@@ -11954,7 +12237,7 @@ function applyBottomHeight(total,persist=true){
     appShell.style.setProperty("--status-h","0px");
     appShell.style.setProperty("--cmd-h",total+"px");
   }else{
-    const status=26;
+    const status=shortViewport()?22:26;
     appShell.style.setProperty("--status-h",status+"px");
     appShell.style.setProperty("--cmd-h",Math.max(22,total-status)+"px");
   }
@@ -11964,16 +12247,20 @@ function applyBottomHeight(total,persist=true){
 function restoreShellPrefs(){
   let p=null;
   try{ p=JSON.parse(localStorage.getItem("ortho.shell.v1")||"null"); }catch(_){}
-  if(p&&Number.isFinite(p.ribbon)) expandedRibbonHeight=clamp(p.ribbon,35,UI_LIMIT.ribbonMax);
+  if(p&&Number.isFinite(p.ribbon)) expandedRibbonHeight=clamp(p.ribbon,81,UI_LIMIT.ribbonMax);
+  if(p&&typeof p.auto==="boolean") ribbonHeightAuto=p.auto;
   if(p&&Number.isFinite(p.bottom)) bottomHeight=clamp(p.bottom,UI_LIMIT.bottomMin,UI_LIMIT.bottomMax);
   applyBottomHeight(bottomHeight,false);
-  if(p&&p.compact) setCompactRibbon(true); else applyRibbonHeight(expandedRibbonHeight,false);
+  /* p.compact is the old boolean pref; treat it as the tabs state. */
+  const want = p && (p.state || (p.compact?"tabs":null));
+  setRibbonState(RIBBON_STATES.includes(want)?want:"full",false);
 }
 function beginShellDrag(kind,e){
   if(e.button!==0) return;
   e.preventDefault();
   const handle=kind==="top"?topResizer:bottomResizer;
   handle.setPointerCapture(e.pointerId);handle.classList.add("dragging");document.body.classList.add("shell-resizing");
+  shellDragging=true;
   const y0=e.clientY;
   const start=kind==="top"?(appShell.classList.contains("ribbon-compact")?UI_LIMIT.ribbonMin:parseFloat(getComputedStyle(appShell).getPropertyValue("--ribbon-h"))||expandedRibbonHeight):bottomHeight;
   const move=ev=>{
@@ -11983,7 +12270,8 @@ function beginShellDrag(kind,e){
   };
   const end=ev=>{
     handle.removeEventListener("pointermove",move);handle.removeEventListener("pointerup",end);handle.removeEventListener("pointercancel",end);
-    handle.classList.remove("dragging");document.body.classList.remove("shell-resizing");storeShellPrefs();
+    handle.classList.remove("dragging");document.body.classList.remove("shell-resizing");
+    shellDragging=false;fitRibbonPanels();autoRibbonHeight();storeShellPrefs();
     try{handle.releasePointerCapture(ev.pointerId)}catch(_){}
   };
   handle.addEventListener("pointermove",move);handle.addEventListener("pointerup",end);handle.addEventListener("pointercancel",end);
@@ -11995,6 +12283,7 @@ function splitterKeys(kind,e){
   if(kind==="top"){
     let h=appShell.classList.contains("ribbon-compact")?UI_LIMIT.ribbonMin:(parseFloat(getComputedStyle(appShell).getPropertyValue("--ribbon-h"))||expandedRibbonHeight);
     if(e.key==="ArrowUp") h-=step; else if(e.key==="ArrowDown") h+=step; else if(e.key==="Home") h=UI_LIMIT.ribbonMin; else h=UI_LIMIT.ribbonMax;
+    if(h>80) ribbonHeightAuto=false;
     applyRibbonHeight(h);
   }else{
     let h=bottomHeight;
@@ -12007,10 +12296,35 @@ topResizer.addEventListener("pointerdown",e=>beginShellDrag("top",e));
 bottomResizer.addEventListener("pointerdown",e=>beginShellDrag("bottom",e));
 topResizer.addEventListener("keydown",e=>splitterKeys("top",e));
 bottomResizer.addEventListener("keydown",e=>splitterKeys("bottom",e));
-topResizer.addEventListener("dblclick",()=>{expandedRibbonHeight=UI_DEFAULT.ribbon;applyRibbonHeight(UI_DEFAULT.ribbon)});
+topResizer.addEventListener("dblclick",()=>{
+  ribbonHeightAuto=true;
+  expandedRibbonHeight=shortViewport()?UI_DEFAULT.ribbonShort:UI_DEFAULT.ribbon;
+  setRibbonState("full");
+  echo("Ribbon height reset to fit its content");
+});
 bottomResizer.addEventListener("dblclick",()=>applyBottomHeight(UI_DEFAULT.bottom));
-compactButton.addEventListener("click",()=>setCompactRibbon(!appShell.classList.contains("ribbon-compact")));
-document.getElementById("rtabs").addEventListener("dblclick",()=>setCompactRibbon(!appShell.classList.contains("ribbon-compact")));
+compactButton.addEventListener("click",()=>setRibbonState(ribbonState==="full"?"tabs":"full"));
+document.getElementById("rtabs").addEventListener("dblclick",()=>setRibbonState(ribbonState==="full"?"tabs":"full"));
+if(stateCycleBtn) stateCycleBtn.addEventListener("click",cycleRibbonState);
+
+/* Refit on any width change. clientWidth of #rpanels does not move when its
+   children collapse, so this cannot feed back into itself. */
+if(window.ResizeObserver){
+  let pending=false;
+  new ResizeObserver(()=>{
+    if(pending) return; pending=true;
+    requestAnimationFrame(()=>{ pending=false; closeRibbonFlyout(); fitRibbonPanels(); autoRibbonHeight(); });
+  }).observe(document.getElementById("rpanels"));
+}
+window.addEventListener("resize",()=>{ closeRibbonFlyout(); requestAnimationFrame(()=>{ fitRibbonPanels(); autoRibbonHeight(); }); });
+document.addEventListener("pointerdown",e=>{
+  if(!flyout) return;
+  if(flyout.el.contains(e.target)) return;
+  if(e.target.closest && e.target.closest(".rpanel-stub")) return;
+  closeRibbonFlyout();
+},true);
+window.addEventListener("keydown",e=>{ if(e.key==="Escape" && flyout) closeRibbonFlyout(); },true);
+
 restoreShellPrefs();
 themeRestore();
 
