@@ -59,7 +59,7 @@
 
   /* ---- application / document bar ---- */
   #top{
-    grid-area:top;display:flex;align-items:center;gap:6px;background:#22272e;
+    grid-area:top;display:flex;align-items:center;gap:6px;background:var(--panel-2);
     border-bottom:1px solid var(--rule-soft);padding:0 7px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset;
   }
   .brand{
@@ -68,7 +68,7 @@
   }
   .brand::before{
     content:"B";display:grid;place-items:center;width:20px;height:20px;border-radius:4px;
-    background:#2d6fa8;color:#f3f8fd;font-weight:700;font-size:11px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);
+    background:var(--pen);color:#f3f8fd;font-weight:700;font-size:11px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);
   }
   .brand b{font-weight:600;letter-spacing:.01em;color:var(--ink)}
   .workspace-tag{
@@ -76,7 +76,7 @@
   }
   .doc-tab{
     height:27px;min-width:190px;max-width:390px;display:flex;align-items:center;gap:7px;padding:0 10px;
-    background:#2b3038;border:1px solid #39414b;border-bottom-color:#2b3038;border-radius:5px 5px 0 0;
+    background:var(--panel-3);border:1px solid var(--rule);border-bottom-color:var(--panel-3);border-radius:5px 5px 0 0;
     color:var(--ink-dim);position:relative;align-self:flex-end;
   }
   .doc-tab::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--pen);opacity:.85;flex:0 0 auto}
@@ -98,14 +98,14 @@
     display:flex;flex-direction:column;box-shadow:0 3px 10px rgba(0,0,0,.08);overflow:hidden;min-height:0;
   }
   .rtabs{
-    display:flex;gap:2px;padding:3px 7px 0;background:#23282f;border-bottom:1px solid var(--rule-soft);min-height:29px;
+    display:flex;gap:2px;padding:3px 7px 0;background:var(--panel-2);border-bottom:1px solid var(--rule-soft);min-height:29px;
   }
   .rtab{
     font:inherit;font-size:11px;background:transparent;border:0;border-bottom:2px solid transparent;
     color:var(--ink-dim);padding:5px 10px 6px;cursor:pointer;border-radius:3px 3px 0 0;
   }
-  .rtab:hover{color:var(--ink);background:#2c323a}
-  .rtab[aria-selected="true"]{color:var(--ink);background:#2a3037;border-bottom-color:var(--pen)}
+  .rtab:hover{color:var(--ink);background:var(--raised)}
+  .rtab[aria-selected="true"]{color:var(--ink);background:var(--panel-3);border-bottom-color:var(--pen)}
   .rtab:focus-visible{outline:1px solid var(--pen);outline-offset:-2px}
   .rpanels{
     display:flex;align-items:stretch;overflow-x:auto;overflow-y:hidden;min-height:68px;padding:3px 5px 2px;
@@ -206,16 +206,20 @@
   .tg[aria-pressed="true"]{color:#cde9ff;border-color:#355b79;background:#263c50}
   .tg:focus-visible{outline:1px solid var(--pen);outline-offset:1px}
 
-  /* ---- right properties palette ---- */
+  /* ---- management palette ---- */
   #right{display:none;background:#21262d;overflow:hidden;}
-  /* Manage is a ribbon workspace, but the original palette stays in its
-     original DOM home. We reveal and restyle that exact palette over the
-     ribbon instead of reparenting it. This preserves every existing handler. */
+  /* Manage follows the same rule as every other ribbon tab: its UI lives in
+     #rpanels. The existing palette is mounted into the Manage panel so Layers,
+     Line Styles, Markups and Properties keep their live handlers without a
+     second state model. No fixed overlay, no magic screen coordinates. */
+  #app.manage-active .rpanels{flex:1;min-height:0;overflow:hidden;padding:3px 5px 2px}
+  #app.manage-active .rpanel.manage-dock{flex:1 1 auto;width:100%;min-width:0;padding:2px 0 0;border-right:0}
+  #app.manage-active .rpanel.manage-dock>.rpanel-body{min-width:0;min-height:0;overflow:hidden;padding:0 4px}
   #app.manage-active #right{
-    display:grid!important;position:fixed;z-index:60;left:6px;right:6px;top:67px;height:156px;
-    grid-template-columns:minmax(210px,260px) minmax(230px,300px) minmax(360px,1fr);
+    display:grid!important;position:static;z-index:auto;width:100%;height:100%;min-width:0;min-height:0;
+    grid-template-columns:minmax(190px,.8fr) minmax(220px,.95fr) minmax(250px,1.05fr) minmax(360px,1.7fr);
     grid-template-rows:24px minmax(0,1fr);
-    border:1px solid var(--rule);border-radius:5px;background:#20252b;box-shadow:var(--shadow);overflow:hidden;
+    border:1px solid var(--rule);border-radius:4px;background:#20252b;box-shadow:none;overflow:hidden;
   }
   #app.manage-active #right>:nth-child(1){grid-column:1;grid-row:1}
   #app.manage-active #right>:nth-child(2){grid-column:1;grid-row:2}
@@ -223,8 +227,10 @@
   #app.manage-active #right>:nth-child(4){grid-column:2;grid-row:2}
   #app.manage-active #right>:nth-child(5){grid-column:3;grid-row:1}
   #app.manage-active #right>:nth-child(6){grid-column:3;grid-row:2}
-  #app.manage-active #layers,#app.manage-active #styles,#app.manage-active #props{max-height:none;overflow:auto;min-height:0}
-  #app.manage-active #props{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));align-content:start}
+  #app.manage-active #right>:nth-child(7){grid-column:4;grid-row:1}
+  #app.manage-active #right>:nth-child(8){grid-column:4;grid-row:2}
+  #app.manage-active #layers,#app.manage-active #styles,#app.manage-active #mklist,#app.manage-active #props{max-height:none;overflow:auto;min-height:0}
+  #app.manage-active #props{display:grid;grid-template-columns:repeat(2,minmax(170px,1fr));align-content:start;padding-bottom:0}
   #app.manage-active #props>.hint{grid-column:1/-1}
   #app.manage-active .row{min-height:24px}
   #app.manage-active .sect-head{padding:4px 7px}
@@ -271,9 +277,40 @@
   #props .hint .small{display:inline-flex;min-width:0;width:auto;padding:5px 8px;margin:2px 3px 2px 0;vertical-align:middle;background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;color:var(--ink-dim)}#props .hint .small:hover{color:var(--ink);background:#343a43}
   .hint{padding:7px 8px;color:#6e7884;font-size:9.8px;line-height:1.45}.hint kbd{background:#2d333b;border:1px solid #434c57;border-radius:3px;padding:0 3px;color:#aeb7c2;font-family:var(--mono);font-size:9px}
 
+  /* ---- Theme Forge --------------------------------------------------
+     Chroma-style palette generation for the application shell. It is deliberately
+     a native ribbon panel, not a floating overlay. The drawing document never
+     stores these values; they are a user-interface preference only. */
+  #app.manage-active .rpanels{overflow-x:auto}
+  #app.manage-active .rpanel.manage-dock{width:auto;min-width:760px}
+  .rpanel.theme-forge-panel{width:334px;min-width:334px;padding-left:5px;padding-right:6px}
+  .theme-forge{width:100%;height:100%;min-height:0;display:grid;grid-template-rows:25px minmax(0,1fr);gap:3px}
+  .tf-toolbar{display:flex;align-items:center;gap:3px;min-width:0}
+  .tf-toolbar select{width:101px;min-width:0;max-width:none;height:22px}
+  .tf-btn{font:inherit;font-size:9.5px;height:22px;padding:0 7px;border:1px solid var(--rule);border-radius:4px;background:var(--panel-3);color:var(--ink-dim);cursor:pointer;white-space:nowrap}
+  .tf-btn:hover{background:var(--raised);color:var(--ink)}
+  .tf-btn.primary{border-color:color-mix(in srgb,var(--pen) 60%,var(--rule));color:var(--pen-strong);background:var(--pen-soft)}
+  .tf-body{display:grid;grid-template-columns:174px minmax(0,1fr);gap:5px;min-height:0}
+  .tf-swatches{display:grid;grid-template-columns:1fr 1fr;gap:3px;align-content:start;min-width:0}
+  .tf-swatch{display:grid;grid-template-columns:18px minmax(0,1fr) 14px;align-items:center;gap:3px;min-width:0;height:26px;padding:2px 3px;border:1px solid var(--rule-soft);border-radius:4px;background:var(--panel-2)}
+  .tf-swatch input[type=color]{width:18px;height:18px;padding:0;border:0;border-radius:3px;background:transparent;cursor:pointer;overflow:hidden}
+  .tf-swatch input[type=color]::-webkit-color-swatch-wrapper{padding:0}
+  .tf-swatch input[type=color]::-webkit-color-swatch{border:1px solid var(--rule);border-radius:3px}
+  .tf-swatch span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;color:var(--ink-dim)}
+  .tf-swatch input[type=checkbox]{width:12px;height:12px;accent-color:var(--pen);cursor:pointer}
+  .tf-preview{min-width:0;border:1px solid var(--tf-rule,var(--rule));border-radius:5px;background:var(--tf-bg,var(--ground));padding:5px;display:flex;flex-direction:column;gap:4px;overflow:hidden}
+  .tf-preview-head{height:17px;border-radius:3px;background:var(--tf-surface,var(--panel-2));display:flex;align-items:center;padding:0 5px;gap:4px;color:var(--tf-text,var(--ink));font-size:8.5px}
+  .tf-preview-dot{width:6px;height:6px;border-radius:50%;background:var(--tf-primary,var(--pen));flex:0 0 auto}
+  .tf-preview-card{flex:1;min-height:0;border:1px solid var(--tf-rule,var(--rule));border-radius:3px;background:var(--tf-raised,var(--raised));padding:5px;color:var(--tf-text,var(--ink));font-size:8px}
+  .tf-preview-line{height:3px;border-radius:2px;background:var(--tf-muted,var(--ink-dim));opacity:.55;margin-bottom:4px}
+  .tf-preview-line.short{width:62%}
+  .tf-preview-actions{display:flex;gap:3px;margin-top:5px}
+  .tf-preview-button{height:14px;min-width:34px;border-radius:3px;background:var(--tf-primary,var(--pen));color:var(--tf-bg,var(--ground));display:grid;place-items:center;font-size:7px;font-weight:600}
+  .tf-preview-chip{height:14px;min-width:28px;border-radius:7px;border:1px solid var(--tf-accent,var(--snap));color:var(--tf-accent,var(--snap));display:grid;place-items:center;font-size:7px}
+
   /* ---- command line ---- */
   #cmd{
-    grid-area:cmd;background:#1d2228;border-top:1px solid var(--rule);display:flex;align-items:center;padding:0 7px;gap:7px;font-family:var(--mono);
+    grid-area:cmd;background:var(--panel-2);border-top:1px solid var(--rule);display:flex;align-items:center;padding:0 7px;gap:7px;font-family:var(--mono);
     box-shadow:0 -4px 12px rgba(0,0,0,.06);overflow:hidden;min-height:0;
   }
   #prompt{color:#8cc5f3;white-space:nowrap;font-size:10.5px;font-family:var(--mono);font-weight:600}
@@ -444,7 +481,7 @@
   @keyframes punch-fatal{
     0%{opacity:0; transform:scale(2.4)} 12%{opacity:1; transform:scale(1)}
     16%{transform:scale(1.06)} 20%{transform:scale(1)} 82%{opacity:1} 100%{opacity:0; transform:scale(1)} }
-  #app.mobile.manage-active #right{left:4px;right:4px;top:70px;height:180px;grid-template-columns:1fr 1fr 1.25fr;}
+  #app.mobile.manage-active #right{grid-template-columns:minmax(150px,.8fr) minmax(170px,.9fr) minmax(200px,1fr) minmax(260px,1.4fr);}
 </style>
 </head>
 <body>
@@ -9528,7 +9565,8 @@ const RIBBON={
     {name:"Image", custom:"png"}
   ],
   Manage:[
-    {name:"Layers · Line Styles · Properties", custom:"rightdock"}
+    {name:"Theme Forge", custom:"themeforge"},
+    {name:"Layers · Line Styles · Markups · Properties", custom:"rightdock"}
   ],
   View:[
     {name:"Workspace", custom:"workspace"},
@@ -9720,7 +9758,8 @@ const HINTS={
   toggles:"Ortho, grid, grid snap, object snap, reference edge assist and weld. The same six toggles as the status bar.",
   snaps:"Which object snaps are live, whether recursive midpoints are offered, and the dimension snap increments.",
   grid:"Grid spacing in mm and whether the grid is drawn. The pitch shown adapts as you zoom.",
-  rightdock:"Show or hide the right-hand palette holding Layers, Line Styles and Properties.",
+  themeforge:"Generate a coordinated application palette, lock colours you want to keep, preview it, then apply it. Stored as a local UI preference, never in the drawing file.",
+  rightdock:"Manage Layers, Line Styles, Markups and Properties in the live ribbon dock.",
 
   /* --- Experimental ----------------------------------------------------- */
   xsurfer:"Send a rider along a line and watch where the path actually goes. Useful for following a route through a busy drawing.",
@@ -9801,6 +9840,163 @@ function mkBtn(id,big){
   b.onclick=()=>activateRibbonItem(id);
   return b;
 }
+/* ============================================================ Theme Forge
+   Semantic UI palette generator descended from the Chroma Forge idea. The app
+   consumes a small set of semantic colours and derives the rest. Stored only in
+   localStorage, so a .b2db drawing cannot alter somebody's application theme. */
+const THEME_PREF_KEY="b2db.theme.v1";
+const THEME_HARMONIES={
+  Analogous:35,
+  Complementary:180,
+  Triadic:120,
+  "Split complement":150,
+  Monochrome:0
+};
+const THEME_DEFAULT=Object.freeze({
+  background:"#191c21",
+  surface:"#20252c",
+  primary:"#62a6e8",
+  accent:"#54c7c4",
+  text:"#e5e9ef",
+  muted:"#a7b0bd"
+});
+const THEME_LABELS={background:"Background",surface:"Surface",primary:"Primary",accent:"Accent",text:"Text",muted:"Muted"};
+const themeState={
+  applied:{...THEME_DEFAULT},
+  draft:{...THEME_DEFAULT},
+  locks:{background:false,surface:false,primary:false,accent:false,text:false,muted:false},
+  harmony:"Analogous"
+};
+function themeHex(v){
+  v=String(v||"").trim();
+  return /^#[0-9a-f]{6}$/i.test(v)?v.toLowerCase():null;
+}
+function themeRgb(hex){
+  const h=themeHex(hex)||"#000000", n=parseInt(h.slice(1),16);
+  return {r:(n>>16)&255,g:(n>>8)&255,b:n&255};
+}
+function themeHexFromRgb(r,g,b){
+  const h=n=>Math.max(0,Math.min(255,Math.round(n))).toString(16).padStart(2,"0");
+  return "#"+h(r)+h(g)+h(b);
+}
+function themeMix(a,b,t){
+  const A=themeRgb(a),B=themeRgb(b); t=Math.max(0,Math.min(1,t));
+  return themeHexFromRgb(A.r+(B.r-A.r)*t,A.g+(B.g-A.g)*t,A.b+(B.b-A.b)*t);
+}
+function themeHslToHex(h,s,l){
+  h=((h%360)+360)%360; s=Math.max(0,Math.min(100,s))/100; l=Math.max(0,Math.min(100,l))/100;
+  const c=(1-Math.abs(2*l-1))*s,x=c*(1-Math.abs((h/60)%2-1)),m=l-c/2;
+  let r=0,g=0,b=0;
+  if(h<60){r=c;g=x}else if(h<120){r=x;g=c}else if(h<180){g=c;b=x}else if(h<240){g=x;b=c}else if(h<300){r=x;b=c}else{r=c;b=x}
+  return themeHexFromRgb((r+m)*255,(g+m)*255,(b+m)*255);
+}
+function themeHexToHsl(hex){
+  const C=themeRgb(hex),r=C.r/255,g=C.g/255,b=C.b/255,max=Math.max(r,g,b),min=Math.min(r,g,b),d=max-min;
+  let h=0;if(d){if(max===r)h=60*(((g-b)/d)%6);else if(max===g)h=60*((b-r)/d+2);else h=60*((r-g)/d+4)}
+  if(h<0)h+=360; const l=(max+min)/2, ss=d?d/(1-Math.abs(2*l-1)):0;
+  return {h,s:ss*100,l:l*100};
+}
+function themeDerived(T){
+  const bg=T.background,s=T.surface,p=T.primary,a=T.accent,tx=T.text,mu=T.muted;
+  return {
+    "--ground":bg,
+    "--panel":themeMix(s,tx,.045),
+    "--panel-2":s,
+    "--panel-3":themeMix(s,tx,.085),
+    "--raised":themeMix(s,tx,.14),
+    "--raised-2":themeMix(s,tx,.19),
+    "--rule":themeMix(s,tx,.17),
+    "--rule-soft":themeMix(s,tx,.10),
+    "--ink":tx,
+    "--ink-dim":mu,
+    "--ink-faint":themeMix(mu,bg,.32),
+    "--pen":p,
+    "--pen-strong":themeMix(p,"#ffffff",.20),
+    "--pen-soft":themeMix(bg,p,.24),
+    "--snap":a,
+    "--grid-minor":themeMix(bg,tx,.045),
+    "--grid-major":themeMix(bg,tx,.095),
+    "--axis":themeMix(bg,mu,.34)
+  };
+}
+function themeApply(T,persist=false){
+  const clean={};
+  for(const k of Object.keys(THEME_DEFAULT)) clean[k]=themeHex(T[k])||THEME_DEFAULT[k];
+  const root=document.documentElement;
+  for(const [k,v] of Object.entries(themeDerived(clean))) root.style.setProperty(k,v);
+  themeState.applied={...clean}; themeState.draft={...clean};
+  if(persist){
+    try{localStorage.setItem(THEME_PREF_KEY,JSON.stringify({theme:clean,locks:themeState.locks,harmony:themeState.harmony}))}catch(_){}
+  }
+  draw();
+}
+function themeRestore(){
+  let p=null;try{p=JSON.parse(localStorage.getItem(THEME_PREF_KEY)||"null")}catch(_){}
+  if(!p||!p.theme) return themeApply(THEME_DEFAULT,false);
+  const clean={}; for(const k of Object.keys(THEME_DEFAULT)) clean[k]=themeHex(p.theme[k])||THEME_DEFAULT[k];
+  if(p.locks&&typeof p.locks==="object") for(const k of Object.keys(themeState.locks)) themeState.locks[k]=p.locks[k]===true;
+  if(p.harmony in THEME_HARMONIES) themeState.harmony=p.harmony;
+  themeApply(clean,false);
+}
+function themeGenerate(){
+  const D={...themeState.draft}, L=themeState.locks;
+  const existing=themeHexToHsl(D.primary), base=L.primary?existing.h:Math.floor(Math.random()*360);
+  const off=THEME_HARMONIES[themeState.harmony]??35;
+  if(!L.primary) D.primary=themeHslToHex(base,68,62);
+  if(!L.accent) D.accent=themeHslToHex(base+off,58,58);
+  /* Keep the shell deliberately dark and neutral. Hue is allowed to whisper in
+     the surfaces, but it never overwhelms drafting content. */
+  if(!L.background) D.background=themeHslToHex(base,14,10.5);
+  if(!L.surface) D.surface=themeHslToHex(base,12,14.5);
+  if(!L.text) D.text=themeHslToHex(base,18,92);
+  if(!L.muted) D.muted=themeHslToHex(base,11,68);
+  themeState.draft=D;
+}
+function themePreviewVars(preview,T){
+  const d=themeDerived(T);
+  preview.style.setProperty("--tf-bg",T.background);
+  preview.style.setProperty("--tf-surface",T.surface);
+  preview.style.setProperty("--tf-raised",d["--raised"]);
+  preview.style.setProperty("--tf-rule",d["--rule"]);
+  preview.style.setProperty("--tf-primary",T.primary);
+  preview.style.setProperty("--tf-accent",T.accent);
+  preview.style.setProperty("--tf-text",T.text);
+  preview.style.setProperty("--tf-muted",T.muted);
+}
+function themeForgeWidget(){
+  const wrap=document.createElement("div"); wrap.className="theme-forge";
+  const bar=document.createElement("div");bar.className="tf-toolbar";
+  const harmony=document.createElement("select"); harmony.title="Colour harmony used when Generate chooses Primary and Accent.";
+  for(const name of Object.keys(THEME_HARMONIES)){const o=document.createElement("option");o.value=name;o.textContent=name;if(name===themeState.harmony)o.selected=true;harmony.append(o)}
+  harmony.onchange=()=>{themeState.harmony=harmony.value};
+  const generate=document.createElement("button");generate.type="button";generate.className="tf-btn";generate.textContent="Generate";
+  const apply=document.createElement("button");apply.type="button";apply.className="tf-btn primary";apply.textContent="Apply";
+  const reset=document.createElement("button");reset.type="button";reset.className="tf-btn";reset.textContent="Reset";
+  bar.append(harmony,generate,apply,reset);
+  const body=document.createElement("div");body.className="tf-body";
+  const swatches=document.createElement("div");swatches.className="tf-swatches";
+  const preview=document.createElement("div");preview.className="tf-preview";
+  preview.innerHTML='<div class="tf-preview-head"><span class="tf-preview-dot"></span><b>Interface</b></div><div class="tf-preview-card"><div class="tf-preview-line"></div><div class="tf-preview-line short"></div><div class="tf-preview-actions"><span class="tf-preview-button">Primary</span><span class="tf-preview-chip">Accent</span></div></div>';
+  const inputs={};
+  const refresh=()=>{
+    for(const [k,input] of Object.entries(inputs)) if(input.value!==themeState.draft[k]) input.value=themeState.draft[k];
+    themePreviewVars(preview,themeState.draft);
+  };
+  for(const k of Object.keys(THEME_DEFAULT)){
+    const row=document.createElement("label");row.className="tf-swatch";row.title=THEME_LABELS[k]+" theme token";
+    const colour=document.createElement("input");colour.type="color";colour.value=themeState.draft[k];colour.setAttribute("aria-label",THEME_LABELS[k]+" colour");inputs[k]=colour;
+    const name=document.createElement("span");name.textContent=THEME_LABELS[k];
+    const lock=document.createElement("input");lock.type="checkbox";lock.checked=themeState.locks[k];lock.title="Lock "+THEME_LABELS[k]+" while generating";lock.setAttribute("aria-label","Lock "+THEME_LABELS[k]);
+    colour.oninput=()=>{themeState.draft[k]=colour.value;refresh()};
+    lock.onchange=()=>{themeState.locks[k]=lock.checked};
+    row.append(colour,name,lock);swatches.append(row);
+  }
+  generate.onclick=()=>{themeGenerate();refresh()};
+  apply.onclick=()=>{themeApply(themeState.draft,true);refresh();echo("Theme applied")};
+  reset.onclick=()=>{themeState.locks=Object.fromEntries(Object.keys(themeState.locks).map(k=>[k,false]));themeState.harmony="Analogous";harmony.value=themeState.harmony;themeApply(THEME_DEFAULT,true);paintRibbon();echo("Theme reset")};
+  body.append(swatches,preview);wrap.append(bar,body);refresh();return wrap;
+}
+
 function paintRibbon(){
   const tabs=document.getElementById("rtabs");
   const want=xVisibleTabs();
@@ -9824,10 +10020,15 @@ function paintRibbon(){
   [...tabs.children].forEach(b=>b.setAttribute("aria-selected",String(b.textContent===ribbonTab)));
 
   const host=document.getElementById("rpanels");
+  const app=document.getElementById("app"), right=document.getElementById("right");
+  /* If Manage was previously painted, rescue the live palette before clearing
+     #rpanels. This is the only DOM move involved, and it happens at tab paint
+     boundaries rather than via CSS overlay state. */
+  if(right && host.contains(right)) app.append(right);
   host.innerHTML="";
-  document.getElementById("app").classList.toggle("manage-active", ribbonTab==="Manage");
+  app.classList.toggle("manage-active", ribbonTab==="Manage");
   for(const P of RIBBON[ribbonTab]){
-    const panel=document.createElement("div"); panel.className="rpanel";
+    const panel=document.createElement("div"); panel.className="rpanel"+(P.custom==="rightdock"?" manage-dock":P.custom==="themeforge"?" theme-forge-panel":"");
     const body=document.createElement("div"); body.className="rpanel-body";
     if(P.big) body.append(mkBtn(P.big,true));
     if(P.small){
@@ -9852,18 +10053,21 @@ function paintRibbon(){
     if(P.custom==="flow")    body.append(flowWidget());
     if(P.custom==="png")     body.append(pngWidget());
     if(P.custom==="snaps")   body.append(snapWidget());
+    if(P.custom==="themeforge") body.append(themeForgeWidget());
     if(P.custom==="xtoggle") body.append(xExperimentalToggle());
     if(P.custom==="xsettings") body.append(xWidget());
     if(P.custom==="rightdock"){
-      /* The live palette is overlaid into this ribbon region via CSS. */
-      const hint=document.createElement("div");
-      hint.className="hint";
-      hint.textContent="Layers · Line Styles · Properties";
-      body.append(hint);
-      updateProps(); paintLayers(); paintStyles();
+      /* Mount the live palette first. Its painters resolve their hosts through
+         document.getElementById(), so the panel MUST be attached to document
+         before paintLayers/paintStyles/updateProps run. Painting while this
+         subtree is detached is what produced the blank Manage tab. */
+      body.append(right);
     }
     const lab=document.createElement("div"); lab.className="rpanel-label"; lab.textContent=P.name;
     panel.append(body,lab); host.append(panel);
+    if(P.custom==="rightdock"){
+      paintLayers(); paintStyles(); updateProps();
+    }
   }
   host.querySelectorAll(".big,.small").forEach(b=>{
     const id=b.dataset.item;
@@ -11650,6 +11854,7 @@ bottomResizer.addEventListener("dblclick",()=>applyBottomHeight(UI_DEFAULT.botto
 compactButton.addEventListener("click",()=>setCompactRibbon(!appShell.classList.contains("ribbon-compact")));
 document.getElementById("rtabs").addEventListener("dblclick",()=>setCompactRibbon(!appShell.classList.contains("ribbon-compact")));
 restoreShellPrefs();
+themeRestore();
 
 /* DOM/ribbon integrity check. Runs after all tool registrations are complete. */
 function auditRibbonButtons(){
