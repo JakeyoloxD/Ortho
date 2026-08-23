@@ -899,6 +899,13 @@ function entHit(e,p,tol){
 function entBox(e){
   const pts=[];
   if(mkIsEnt(e)) pts.push(...mkOutline(e));
+  /* mkOutline is geometry-only and yields nothing for text, so the box would
+     collapse onto the anchor point: markup text was being cropped out of zoom
+     extents, PNG and SVG export. Its four corners come from the laid-out text. */
+  if(e.t==="mtext"){
+    const B=mkTextBox(e);
+    pts.push(V(B.x0,B.y0),V(B.x1,B.y0),V(B.x1,B.y1),V(B.x0,B.y1));
+  }
   if(e.t==="node") pts.push(...flowNodePoly(e));
   if(e.t==="edge"){ const R=flowRoute(e); if(R) pts.push(...R); }
   if(e.t==="circle"||e.t==="arc"){
@@ -4389,21 +4396,12 @@ function mkTextBox(e){
   const top=e.p.y+fs*0.92, bot=e.p.y-(Math.max(1,lines.length)-1)*lh-fs*0.30;
   return {lines,lh,w:Math.max(wm,w-pad*2),pad,x0:e.p.x-pad,x1:e.p.x-pad+w,y0:bot-pad*0.5,y1:top+pad*0.5};
 }
-function mkOutline(e){
-  if(e.t==="ink") return e.pts;
-  if(e.t==="mshape"){
-    if(e.k==="rect"||e.k==="cloud") return mkRectPts(e.a,e.b);
-    if(e.k==="ellipse") return mkEllipsePts(e.a,e.b,48);
-    return [e.a,e.b];
-  }
-  if(e.t==="mtext"){
-    const B=mkTextBox(e);
-    const P=[V(B.x0,B.y0),V(B.x1,B.y0),V(B.x1,B.y1),V(B.x0,B.y1)];
-    if(e.lead) P.push(e.lead);
-    return P;
-  }
-  return [];
-}
+/* NOTE: a second mkOutline used to be declared further down, near the markup
+   measure helpers. Function declarations hoist, so that later one won overall
+   callers and this one was dead code that merely looked authoritative. The
+   surviving definition is geometry-only and returns [] for mtext, which is
+   correct for measuring but is not a bounding outline - entBox now handles
+   mtext explicitly instead of relying on this. */
 function mkPointInPoly(p,P){
   let inside=false;
   for(let i=0,j=P.length-1;i<P.length;j=i++){
@@ -12110,7 +12108,16 @@ document.getElementById("filein").onchange=e=>{
   if(!checkUpload(f,/\.dxf$/i,SEC.MAX_DXF,"that DXF")) return;
   const r=new FileReader();
   r.onerror=()=>echo("Could not read that file","warn");
-  r.onload=()=>{ importDXF(String(r.result)); setDocName(safeFileName(f.name,"untitled")); };
+  r.onload=()=>{
+    /* importDXF merges into the current drawing rather than replacing it, so
+       adopting the DXF's name over a drawing that already had content would
+       point the next Ctrl+S at a file the user did not mean to overwrite.
+       Take the name only when the DXF is what started this document. */
+    const wasEmpty = !S.ents.length;
+    importDXF(String(r.result));
+    if(wasEmpty) setDocName(safeFileName(f.name,"untitled"));
+    else echo("Merged "+f.name+" into "+S.docName);
+  };
   r.readAsText(f);
 };
 function newDrawing(){
@@ -12142,7 +12149,16 @@ window.addEventListener("drop",e=>{
     if(!checkUpload(f,/\.dxf$/i,SEC.MAX_DXF,"that DXF")) return;
     const r=new FileReader();
     r.onerror=()=>echo("Could not read that file","warn");
-    r.onload=()=>{ importDXF(String(r.result)); setDocName(safeFileName(f.name,"untitled")); };
+    r.onload=()=>{
+    /* importDXF merges into the current drawing rather than replacing it, so
+       adopting the DXF's name over a drawing that already had content would
+       point the next Ctrl+S at a file the user did not mean to overwrite.
+       Take the name only when the DXF is what started this document. */
+    const wasEmpty = !S.ents.length;
+    importDXF(String(r.result));
+    if(wasEmpty) setDocName(safeFileName(f.name,"untitled"));
+    else echo("Merged "+f.name+" into "+S.docName);
+  };
     r.readAsText(f); return;
   }
   echo("Drop a PNG, JPG, WebP, PDF, DXF or .b2db file","warn");
