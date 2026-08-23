@@ -4,7 +4,7 @@ BackToTheDrawingBoard is a single-file, offline 2D drafting, markup, diagramming
 
 The entire application is one HTML file. There is no build step, no server requirement, no third-party runtime dependency and no network access. Open the HTML file in a modern browser and work locally.
 
-This README documents the current feature set in `BackToTheDrawingBoard.html`.
+This README documents the current feature set in `BackToTheDrawingBoard.html`. The application file is always named `BackToTheDrawingBoard.html`; numbered or timestamped filenames are development/version artifacts only.
 
 ## Contents
 
@@ -133,6 +133,26 @@ Examples include:
 ### Status strip
 
 The status strip exposes frequently used drafting toggles and current information without changing tabs.
+
+### Adaptive ribbon
+
+The ribbon adapts to available window width instead of letting complete panels disappear off-screen. In the full state, panels that no longer fit collapse from the right into a single panel button. Clicking that button opens the complete panel as a flyout.
+
+The ribbon has three explicit presentation states:
+
+- **Full**: normal ribbon with expanded panels; only panels that do not fit collapse automatically
+- **Panels**: every ribbon panel becomes a compact button that opens a flyout
+- **Tabs**: the panel area is hidden to maximise drawing space; command aliases and keyboard access still work
+
+The state control at the right end of the ribbon tabs cycles **Full → Panels → Tabs → Full**. The separate Compact control jumps directly between the normal and tabs-only states. Ribbon state is stored as a local UI preference.
+
+### Shell resizing
+
+A narrow grab handle at the top of the canvas controls ribbon height and another at the bottom controls the command/status area. Ribbon dragging snaps through the supported presentation states at compact heights rather than leaving panels half-clipped. Double-clicking a splitter restores its automatic/default sizing behaviour.
+
+### Whiteboard surface
+
+Whiteboard and Drafting are presentation modes over the same drawing model. Whiteboard uses the warmer drawing-board surface; Drafting keeps the dark CAD-style model space and drafting grid. Changing workspace does not convert or duplicate document content.
 
 ---
 
@@ -449,15 +469,16 @@ Markup widths are entered in screen-oriented units and converted to world size a
 
 Assigns a review status to selected markup.
 
-The current status vocabulary includes states such as:
+The status vocabulary is fixed so filtering and export remain reliable:
 
+- No status
 - Open
 - Resolved
 - Rejected
-- For Info
-- For Action
+- For info
+- Action
 
-Status is stored on the markup entity and survives save, undo and copy operations.
+`No status` is stored as the absence of a status value rather than as extra data on every untouched markup. Status is carried by the markup entity itself, so it survives native save/open, undo/redo, duplication and CSV export. Unknown status values in imported/native data are dropped by sanitisation instead of being silently coerced into a valid state.
 
 #### Status Display
 
@@ -703,7 +724,7 @@ Click inside an enclosed region to estimate:
 - area
 - perimeter
 
-The current engine rasterises the enclosure and reports the raster resolution in `mm/cell` so the approximation is visible rather than hidden.
+The current shared region engine rasterises nearby visible geometry, flood-fills from the picked point and reports the raster resolution in `mm/cell` so the approximation is visible rather than hidden. It starts from the current viewport and grows the raster only when the fill escapes, avoiding a whole-sheet resolution penalty for a small room on a large drawing.
 
 Area units can be:
 
@@ -889,7 +910,7 @@ Exports DXF R12 for broad CAD compatibility.
 
 #### Markup CSV
 
-Exports markup review data as a spreadsheet-compatible CSV.
+Exports markup review data as a spreadsheet-compatible CSV, including type, layer, status, colour, position and geometric measurements where they apply. User text is protected against spreadsheet formula execution.
 
 ### Image group
 
@@ -1480,18 +1501,19 @@ Manage contains a dedicated Markups List.
 
 The list supports filtering by:
 
-- markup type
-- status
-- free-text search
+- markup family/type
+- review status
+- free-text content
+- layer name through the same search field
 
-Selecting a list item selects the corresponding markup entity.
+Selecting a list row selects the corresponding markup entity. Double-clicking a row zooms directly to it. The filter bar is kept mounted while only the result rows repaint, so typing into the search box does not lose focus between keystrokes.
 
-Filtered markups can be zoomed to in the drawing.
+The zoom control fits all currently filtered markups into the drawing view. Status dots in the list use the same status colours as the canvas review indicators.
 
 A typical review workflow is:
 
 1. annotate using Markup tools
-2. assign statuses such as Open or For Action
+2. assign statuses such as Open or Action
 3. use the Markups List to filter review items
 4. update status as work progresses
 5. export Markup CSV for external reporting
@@ -1709,7 +1731,9 @@ Exports review information for markup entities, including relevant values such a
 - length where applicable
 - enclosed area where applicable
 
-Spreadsheet formula injection is mitigated by neutralising text cells that begin with spreadsheet formula trigger characters such as `=`, `+`, `-` or `@`.
+Spreadsheet formula injection is mitigated by neutralising text cells that begin with spreadsheet formula trigger characters such as `=`, `+`, `-` or `@`. This protection is applied during CSV cell creation so a markup comment cannot become an executable spreadsheet formula when the report is opened in Excel or similar software.
+
+The export derives geometry from the markup itself: closed outlines can report enclosed area, and line/freehand shapes can report length where meaningful. Review status is exported from the same closed vocabulary used by the Markups List and canvas indicators.
 
 ---
 
@@ -1940,9 +1964,7 @@ Flow nodes also use node IDs because connectors bind relationally to nodes.
 
 ## One removal path
 
-Entities should leave `S.ents` through the central removal helpers rather than ad-hoc array splicing/filtering.
-
-This is necessary because selection, hover state, grip dragging and active operations can hold entity indices.
+Entities should leave `S.ents` through the central removal helpers rather than ad-hoc array splicing/filtering. `entKeep()` remaps the surviving indices used by selection, hover and live grip state. Multi-step tools that park entity indices in `S.op` are declared through `OP_ENT_KEYS`; if the entity they were holding disappears, that stage is dropped and the tool re-prompts instead of silently pointing at whatever object slid into the old array slot.
 
 ## Tool registries
 
@@ -1958,11 +1980,17 @@ Ribbon activation flows through one dispatcher.
 
 This prevents tool pressed-state and one-shot action state from drifting between tabs.
 
+## Adaptive ribbon shell
+
+Ribbon layout has two independent compaction mechanisms. `fitRibbonPanels()` automatically collapses only the rightmost panels that do not fit the current width; `RIBBON_STATES` controls the explicit Full / Panels / Tabs presentation mode. Collapsed panels remain fully usable through flyouts, and resize handling re-runs the fit after paint or viewport-width changes.
+
+Shell splitters persist local UI preferences. The ribbon splitter uses state detents at compact heights so panel contents are not left arbitrarily clipped. These preferences are interface state only and are not written into `.b2db` drawings.
+
 ## Hints
 
-Every ribbon item has a central tooltip hint entry.
+Every ribbon item has a central tooltip hint entry in `HINTS`. Tool definitions are spread across the normal, markup, Flow and Experimental registries, so tooltip copy is deliberately centralised into one table.
 
-The `audit` command reports missing hints.
+`auditRibbonHints()` runs at boot and through the `audit` command. Adding a ribbon item without a hint is treated as an integrity problem rather than silently producing a useless tooltip. The six drafting-aid descriptions likewise come from the shared `TOGGLE_DEFS` table so the View ribbon and status-strip controls cannot drift apart.
 
 ## Modifier layer
 
@@ -1982,6 +2010,14 @@ Tools choose which temporary Shift constraint applies.
 The engine contains reusable vector, intersection, flattening, bounding, hit-testing and transformation helpers.
 
 Curved entities can be flattened to point sequences where an algorithm requires a polyline approximation.
+
+## Region engine
+
+`REGION ENGINE` is shared infrastructure rather than code owned by Measure Area or Experimental Features. It builds line segments from visible geometry, chooses a bounded raster, flood-fills from a picked point and reports area/perimeter statistics. Experimental flood/region tools delegate to the same implementation instead of carrying a second copy of the maths.
+
+`rgnRegionAt()` starts with the current viewport and expands the raster only if the flood escapes. Raster dimensions are capped, and the reported `mm/cell` value is part of the result because Measure Area is intentionally approximate at this stage.
+
+Measure Area stores its result in temporary state and paints it through the measurement overlay. It never creates an entity and therefore never enters save/export data.
 
 ## Snaps v2
 
@@ -2051,7 +2087,7 @@ or:
 selftest
 ```
 
-The current build contains pure-function self-tests for shared geometry and constraint behaviour.
+The current build contains pure-function self-tests for region/area maths, intersections, entity-removal remapping, sanitisation and shared geometry/constraint behaviour. Tests that temporarily touch global state must restore it, including on failure.
 
 ### Audits
 
@@ -2061,7 +2097,14 @@ Type:
 audit
 ```
 
-The audit checks entity registration, references and ribbon tooltip coverage.
+The audit checks the same integrity classes that also run automatically at boot:
+
+- ribbon buttons resolve to a real tool/action
+- every ribbon item has a tooltip hint
+- every registered entity type has the required sanitise/geometry/paint/edit plumbing
+- reference IDs, layer links, active-reference state and calibration drift are sane
+
+A clean boot should not merely draw the interface; these structural checks should also return no problems.
 
 ### History statistics
 
@@ -2112,5 +2155,5 @@ The current foundations already cover:
 - visual styling
 - local-first files
 
-That makes future UI/wireframe mockup tooling a natural extension, but it is not documented above as a current feature because it has not been implemented yet.
+The direction is broader visual communication, not an attempt to become a cloud collaboration suite. Current roadmap decisions explicitly keep the application local-first and exclude real-time Studio-style collaboration, SSO, DMS/cloud integrations, AI/MCP features, OCR and full PDF editing. Planned work is expected to build on the existing local geometry, markup, reference and reporting architecture rather than replacing those constraints.
 
