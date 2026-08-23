@@ -1076,7 +1076,9 @@ function applyOrtho(p, from){
 }
 function cursorPoint(){
   const raw=V(wX(S.mouse.sx), wY(S.mouse.sy));
-  // Reference-image transform tools deliberately ignore drafting snaps.
+  // Reference-image placement tools normally ignore drafting snaps, but Rotate Image
+  // deliberately follows the normal drafting snap pipeline so its base/angle points
+  // can land on Grid Snap, object snaps and the same constraints as Draw > Rotate.
   if(["imgcal","imgmove","imgstraight","imgcrop"].includes(S.tool)) return raw;
   // markup is freehand annotation, not drafting - it never snaps
   if(MK_TOOLS[S.tool]) return raw;
@@ -1302,6 +1304,8 @@ const TOOLS={
 
   imgmove:{label:"Move Image", pts:2, alias:"IMGMOVE", prompts:["Reference point","Destination"],
     svg:'<rect x="3" y="4" width="11" height="9"/><path d="M5 11l2.6-2.7 2 2 2-3 2.4 3.7"/><path d="M16 7v8M12 11h8"/>'},
+  imgrotate:{label:"Rotate Image", pts:2, alias:"IMGROTATE", prompts:["Base point","Rotation angle"],
+    svg:'<rect x="4" y="5" width="9" height="7"/><path d="M15.8 8A6.2 6.2 0 104.8 13.2"/><path d="M16.2 3.8v4.5h-4.5"/>'},
   imgcal:{label:"Calibrate Image", pts:2, alias:"IMGCAL", prompts:["First known point","Second known point"],
     svg:'<path d="M3 15L17 5"/><circle cx="3" cy="15" r="1.3"/><circle cx="17" cy="5" r="1.3"/><path d="M6 16l8-8"/>'},
   imgstraight:{label:"Straighten Image", pts:2, alias:"IMGSTRAIGHT", prompts:["First point on known straight line","Second point"],
@@ -1463,8 +1467,8 @@ function setTool(t){
   }
   const prev=S.tool; if(isMeasureTool(prev)&&prev!==t) clearMeasurement(false);
   S.pending=[]; S.base=null; S.band=null; S.op={}; S.ask=null; S.chainPrev=null; S.alignGuide=null; resetNudge();
-  if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
-  if(["imgmove","imgcal","imgstraight","imgcrop"].includes(t) && S.refImage && S.refImage.locked){ echo("Reference image is locked","warn"); t="select"; }
+  if(["imgmove","imgrotate","imgcal","imgstraight","imgcrop"].includes(t) && !S.refImage){ echo("Load a reference image first","warn"); t="select"; }
+  if(["imgmove","imgrotate","imgcal","imgstraight","imgcrop"].includes(t) && S.refImage && S.refImage.locked){ echo("Reference image is locked","warn"); t="select"; }
   if(SELOPS.includes(t) && !S.sel.size){
     echo("Select objects first","warn"); S.tool="select"; paintRibbon(); paintOptbar(); setPrompt(); draw(); return;
   }
@@ -1606,6 +1610,15 @@ function feedChainLine(p){
   S.pending=[p]; setPrompt(); draw();
 }
 function applyDrawOffsetStart(p){ return p; }
+/* Rotate a reference about an arbitrary world-space base point. Kept as the
+   single primitive for manual Rotate Image and automatic Straighten Image. */
+function rotateReferenceAbout(R,base,th){
+  const v=sub(V(R.x,R.y),base), co=Math.cos(th), si=Math.sin(th);
+  R.x=base.x+v.x*co-v.y*si;
+  R.y=base.y+v.x*si+v.y*co;
+  R.rot=(R.rot||0)+th;
+  return R;
+}
 function drawOffsetVec(a,b){
   const d=norm(sub(b,a)); if(!isFinite(d.x)) return V(0,0);
   return mul(perp(d), S.drawOffset);
@@ -1620,6 +1633,15 @@ function commit(){
       snap();
       S.refImage.x+=d.x; S.refImage.y+=d.y;
       S.pending=[]; echo("Reference image moved"); setTool("select"); updateProps(); draw(); return;
+    }
+    case "imgrotate": {
+      const R=S.refImage; S.pending=[];
+      if(!R||R.locked){ echo("Reference image is unavailable or locked","warn"); setTool("select"); return; }
+      const base=P[0], th=ang(base,P[1]);
+      if(dist(base,P[1])<1e-9){ echo("Pick a second point or type a rotation angle","warn"); setTool("select"); return; }
+      snap();
+      rotateReferenceAbout(R,base,th);
+      echo("Reference rotated by "+fmt(deg(th))+"°"); setTool("select"); updateProps(); draw(); return;
     }
     case "imgcal": {
       if(!S.refImage){ S.pending=[]; setTool("select"); return; }
@@ -1652,8 +1674,7 @@ function commit(){
       if(dist(a,b)<1e-9){echo("Pick two different points","warn");setTool("select");return;}
       const target=Math.round(th/(Math.PI/2))*(Math.PI/2), dth=target-th;
       snap();
-      const v=sub(V(R.x,R.y),a), co=Math.cos(dth), si=Math.sin(dth);
-      R.x=a.x+v.x*co-v.y*si; R.y=a.y+v.x*si+v.y*co; R.rot=(R.rot||0)+dth;
+      rotateReferenceAbout(R,a,dth);
       echo("Reference straightened by "+fmt(deg(dth))+"°"); setTool("select"); updateProps(); draw(); return;
     }
     case "imgcrop": {
@@ -2765,6 +2786,14 @@ function drawPreview(){
     ctx.beginPath(); ctx.arc(X(P[0].x),Y(P[0].y),Math.min(60,dist(P[0],c)*S.view.s),-th,0);
     ctx.stroke();
   }
+  if(S.tool==="imgrotate" && P.length===1 && S.refImage){
+    const th=ang(P[0],c), ghost={...S.refImage};
+    rotateReferenceAbout(ghost,P[0],th);
+    ghost.opacity=Math.max(.08,Math.min(1,(S.refImage.opacity||.48)*.55));
+    paintReference(ghost);
+    ctx.beginPath(); ctx.arc(X(P[0].x),Y(P[0].y),Math.min(60,dist(P[0],c)*S.view.s),-th,0);
+    ctx.stroke();
+  }
   if(S.tool==="scale" && P.length>=1){
     if(S.scaleMode==="numerical"){
       const k=S.lastScaleFactor||1;
@@ -2806,7 +2835,7 @@ function drawPreview(){
         break;
       case "mirror": if(P.length===1) seg(P[0],c); break;
       case "rotate": if(P.length===1) seg(P[0],c); break;
-      case "imgcal": case "imgmove": case "imgstraight": if(P.length===1) seg(P[0],c); break;
+      case "imgcal": case "imgmove": case "imgrotate": case "imgstraight": if(P.length===1) seg(P[0],c); break;
       case "imgcrop": if(P.length===1){
         const R=S.refImage, a=refWorldToPixel(R,P[0]), b=refWorldToPixel(R,c);
         if(a&&b){
@@ -3462,6 +3491,15 @@ function handleCommand(raw){
     else for(const i of S.sel) rotEnt(S.ents[i],S.pending[0],th);
     S.pending=[]; draw(); updateProps(); setPrompt();
     return echo((S.copyRotate?"Rotated a copy of ":"Rotated ")+S.sel.size+" object(s) by "+s+"\u00B0");
+  }
+  if(S.tool==="imgrotate" && S.pending.length===1 && /^-?[\d.]+$/.test(s)){
+    const R=S.refImage;
+    if(!R||R.locked){ S.pending=[]; setTool("select"); return echo("Reference image is unavailable or locked","warn"); }
+    const th=rad(parseFloat(s));
+    snap();
+    rotateReferenceAbout(R,S.pending[0],th);
+    S.pending=[]; draw(); updateProps(); setPrompt(); setTool("select");
+    return echo("Reference rotated by "+s+"\u00B0");
   }
   const p=parsePoint(raw);
   if(p && S.tool!=="select" && !TOOLS[S.tool].pick && !TOOLS[S.tool].markup && !TOOLS[S.tool].flow){ feed(p); readout(); return; }
@@ -7835,19 +7873,90 @@ function xVacuum(){
   xUiSweep(); xfxRun("vacuum",1200,{box:xBox(xEnts())},null,null); xBeep("sweep"); draw();
   echo("Vacuumed "+gone+": "+junk.dupe+" duplicate, "+junk.zero+" zero-length, "+junk.empty+" empty, "+junk.orphan+" orphaned connector"+(junk.orphan===1?"":"s"));
 }
+function xIronAxisEnds(A,B){
+  const d=sub(B,A), L=len(d);
+  if(!(L>1e-9)) return null;
+  const horiz=Math.abs(d.x)>=Math.abs(d.y), mid=mul(add(A,B),.5);
+  return horiz
+    ? {a:V(mid.x-L/2,mid.y), b:V(mid.x+L/2,mid.y), horiz:true}
+    : {a:V(mid.x,mid.y-L/2), b:V(mid.x,mid.y+L/2), horiz:false};
+}
+function xIronInkAxisFraction(P){
+  let good=0,total=0;
+  for(let i=0;i<P.length-1;i++){
+    const d=sub(P[i+1],P[i]), L=len(d); if(!(L>1e-9)) continue;
+    total+=L;
+    const a=Math.abs(Math.atan2(d.y,d.x));
+    const q=Math.min(a,Math.abs(Math.PI-a),Math.abs(Math.PI/2-a));
+    if(q<=25*Math.PI/180) good+=L;
+  }
+  return total>0?good/total:0;
+}
+function xIronInkToMarkup(e){
+  if(!e||e.t!=="ink"||e.cloud||!e.pts||e.pts.length<2) return false;
+  const P=xInkPath(e); if(P.length<2) return false;
+  const a=P[0], b=P[P.length-1];
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  for(const p of P){ x0=Math.min(x0,p.x); y0=Math.min(y0,p.y); x1=Math.max(x1,p.x); y1=Math.max(y1,p.y); }
+  const box={x0,y0,x1,y1}, w=x1-x0, h=y1-y0;
+  let path=0; for(let i=0;i<P.length-1;i++) path+=dist(P[i],P[i+1]);
+  const closes=dist(a,b)<=Math.max(px(24),Math.min(w,h)*.28);
+  const boxish=closes && w>px(12) && h>px(12) && xIronInkAxisFraction(P)>=.68;
+  if(boxish){
+    e.t="mshape"; e.k="rect"; e.a=V(box.x0,box.y0); e.b=V(box.x1,box.y1);
+    e.hl=0; e.bump=0;
+    delete e.pts; delete e.closed; delete e.cloud;
+    return true;
+  }
+  const chord=dist(a,b); if(!(chord>px(5))) return false;
+  const v=sub(b,a), n=norm(perp(v));
+  let dev=0;
+  if(isFinite(n.x)) for(const p of P) dev=Math.max(dev,Math.abs((p.x-a.x)*n.x+(p.y-a.y)*n.y));
+  const lineish=path/chord<=1.45 && dev<=Math.max(px(18),chord*.14);
+  if(!lineish) return false;
+  const q=xIronAxisEnds(a,b); if(!q) return false;
+  e.t="mshape"; e.k="line"; e.a=q.a; e.b=q.b; e.hl=0; e.bump=0;
+  delete e.pts; delete e.closed; delete e.cloud;
+  return true;
+}
+function xIronJoinMarkupCorners(list){
+  const lines=[];
+  for(const e of list){
+    if(!e||e.t!=="mshape"||!["line","arrow","darrow"].includes(e.k)) continue;
+    const d=sub(e.b,e.a), horiz=Math.abs(d.x)>=Math.abs(d.y);
+    lines.push({e,horiz});
+  }
+  if(lines.length<2) return 0;
+  const join=Math.max(px(18),px(S.x.ironTol*6));
+  let moved=0;
+  for(let i=0;i<lines.length;i++) for(let j=i+1;j<lines.length;j++){
+    const A=lines[i],B=lines[j]; if(A.horiz===B.horiz) continue;
+    const H=A.horiz?A:B, Vt=A.horiz?B:A;
+    const p=V(Vt.e.a.x,H.e.a.y);
+    const he=dist(H.e.a,p)<=dist(H.e.b,p)?"a":"b";
+    const ve=dist(Vt.e.a,p)<=dist(Vt.e.b,p)?"a":"b";
+    if(dist(H.e[he],p)<=join && dist(Vt.e[ve],p)<=join){
+      if(dist(H.e[he],p)>1e-9){ H.e[he]=V(p.x,p.y); moved++; }
+      if(dist(Vt.e[ve],p)>1e-9){ Vt.e[ve]=V(p.x,p.y); moved++; }
+    }
+  }
+  return moved;
+}
 function xIron(){
   const list=xSelectedOrEverything();
   if(!list.length) return echo("STEAM IRON: no geometry, no wrinkles. The iron hisses anyway.");
   const box=xEffectBox(list), tol=Math.max(px(S.x.ironTol),px(3));
   snap();
-  let changed=0;
+  let changed=0, markupChanged=0;
   for(const e of list){
     if(e.t==="line"){
-      const d=sub(e.b,e.a), L=len(d); if(L<1e-9) continue;
-      const a=Math.abs(d.x)>=Math.abs(d.y)?0:Math.PI/2;
-      const mid=mul(add(e.a,e.b),.5), half=L/2;
-      e.a=V(mid.x-Math.cos(a)*half,mid.y-Math.sin(a)*half);
-      e.b=V(mid.x+Math.cos(a)*half,mid.y+Math.sin(a)*half); changed++;
+      const q=xIronAxisEnds(e.a,e.b); if(!q) continue;
+      e.a=q.a; e.b=q.b; changed++;
+    }else if(e.t==="mshape" && ["line","arrow","darrow"].includes(e.k)){
+      const q=xIronAxisEnds(e.a,e.b); if(!q) continue;
+      e.a=q.a; e.b=q.b; changed++; markupChanged++;
+    }else if(e.t==="ink"){
+      if(xIronInkToMarkup(e)){ changed++; markupChanged++; }
     }else if((e.t==="pline"||e.t==="spline")&&e.pts&&e.pts.length>1){
       const A=e.pts[0],B=e.pts[e.pts.length-1], d=sub(B,A), horiz=Math.abs(d.x)>=Math.abs(d.y);
       const fixed=e.pts.map(p=>horiz?V(p.x,(A.y+B.y)/2):V((A.x+B.x)/2,p.y));
@@ -7858,11 +7967,15 @@ function xIron(){
       else if(e.t==="ellipse"){e.ry=Math.max(px(2),e.ry*.35);changed++;}
     }
   }
+  const joined=xIronJoinMarkupCorners(list);
+  if(joined) changed+=joined;
+  if(!changed){ snapCancel(); return echo("STEAM IRON: nothing here was close enough to straight markup or pressable geometry."); }
   flowInvalidateIndex(); updateProps();
   xfxRun("superIron",1700,{box},(t)=>{ if(Math.random()<.45){const p=V(box.x0+Math.random()*(box.x1-box.x0),box.y1+px(10));xPart(p.x,p.y,0,px(30+Math.random()*50),650,"#ffffff",1.6);}xKickParticles(.016); },null);
   xBeep("sweep"); draw();
-  echo("STEAM IRON: pressed "+changed+" object"+(changed===1?"":"s")+" brutally flat and square.");
+  echo("STEAM IRON: pressed "+changed+" adjustment"+(changed===1?"":"s")+(markupChanged?" · "+markupChanged+" markup object"+(markupChanged===1?"":"s")+" straightened":"")+".");
 }
+
 function xDominantAngle(list){
   const bins=new Float64Array(90);
   for(const e of list) for(const c of xSegs(e)){
@@ -9376,7 +9489,7 @@ const RIBBON={
   ],
   Insert:[
     {name:"Drawing", big:"savedwg", small:["opendwg","newdwg","undo","redo","wipelocal"]},
-    {name:"Reference", big:"refimage", small:["imgnext","imgmove","imgcal","imgstraight","imgcrop","imglock","imgtoggle","imgresetcrop","imgremove"]},
+    {name:"Reference", big:"refimage", small:["imgnext","imgmove","imgrotate","imgcal","imgstraight","imgcrop","imglock","imgtoggle","imgresetcrop","imgremove"]},
     {name:"Import", big:"opendxf", small:["openpdf"]},
     {name:"Export", big:"exportpng", small:["copyimage","exportsvg","exportdxf","exportmarkupcsv"]},
     {name:"Image", custom:"png"}
@@ -9549,7 +9662,8 @@ const HINTS={
   wipelocal:"Erase the autosave and stored preferences for this file. Does not touch anything you have saved to disk.",
   refimage:"Load a PNG, JPEG or WebP as a tracing underlay. Each reference gets its own layer, calibration and crop.",
   imgnext:"Cycle which loaded reference the image tools point at. The active one is the only one they affect.",
-  imgmove:"Drag the active reference to position, rotate and scale it under the drawing.",
+  imgmove:"Move the active reference by a base point and destination.",
+  imgrotate:"Rotate the active reference around a base point. Pick a second point or type the angle in degrees, matching the Draw Rotate workflow.",
   imgcal:"Set the scale of the active reference: pick two points on it, type the real distance between them. The two points are stored in image pixels, so the calibration survives every later move, rotate and crop.",
   imgstraight:"Pick two points that should be level and the active reference rotates to make them so. For scans that went in crooked.",
   imgcrop:"Crop the active reference to a box. Non-destructive, the pixels are still there.",
@@ -9594,7 +9708,7 @@ const HINTS={
   xmagnet:"Pull nearby endpoints together within the weld radius, closing the small gaps that stop a region being enclosed.",
   xwrap:"Shrink-wrap a boundary around the selection at the offset set in Settings.",
   xvacuum:"Suck up the stray fragments left behind by trimming and exploding.",
-  xiron:"Flatten near-horizontal and near-vertical lines onto the axis, within the tolerance set in Settings.",
+  xiron:"Straighten rough CAD and markup lines to horizontal or vertical. Freehand markup strokes that are line-like become true markup lines; rough box loops become boxes, and nearby markup corners are closed so room outlines stop leaking.",
   xraintest:"Rain into a space and show every point where the water escapes. The fast way to find which gap is stopping a region from closing.",
   xsonar:"Ping outward from a point and show what the rays hit, for judging clearance in a cluttered area.",
   xants:"Run marching ants along the linework so you can see which paths are actually connected.",
@@ -10427,7 +10541,7 @@ function updateProps(){
       host.append(num("Edge threshold",S.edgeThreshold,v=>{S.edgeThreshold=Math.max(15,Math.min(220,v))}));
       host.append(info("Crop",R.crop?"Active":"Full image"));
       const controls=document.createElement("div"); controls.className="hint";
-      controls.innerHTML='<button class="small" type="button" id="prop-imgcal">Calibrate</button> <button class="small" type="button" id="prop-imgstraight">Straighten</button> <button class="small" type="button" id="prop-imgcrop">Crop</button> <button class="small" type="button" id="prop-imgmove">Move</button> <button class="small" type="button" id="prop-imglock">'+(R.locked?'Unlock':'Lock')+'</button> <button class="small" type="button" id="prop-imgvis">'+(R.visible?'Hide':'Show')+'</button>'+(S.refs.length>1?' <button class="small" type="button" id="prop-imgsolo">Solo</button>':'');
+      controls.innerHTML='<button class="small" type="button" id="prop-imgcal">Calibrate</button> <button class="small" type="button" id="prop-imgrotate">Rotate</button> <button class="small" type="button" id="prop-imgstraight">Straighten</button> <button class="small" type="button" id="prop-imgcrop">Crop</button> <button class="small" type="button" id="prop-imgmove">Move</button> <button class="small" type="button" id="prop-imglock">'+(R.locked?'Unlock':'Lock')+'</button> <button class="small" type="button" id="prop-imgvis">'+(R.visible?'Hide':'Show')+'</button>'+(S.refs.length>1?' <button class="small" type="button" id="prop-imgsolo">Solo</button>':'');
       host.append(controls);
       setTimeout(()=>{
         const by=id=>document.getElementById(id);
@@ -10437,6 +10551,7 @@ function updateProps(){
           draw(); updateProps(); echo(only?"Showing the active reference only":"Showing all references");
         };
         if(by("prop-imgcal"))by("prop-imgcal").onclick=()=>setTool("imgcal");
+        if(by("prop-imgrotate"))by("prop-imgrotate").onclick=()=>setTool("imgrotate");
         if(by("prop-imgstraight"))by("prop-imgstraight").onclick=()=>setTool("imgstraight");
         if(by("prop-imgcrop"))by("prop-imgcrop").onclick=()=>setTool("imgcrop");
         if(by("prop-imgmove"))by("prop-imgmove").onclick=()=>setTool("imgmove");
@@ -11311,7 +11426,7 @@ function listReferences(){
 function toggleReferenceLock(){
   if(!S.refImage) return echo("No reference image loaded","warn");
   S.refImage.locked=!S.refImage.locked;
-  if(S.refImage.locked && ["imgmove","imgcal","imgstraight","imgcrop"].includes(S.tool)) setTool("select");
+  if(S.refImage.locked && ["imgmove","imgrotate","imgcal","imgstraight","imgcrop"].includes(S.tool)) setTool("select");
   draw(); updateProps(); paintRibbon(); echo("Reference image "+(S.refImage.locked?"locked":"unlocked"));
 }
 function resetReferenceCrop(){
