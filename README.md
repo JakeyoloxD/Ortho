@@ -4,7 +4,7 @@ BackToTheDrawingBoard is a single-file, offline 2D drafting, markup, diagramming
 
 The entire application is one HTML file. There is no build step, no server requirement, no third-party runtime dependency and no network access. Open the HTML file in a modern browser and work locally.
 
-This README documents the current feature set in `BackToTheDrawingBoard-Modifiers.html`.
+This README documents the current feature set in `BackToTheDrawingBoard.html`.
 
 ## Contents
 
@@ -65,7 +65,7 @@ The application is deliberately local-first. It does not call cloud services, an
 Open the HTML file directly in Chrome, Edge or Firefox.
 
 ```text
-BackToTheDrawingBoard-Modifiers.html
+BackToTheDrawingBoard.html
 ```
 
 No installation is required.
@@ -2032,7 +2032,7 @@ Extract the final script block and run Node syntax validation:
 ```bash
 python3 -c "
 import re
-s=open('BackToTheDrawingBoard-Modifiers.html', encoding='utf-8').read()
+s=open('BackToTheDrawingBoard.html', encoding='utf-8').read()
 open('/tmp/app.js','w', encoding='utf-8').write(re.findall(r'<script[^>]*>(.*?)</script>', s, re.S)[-1])
 " && node --check /tmp/app.js && echo SYNTAX_OK
 ```
