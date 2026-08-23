@@ -604,6 +604,7 @@ const S = {
   pending: [],        // picked points for the active tool
   base: null,         // move/copy base point
   mouse: {x:0,y:0, sx:0, sy:0},
+  shiftDown: false,    // physical Shift state for temporary point constraints
   snapHit: null,
   alignGuide: null,       // temporary inferred alignment / parallel guide while drawing
   hover: -1,
@@ -1111,16 +1112,34 @@ function applyOrtho(p, from){
   if(!S.ortho||!from) return p;
   return Math.abs(p.x-from.x) >= Math.abs(p.y-from.y) ? V(p.x, from.y) : V(from.x, p.y);
 }
+function constrainPoint(p,from,mode){
+  if(!from||!mode||mode==="none") return p;
+  if(mode==="ortho") return Math.abs(p.x-from.x)>=Math.abs(p.y-from.y)?V(p.x,from.y):V(from.x,p.y);
+  if(mode==="angle45"){
+    const d=sub(p,from), r=Math.hypot(d.x,d.y);
+    if(r<1e-12) return p;
+    const a=Math.round(Math.atan2(d.y,d.x)/(Math.PI/4))*(Math.PI/4);
+    return V(from.x+Math.cos(a)*r,from.y+Math.sin(a)*r);
+  }
+  return p;
+}
+function activePointConstraint(){
+  if(!(S.shiftDown||S.stickyShift)) return "none";
+  if(S.tool==="imgcal") return "ortho";
+  return "none";
+}
 function cursorPoint(){
   const raw=V(wX(S.mouse.sx), wY(S.mouse.sy));
-  // Reference-image placement tools normally ignore drafting snaps, but Rotate Image
-  // deliberately follows the normal drafting snap pipeline so its base/angle points
-  // can land on Grid Snap, object snaps and the same constraints as Draw > Rotate.
-  if(["imgcal","imgmove","imgstraight","imgcrop"].includes(S.tool)) return raw;
+  const from=S.pending.length? S.pending[S.pending.length-1] : (S.base||null);
+  // Reference-image placement tools normally ignore drafting snaps. Calibration keeps
+  // that isolation, but Shift is a temporary H/V constraint on the second point.
+  if(S.tool==="imgcal") return constrainPoint(raw,from,activePointConstraint());
+  // Rotate Image deliberately follows the normal drafting snap pipeline so its
+  // base/angle points can land on Grid Snap, object snaps and Draw constraints.
+  if(["imgmove","imgstraight","imgcrop"].includes(S.tool)) return raw;
   // markup is freehand annotation, not drafting - it never snaps
   if(MK_TOOLS[S.tool]) return raw;
   let p=resolveSnap(raw);
-  const from=S.pending.length? S.pending[S.pending.length-1] : (S.base||null);
   if(!S.snapHit) p=alignmentSnap(p,from);
   if(!S.snapHit) p=applyDimSnap(p,from);
   if(S.ortho && from && !S.snapHit) p=applyOrtho(p,from);
@@ -2879,7 +2898,16 @@ function drawPreview(){
         break;
       case "mirror": if(P.length===1) seg(P[0],c); break;
       case "rotate": if(P.length===1) seg(P[0],c); break;
-      case "imgcal": case "imgmove": case "imgrotate": case "imgstraight": if(P.length===1) seg(P[0],c); break;
+      case "imgcal": if(P.length===1){
+        seg(P[0],c);
+        if(activePointConstraint()==="ortho"){
+          ctx.save(); ctx.setLineDash([]); ctx.font="10px "+getCSS("--ui"); ctx.textAlign="left"; ctx.textBaseline="bottom";
+          ctx.fillStyle=getCSS("--snap");
+          ctx.fillText(Math.abs(c.x-P[0].x)>=Math.abs(c.y-P[0].y)?"ORTHO H":"ORTHO V",X(c.x)+8,Y(c.y)-6);
+          ctx.restore();
+        }
+      } break;
+      case "imgmove": case "imgrotate": case "imgstraight": if(P.length===1) seg(P[0],c); break;
       case "imgcrop": if(P.length===1){
         const R=S.refImage, a=refWorldToPixel(R,P[0]), b=refWorldToPixel(R,c);
         if(a&&b){
@@ -3312,6 +3340,7 @@ function offsetSide(p){
 let panning=false, panFrom=null, downAt=null, dragging=false;
 cv.addEventListener("contextmenu",e=>e.preventDefault());
 cv.addEventListener("pointerdown",e=>{
+  S.shiftDown=!!e.shiftKey;
   cv.setPointerCapture(e.pointerId);
   const r=cv.getBoundingClientRect();
   setMouseFrom(e,r);
@@ -3340,6 +3369,7 @@ cv.addEventListener("pointerdown",e=>{
   dragging=false;
 });
 window.addEventListener("pointermove",e=>{
+  S.shiftDown=!!e.shiftKey;
   const r=cv.getBoundingClientRect();
   setMouseFrom(e,r);
   if(touchMove(e)) return;
@@ -3621,6 +3651,11 @@ function handleCommand(raw){
    here.                                                                     */
 const SELFTEST=[];
 function T(name,fn){ SELFTEST.push({name,fn}); }
+T("constrainPoint ortho chooses nearest axis",()=>{
+  const a=V(10,20);
+  const h=constrainPoint(V(30,23),a,"ortho"), v=constrainPoint(V(12,50),a,"ortho");
+  if(h.x!==30||h.y!==20||v.x!==10||v.y!==50) throw Error("ortho constraint");
+});
 function tEq(got,want,what){
   if(got!==want) throw new Error((what||"")+" expected "+want+", got "+got);
 }
@@ -9490,6 +9525,7 @@ function xVisibleTabs(){
 
 /* ============================================================ keyboard */
 window.addEventListener("keydown",e=>{
+  if(e.key==="Shift"){ S.shiftDown=true; if(S.tool==="imgcal"&&S.pending.length) draw(); }
   const typing = !!S.ask || document.activeElement===cmdin || document.activeElement===inlineEditor || !!textEdit;
   if(e.key==="Escape"){ cmdin.value=""; cancel(); return; }
   if(!typing && e.key==="Tab" && S.tool!=="measurealong" && S.snapList.length>1){
@@ -9529,6 +9565,12 @@ window.addEventListener("keydown",e=>{
   for(const [id,T] of Object.entries(TOOLS)) if(T.hot===k){ e.preventDefault(); return setTool(id); }
   if(k==="Z"&&!e.ctrlKey&&!e.metaKey){ e.preventDefault(); zoomExtents(); }
 });
+
+
+window.addEventListener("keyup",e=>{
+  if(e.key==="Shift"){ S.shiftDown=false; if(S.tool==="imgcal"&&S.pending.length) draw(); }
+});
+window.addEventListener("blur",()=>{ if(S.shiftDown){ S.shiftDown=false; if(S.tool==="imgcal"&&S.pending.length) draw(); } });
 
 /* ============================================================ ribbon UI */
 const RIBBON={
