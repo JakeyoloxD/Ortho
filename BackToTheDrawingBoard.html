@@ -470,6 +470,14 @@
   #app.whiteboard #mpad{background:rgba(250,251,253,.98);border-color:#4f93ca}
   #app.whiteboard #mpad button{background:#eef2f7;color:#16202b;border-color:#c6d2de}
   #app.whiteboard #mpad .val{background:#fff;color:#b3541e;border-color:#c6d2de}
+  /* Dark board materials revert the light-surface widget overrides above. */
+  #app.whiteboard.board-dark #inline-editor.markup-edit{background:rgba(20,23,27,.92);border:1px dashed rgba(180,195,210,.34);color:var(--ink)}
+  #app.whiteboard.board-dark #dyninput{background:rgba(20,23,27,.96);color:var(--ink);border-color:var(--pen)}
+  #app.whiteboard.board-dark #dyninput b{color:var(--snap)}
+  #app.whiteboard.board-dark #mpad{background:var(--panel-2);border-color:var(--pen)}
+  #app.whiteboard.board-dark #mpad button{background:var(--panel);color:var(--ink);border-color:var(--line)}
+  #app.whiteboard.board-dark #mpad .val{background:var(--panel-2);color:var(--snap);border-color:var(--line)}
+  #app.whiteboard.board-dark #stage{box-shadow:inset 0 0 0 1px rgba(255,255,255,.012)}
   #msheet{
     position:absolute;left:0;right:0;bottom:0;z-index:40;height:64%;
     background:var(--panel-2);border-top:1px solid var(--rule);
@@ -751,7 +759,11 @@ const S = {
   gridShow: false,     // whiteboard starts clean; drafting view enables the grid
   gridSnap: false,
   workspaceMode: "whiteboard",
-  boardSurface: "board", // Whiteboard-only visual material; never changes CAD model space
+  boardSurface: "slate", // Whiteboard-only visual material; never changes CAD model space
+  /* 0..1 opacity of the Whiteboard material over a reference image. 1 is the material at
+     full strength, 0 shows the reference as if there were no board at all. Only affects
+     what is painted ABOVE the reference; drawing data and model space are untouched. */
+  boardOpacity: 1,
   osnap: true,
   typedPt: null,       // live point parsed from the command line while picking
   gridStep: 10,
@@ -1542,15 +1554,24 @@ function refAdd(R){
   if(!R.rid) R.rid=refNewId();
   if(R.li==null) R.li=0;
   if(R.img) refImgEls.set(R.rid,R.img);
+  const had=S.refs.length;
   S.refs.push(R);
   S.refActive=R.rid;
+  /* The board-opacity slider only exists while a reference is loaded, and the ribbon is
+     what builds it, so the first reference has to trigger a repaint or the control never
+     appears. Guarded because refAdd also runs during load, before the ribbon exists. */
+  if(!had) refSyncRibbon();
   return R;
+}
+function refSyncRibbon(){
+  try{ if(typeof paintRibbon==="function") paintRibbon(); }catch(_){}
 }
 function refRemove(rid){
   const i=refIndex(rid);
   if(i<0) return false;
   S.refs.splice(i,1);
   if(S.refActive===rid) S.refActive = S.refs.length? S.refs[Math.min(i,S.refs.length-1)].rid : null;
+  if(!S.refs.length) refSyncRibbon();
   return true;
 }
 /* Cycle which reference the image tools point at. */
@@ -2966,6 +2987,16 @@ function nudge(dx,dy,e){
    The board is rendered inside the canvas so references can be below a
    translucent sheet instead of merely sitting on top of a CSS background. */
 const BOARD_PRESETS={
+  /* Default. The Whiteboard used to open on a light paper surface, which meant the app's
+     dark shell framed a bright rectangle and the two never agreed with each other. This
+     is the drafting view's own model-space darkness offered as a board material, so the
+     canvas matches the chrome out of the box. The lighter papers are all still here and
+     still selectable; only which one comes up first has changed. */
+  slate:{
+    label:"Dark Slate", base:"#14171b", sheet:"#1b1f24", sheetAlpha:.30,
+    grain:.020, vignette:.055, ink:"#e6e9ec", stage:"#14171b", dark:true,
+    hint:"Dark drafting surface that matches the app shell. Default."
+  },
   board:{
     label:"Drawing Board", base:"#dedbd0", sheet:"#ebe7dc", sheetAlpha:.34,
     grain:.018, vignette:.026, ink:"#292b2c", stage:"#dedbd0",
@@ -2988,7 +3019,7 @@ const BOARD_PRESETS={
   }
 };
 let boardGrainTile=null, boardGrainKey="";
-function boardPreset(){ return BOARD_PRESETS[S.boardSurface]||BOARD_PRESETS.board; }
+function boardPreset(){ return BOARD_PRESETS[S.boardSurface]||BOARD_PRESETS.slate; }
 function hexRGB(hex){
   const m=/^#([0-9a-f]{6})$/i.exec(hex||""); if(!m) return [225,223,214];
   const n=parseInt(m[1],16); return [(n>>16)&255,(n>>8)&255,n&255];
@@ -3008,6 +3039,12 @@ function boardGrain(p){
   }
   g.putImageData(im,0,0); boardGrainTile=c; boardGrainKey=key; return c;
 }
+/* Opacity applies only when a reference image is actually loaded. With no reference
+   underneath there is nothing to see through to, and fading the board would just wash the
+   surface out for no reason. */
+function boardVeil(){
+  return (S.refs&&S.refs.length)?Math.max(0,Math.min(1,S.boardOpacity==null?1:S.boardOpacity)):1;
+}
 function paintBoardBase(){
   const p=boardPreset();
   ctx.save(); ctx.fillStyle=p.base; ctx.fillRect(0,0,W,H);
@@ -3018,33 +3055,55 @@ function paintBoardBase(){
   ctx.restore();
 }
 function paintBoardSheet(){
-  const p=boardPreset(); if(!p.sheetAlpha) return;
-  ctx.save(); ctx.globalAlpha=p.sheetAlpha; ctx.fillStyle=p.sheet; ctx.fillRect(0,0,W,H); ctx.restore();
+  const p=boardPreset(), v=boardVeil(); if(!p.sheetAlpha||v<=0) return;
+  ctx.save(); ctx.globalAlpha=p.sheetAlpha*v; ctx.fillStyle=p.sheet; ctx.fillRect(0,0,W,H); ctx.restore();
 }
 function paintBoardFinish(){
-  const p=boardPreset();
-  const tile=boardGrain(p);
-  if(tile){ ctx.save(); ctx.globalCompositeOperation="source-over"; ctx.globalAlpha=.72;
+  const p=boardPreset(), v=boardVeil();
+  const tile=v>0?boardGrain(p):null;
+  if(tile){ ctx.save(); ctx.globalCompositeOperation="source-over"; ctx.globalAlpha=.72*v;
     ctx.fillStyle=ctx.createPattern(tile,"repeat"); ctx.fillRect(0,0,W,H); ctx.restore(); }
-  if(p.vignette){
+  if(p.vignette&&v>0){
     ctx.save(); const r=Math.max(W,H)*.72, g=ctx.createRadialGradient(W*.5,H*.47,r*.18,W*.5,H*.47,r);
-    g.addColorStop(0,"rgba(0,0,0,0)"); g.addColorStop(1,`rgba(28,30,28,${p.vignette})`);
+    g.addColorStop(0,"rgba(0,0,0,0)"); g.addColorStop(1,`rgba(28,30,28,${p.vignette*v})`);
     ctx.fillStyle=g; ctx.fillRect(0,0,W,H); ctx.restore();
   }
 }
 function syncBoardStage(){
   const p=boardPreset(), stage=document.getElementById("stage");
   if(stage) stage.style.setProperty("--board-stage",p.stage);
+  /* The #app.whiteboard rules restyle the inline editor, the dynamic input and the
+     mobile pad for a LIGHT surface. Those are keyed on the mode, not the material, so a
+     dark board would otherwise get white popups floating over it. board-dark hands those
+     widgets back to the shell's own dark styling. */
+  const app=document.getElementById("app");
+  if(app) app.classList.toggle("board-dark",!!p.dark);
 }
 function setBoardSurface(id,quiet){
-  if(!BOARD_PRESETS[id]) id="board"; S.boardSurface=id; boardGrainTile=null; boardGrainKey="";
+  if(!BOARD_PRESETS[id]) id="slate"; S.boardSurface=id; boardGrainTile=null; boardGrainKey="";
   syncBoardStage();
-  try{ localStorage.setItem("b2db.boardSurface.v1",id); }catch(_){}
+  try{ localStorage.setItem("b2db.boardSurface.v2",id); }catch(_){}
   if(!quiet){ paintRibbon(); draw(); echo("Whiteboard surface: "+BOARD_PRESETS[id].label); }
 }
+function setBoardOpacity(v,quiet){
+  v=Math.max(0,Math.min(1,isFinite(v)?v:1));
+  S.boardOpacity=v;
+  try{ localStorage.setItem("b2db.boardOpacity.v1",String(v)); }catch(_){}
+  draw();
+  if(!quiet)echo("Board opacity over reference: "+Math.round(v*100)+"%");
+}
+function restoreBoardOpacity(){
+  let v=1; try{ const r=localStorage.getItem("b2db.boardOpacity.v1"); if(r!=null)v=parseFloat(r); }catch(_){}
+  S.boardOpacity=Math.max(0,Math.min(1,isFinite(v)?v:1));
+}
 function restoreBoardSurface(){
-  let id="board"; try{ id=localStorage.getItem("b2db.boardSurface.v1")||id; }catch(_){}
+  /* Key bumped to v2 deliberately. restoreBoardSurface writes on first load, so every
+     existing install already has "board" persisted under v1 and would never see the new
+     default. Reading a fresh key resets the choice once; an explicit pick after that
+     sticks as normal. */
+  let id="slate"; try{ id=localStorage.getItem("b2db.boardSurface.v2")||id; }catch(_){}
   setBoardSurface(id,true);
+  restoreBoardOpacity();
 }
 
 /* ============================================================ render */
@@ -3059,8 +3118,10 @@ function draw(){
   ctx.clearRect(0,0,W,H);
   const wb = S.workspaceMode==="whiteboard" && !S.exporting;
   if(wb){
+    /* Order matters for the opacity control. The base is UNDER the reference, so it is
+       always painted solid - fading it would only reveal the empty canvas behind. The
+       sheet, grain and vignette sit ON TOP, and those are what the slider thins out. */
     paintBoardBase();
-    /* References are literally beneath the sheet in Whiteboard. */
     drawReferenceImage();
     paintBoardSheet();
     paintBoardFinish();
@@ -8695,7 +8756,7 @@ function snapPickActive(){
 
 const XCAP={
   PARTS: 2200,          // live particles
-  MS: 14000,            // any single effect
+  MS: 45000,            // any single effect (Line Surfer runs long once the camera follows him)
   RASTER: 640,          // longest edge of the enclosure raster
   CELLS: 640*640,
   ITER: 400,            // layout relaxation passes
@@ -8712,7 +8773,7 @@ S.x={
 };
 
 /* ---- effect driver ----------------------------------------------------- */
-const XFX={parts:[], marks:[], until:0, raf:0, kind:null, data:null, t0:0};
+const XFX={parts:[], marks:[], until:0, raf:0, kind:null, data:null, t0:0, onStop:null};
 
 /* Current is a persistent animated mode, not a timed XFX effect. Give it its
    own RAF so its phase keeps advancing even after startup effects finish. */
@@ -8733,15 +8794,24 @@ function xCurrentLoopStart(){
 
 function xfxStop(){
   if(XFX.raf) cancelAnimationFrame(XFX.raf);
+  /* Escape routes through cancel() to here, which never ran onDone. An effect that
+     borrows global state - Line Surfer borrows the view for its chase camera - had no
+     way to hand it back when the user cut it short. onStop always runs, exactly once. */
+  const cu=XFX.onStop; XFX.onStop=null;
+  if(cu){ try{ cu(); }catch(err){ console.error(err); } }
   XFX.raf=0; XFX.parts.length=0; XFX.marks.length=0; XFX.kind=null; XFX.data=null; XFX.until=0;
 }
-function xfxRun(kind,ms,data,onTick,onDone){
+/* onStop is optional and deliberately NOT defaulted to onDone. Several tools commit a
+   destructive change in onDone - Line Muncher deletes the entity it ate - and running
+   that when the user cancels would apply an edit they just backed out of. Only effects
+   that borrow global state and must always hand it back pass one. */
+function xfxRun(kind,ms,data,onTick,onDone,onStop){
   /* Tools push their findings into XFX.marks and then start the animation, so
      starting must not wipe them - only an explicit stop does. */
   const keep=XFX.marks.slice();
   xfxStop();
   XFX.marks=keep;
-  XFX.kind=kind; XFX.data=data||null;
+  XFX.kind=kind; XFX.data=data||null; XFX.onStop=onStop||null;
   XFX.t0=(typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
   XFX.until=XFX.t0+Math.max(1,Math.min(XCAP.MS,ms));
   const step=()=>{
@@ -9588,32 +9658,144 @@ function xHorizontalPlatforms(){
 }
 
 
+/* Ride surfaces, rebuilt to survive loops.
+
+   The previous builder could not represent a loop-de-loop for three independent
+   reasons, all of them here rather than in the physics:
+
+     1. Every span was normalised left-to-right (if a.x>b.x swap), which throws away
+        the direction the stroke was actually drawn in. The top half of a loop is
+        travelled right-to-left, and that fact was being deleted at build time.
+     2. Near-vertical and overhanging spans were filtered out by the slope test, so
+        the sides of a loop were never terrain in the first place.
+     3. Chaining was monotonic in +x (xSurfConnectedFrom required q.x1 > cur.x1),
+        so even a surviving loop could not connect back around.
+
+   The rebuild keeps spans in PATH order with their own direction intact, accepts any
+   slope including vertical and overhanging, and precomputes the join at each end as
+   linkF (leaving via b) and linkB (leaving via a). Chaining is then O(1) per hop
+   instead of an O(n) scan, which matters a great deal now that nothing is filtered
+   out by length. */
 function xRideSurfaces(){
-  const out=[], minL=px(26), maxSlope=Math.tan(rad(58));
+  const out=[], CAP=14000, minL=px(.6), tol=px(4);
   for(const e of xEnts()){
     let segs=[]; try{segs=xSegs(e)||[];}catch(_){segs=[];}
-    for(const seg of segs){
-      if(!seg||!seg.a||!seg.b)continue;
-      let a=seg.a,b=seg.b, reversed=false;
-      if(a.x>b.x){const q=a;a=b;b=q;reversed=true;}
-      const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy);
+    let prev=null;
+    for(let i=0;i<segs.length;i++){
+      const s=segs[i];
+      if(!s||!s.a||!s.b)continue;
+      const a=s.a,b=s.b,dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy);
+      if(!(L>minL))continue;
+      const dir=V(dx/L,dy/L);
+      const q={a,b,x0:Math.min(a.x,b.x),x1:Math.max(a.x,b.x),
+               y0:Math.min(a.y,b.y),y1:Math.max(a.y,b.y),
+               L,dir,ang:Math.atan2(dir.y,dir.x),e,
+               ink:!!s.ink||e.t==="ink",
+               pathIndex:Number.isFinite(s.pathIndex)?s.pathIndex:i,
+               pathCount:s.pathCount,
+               linkF:null,linkB:null,_s:0};
+      /* Path adjacency, but only where the spans genuinely meet. curvesOf() can hand
+         back disjoint pieces for one entity, and welding those would invent terrain. */
+      if(prev && dist(prev.b,a)<=tol){
+        const jp=V((prev.b.x+a.x)/2,(prev.b.y+a.y)/2);
+        prev.linkF={q,p:jp}; q.linkB={q:prev,p:jp};
+      }
+      out.push(q); prev=q;
+      if(out.length>=CAP)break;
+    }
+    if(out.length>=CAP)break;
+  }
 
-      /* CAD lines need enough physical length to be useful terrain. Freehand ink is
-         already resampled, so its short spans are intentional pieces of a curve and
-         must not be discarded. This is what lets a marker-drawn bowl/ramp become a
-         continuous skate surface. */
-      const ink=!!seg.ink || e.t==="ink";
-      const localMin=ink?px(1.8):minL;
-      const localDx=ink?px(.65):px(8);
-      const localMaxSlope=ink?Math.tan(rad(74)):maxSlope;
-      if(L<localMin || dx<localDx)continue;
-      if(Math.abs(dy/Math.max(1e-9,dx))>localMaxSlope)continue;
-      const dir=norm(sub(b,a)), ang0=Math.atan2(dir.y,dir.x);
-      out.push({a,b,x0:a.x,x1:b.x,L,dir,ang:ang0,e,ink,reversed,
-                pathIndex:seg.pathIndex,pathCount:seg.pathCount});
+  /* Cross-stroke joins between whatever ends are still free. Bucketed, because a
+     naive pairwise pass over 14k spans is 100M+ comparisons. */
+  const cell=Math.max(tol*2,1e-9), K=(i,j)=>i+":"+j;
+  const buckets=new Map();
+  const put=(p,rec)=>{
+    const k=K(Math.round(p.x/cell),Math.round(p.y/cell));
+    let arr=buckets.get(k); if(!arr){arr=[];buckets.set(k,arr);}
+    arr.push(rec);
+  };
+  for(const q of out){
+    if(!q.linkB)put(q.a,{q,end:"a"});
+    if(!q.linkF)put(q.b,{q,end:"b"});
+  }
+  for(const q of out){
+    for(const end of ["a","b"]){
+      if(end==="a"?q.linkB:q.linkF)continue;
+      const p=end==="a"?q.a:q.b;
+      const ci=Math.round(p.x/cell),cj=Math.round(p.y/cell);
+      let best=null,bd=tol;
+      for(let i=-1;i<=1;i++)for(let j=-1;j<=1;j++){
+        const arr=buckets.get(K(ci+i,cj+j)); if(!arr)continue;
+        for(const r of arr){
+          if(r.q===q)continue;
+          if(r.end==="a"?r.q.linkB:r.q.linkF)continue;
+          const rp=r.end==="a"?r.q.a:r.q.b, d=dist(rp,p);
+          if(d<bd){bd=d;best=r;}
+        }
+      }
+      if(!best)continue;
+      const bp=best.end==="a"?best.q.a:best.q.b;
+      const jp=V((p.x+bp.x)/2,(p.y+bp.y)/2);
+      if(end==="a")q.linkB={q:best.q,p:jp}; else q.linkF={q:best.q,p:jp};
+      if(best.end==="a")best.q.linkB={q,p:jp}; else best.q.linkF={q,p:jp};
     }
   }
-  out.sort((a,b)=>a.x0-b.x0 || b.a.y-a.a.y);
+
+  /* Smoothed curvature, computed once per span over a window of arc length rather than
+     from the one adjacent span. Single-pair curvature is what made him unrideable on
+     anything hand-drawn: freehand ink is resampled into ~2px spans whose angles jitter,
+     so r = arc/turn collapsed to near-zero at random, v^2/r exploded, and the stick test
+     threw him off a line that is visually straight. Averaging over a window rejects that
+     noise while keeping genuine transitions, which is also what lets a loop read as one
+     continuous curve instead of 72 unrelated corners.
+
+     kink marks a span within a window of a real corner. A corner is not curvature: it is
+     a discontinuity, handled by the quadratic join loss, and must not be fed to the
+     centripetal model or a plain zigzag registers as a loop. */
+  /* Curvature is measured from THREE POINTS spanning a window, not by summing the angle
+     at every join. Summation amplifies sampling noise: freehand ink jitters a few pixels
+     per sample, each jitter becomes a large per-join angle, and the sum is dominated by
+     noise rather than by the shape. A chord through the window only sees the noise on its
+     two endpoints, divided by the window length, so a wobbly hand-drawn line reads as the
+     straight line it looks like and a real transition still reads as a transition.
+
+     kink marks a genuine corner, and a corner is a large angle between two LONG spans.
+     A large angle between two 2px spans is not a corner, it is the pen shaking. Without
+     that length qualifier every jittered sample became a corner and the curvature was
+     thrown away exactly where it was needed. */
+  const WIN=px(120), HALF=WIN*.5, LONG=WIN*.25, GUARD=200, KINK=.5;
+  const reach=(q0,dir0)=>{
+    let arc=0,q=q0,sg=dir0,n=0,mxLong=0;
+    let t=V(q.dir.x*sg,q.dir.y*sg), p=sg>0?q.b:q.a;
+    while(arc<HALF && n++<GUARD){
+      const lk=sg>0?q.linkF:q.linkB; if(!lk)break;
+      const n2=lk.q, d0=t.x*n2.dir.x+t.y*n2.dir.y, s2=d0>=0?1:-1;
+      const t2=V(n2.dir.x*s2,n2.dir.y*s2);
+      const cr=t.x*t2.y-t.y*t2.x, dt=Math.max(-1,Math.min(1,t.x*t2.x+t.y*t2.y));
+      const j=Math.abs(Math.atan2(cr,dt));
+      if(j>mxLong && Math.min(q.L,n2.L)>=LONG)mxLong=j;
+      arc+=n2.L; q=n2; sg=s2; t=t2; p=sg>0?q.b:q.a;
+    }
+    return {p,arc,mxLong};
+  };
+  for(const q of out){
+    const f=reach(q,1),b=reach(q,-1);
+    q.kink=Math.max(f.mxLong,b.mxLong)>KINK;
+    const mid=V((q.a.x+q.b.x)/2,(q.a.y+q.b.y)/2);
+    const v1=sub(mid,b.p),v2=sub(f.p,mid);
+    const L1=Math.hypot(v1.x,v1.y),L2=Math.hypot(v2.x,v2.y),arc=b.arc+q.L+f.arc;
+    if(q.kink||L1<1e-9||L2<1e-9||arc<=0){ q.curv=0; continue; }
+    const cr=(v1.x*v2.y-v1.y*v2.x)/(L1*L2), dt=(v1.x*v2.x+v1.y*v2.y)/(L1*L2);
+    /* Factor of two: on a circular arc each chord runs parallel to the tangent at the
+       MIDPOINT of its own half, so the angle between the two chords is half the arc
+       angle, not the whole of it. Without this every radius comes out doubled and a real
+       loop reads as one twice its size, which is far outside the range the rider will
+       commit to. */
+    const k=2*Math.atan2(cr,dt)/arc;
+    // Below this the reading is numerical dust on a straight line, not a curve.
+    q.curv=Math.abs(k)<1/(WIN*40)?0:k;
+  }
   return out;
 }
 function xSurfY(q,x){
@@ -9669,34 +9851,35 @@ function xSurfIntersection(a,b,c,d){
 /* Swept board-vs-terrain landing test. The rider is a projectile once he leaves a lip.
    We test the whole movement step against every ramp, then allow a tiny landing tolerance
    so a fast board cannot tunnel through a lower platform between animation frames. */
+/* Swept board-vs-terrain landing test. The rider is a projectile once he leaves a lip.
+   Two ways to catch it: an exact crossing of the swept path, and failing that the closest
+   approach along the sweep.
+
+   The closest-approach pass is what makes vert skating work. The old code tested a
+   crossing and then probed across the ramp's x-range, and both give up when the motion is
+   parallel to the span: a rider popping straight up off vertical coping has dx of zero,
+   his path is collinear with the wall, and there is no crossing to find, so he could
+   never re-attach to the wall he had just left and every air out of a halfpipe was a
+   one-way trip. Distance handles it without a special case - while he is above the coping
+   the nearest point on the wall is its top end and he is far from it, and as he drops back
+   into the pipe that distance closes to nothing and he lands. */
 function xSurfSweepLanding(prev,nowp,vel,q,tol){
   const h=xSurfIntersection(prev,nowp,q.a,q.b);
-  if(h){
-    const n=V(-q.dir.y,q.dir.x);
-    if(vel.x*n.x+vel.y*n.y<0)return {p:h.p,t:h.t};
-  }
-  const dx=nowp.x-prev.x;
-  if(Math.abs(dx)<1e-9)return null;
-  const xmin=Math.min(q.a.x,q.b.x)-tol,xmax=Math.max(q.a.x,q.b.x)+tol;
-  const lo=Math.max(Math.min(prev.x,nowp.x),xmin),hi=Math.min(Math.max(prev.x,nowp.x),xmax);
-  if(lo>hi)return null;
-  // Probe where the board passed the ramp's x-range. This catches high-speed near misses.
-  const probes=[lo,(lo+hi)*.5,hi];
+  if(h)return {p:h.p,t:h.t};
+  const abx=q.b.x-q.a.x, aby=q.b.y-q.a.y, den=abx*abx+aby*aby;
+  if(den<1e-12)return null;
+  const dx=nowp.x-prev.x, dy=nowp.y-prev.y;
+  const steps=Math.max(3,Math.min(10,1+Math.ceil(Math.hypot(dx,dy)/Math.max(tol,1e-9))));
   let best=null;
-  for(const x of probes){
-    const tm=(x-prev.x)/dx; if(tm<0||tm>1)continue;
-    const by=prev.y+(nowp.y-prev.y)*tm;
-    const qdx=q.b.x-q.a.x;
-    const uq=Math.abs(qdx)>1e-9?(x-q.a.x)/qdx:0;
-    if(uq<-.02||uq>1.02)continue;
-    const gy=q.a.y+(q.b.y-q.a.y)*uq;
-    // Board must be descending through the top side of the ramp.
-    const n=V(-q.dir.y,q.dir.x);
-    if(vel.x*n.x+vel.y*n.y>=0)continue;
-    const dd=Math.abs(by-gy);
-    if(dd<=tol && (!best||dd<best.dd))best={p:V(x,gy),t:tm,dd};
+  for(let i=0;i<=steps;i++){
+    const t=i/steps, sxp=prev.x+dx*t, syp=prev.y+dy*t;
+    let uq=((sxp-q.a.x)*abx+(syp-q.a.y)*aby)/den;
+    uq=uq<0?0:uq>1?1:uq;
+    const cx=q.a.x+abx*uq, cy=q.a.y+aby*uq;
+    const d=Math.hypot(sxp-cx,syp-cy);
+    if(d<=tol && (!best||d<best.d))best={d,p:V(cx,cy),t};
   }
-  return best;
+  return best?{p:best.p,t:best.t}:null;
 }
 function xChooseSurferStart(surfs){
   if(!surfs.length)return null;
@@ -9734,122 +9917,830 @@ function xLineSurfer(startPick){
   }
   const hit=startPick||xSurferNearestSurface(surfs,V(S.view.cx,S.view.cy));
   if(!hit||!hit.q)return echo("LINE SURFER: click a rideable part of the track.","warn");
+
+  /* px() divides by the LIVE zoom. The chase camera changes the zoom every frame,
+     so any px() call inside the simulation would silently redefine what a pixel is
+     mid-run and the physics would drift as the camera pulled back. u() freezes the
+     scale at launch, so the world the rider lives in never moves under him. */
+  const s0=S.view.s, u=n=>n/s0;
+
   const start=hit.q, margin=Math.max(0,Math.min(start.L,hit.u*start.L));
+
+  /* Precomputed world extents. The old code spread surfs.map() into Math.min on
+     every single frame: one array allocation per frame and a genuine stack blow-up
+     risk once a drawing carried tens of thousands of ride surfaces. */
+  let lowest=Infinity,wx0=Infinity,wx1=-Infinity;
+  for(const q of surfs){
+    if(q.a.y<lowest)lowest=q.a.y; if(q.b.y<lowest)lowest=q.b.y;
+    if(q.x0<wx0)wx0=q.x0; if(q.x1>wx1)wx1=q.x1;
+  }
+  const floorY=lowest-u(200), worldW=Math.max(u(400),wx1-wx0);
+
+  /* The view belongs to the user. Borrow it for the run, hand it straight back. */
+  /* Landing tested every span on every substep. Nothing is filtered out of the terrain
+     any more, so on a 13k-span drawing that was ~300k segment tests a frame and a 100ms
+     frame time. Bucket the spans once and only test the ones the sweep can reach. */
+  const GRID=(()=>{
+    const cell=Math.max(u(80),1e-9), m=new Map();
+    for(const q of surfs){
+      const i0=Math.floor(q.x0/cell),i1=Math.floor(q.x1/cell);
+      const j0=Math.floor(q.y0/cell),j1=Math.floor(q.y1/cell);
+      if((i1-i0+1)*(j1-j0+1)>4096){ (m.get("*")||m.set("*",[]).get("*")).push(q); continue; }
+      for(let i=i0;i<=i1;i++)for(let j=j0;j<=j1;j++){
+        const k=i+":"+j; let a=m.get(k); if(!a){a=[];m.set(k,a);} a.push(q);
+      }
+    }
+    return {cell,m,big:m.get("*")||[]};
+  })();
+  let gstamp=0; const gbuf=[];
+  const nearSpans=(p0,p1,pad)=>{
+    const c=GRID.cell; gstamp++; gbuf.length=0;
+    const i0=Math.floor((Math.min(p0.x,p1.x)-pad)/c),i1=Math.floor((Math.max(p0.x,p1.x)+pad)/c);
+    const j0=Math.floor((Math.min(p0.y,p1.y)-pad)/c),j1=Math.floor((Math.max(p0.y,p1.y)+pad)/c);
+    if((i1-i0+1)*(j1-j0+1)>4096)return surfs;
+    for(let i=i0;i<=i1;i++)for(let j=j0;j<=j1;j++){
+      const a=GRID.m.get(i+":"+j); if(!a)continue;
+      for(const q of a){ if(q._s!==gstamp){q._s=gstamp;gbuf.push(q);} }
+    }
+    for(const q of GRID.big){ if(q._s!==gstamp){q._s=gstamp;gbuf.push(q);} }
+    return gbuf;
+  };
+
+  const view0={cx:S.view.cx,cy:S.view.cy,s:S.view.s};
+  /* Side is which face of the span the rider is on, as a sign against the span's left
+     normal (-dir.y, dir.x). The rider-side normal is ns = side * (-dir.y, dir.x), so
+     ns.y = side * dir.x, and standing on the upper face means ns.y >= 0. Loops,
+     ceilings and detachment are all decided from this one value. */
+  /* Which face he starts on is decided by which face can actually HOLD him, evaluated
+     the same way the running stick test does. The old rule was "dir.x >= 0", i.e. the
+     upper face, which is a coin toss on a near-vertical span: dropped onto the rim of a
+     bowl it put him on the OUTSIDE of the wall, where nothing holds him, and he fell off
+     within twenty units every time. Scoring both candidates picks the upper face on
+     ordinary ground and the inside of the bowl on a wall, with no special cases. */
+  const startSide=(()=>{
+    const t=start.dir, v0=760/S.view.s, c=start.curv||0;
+    const score=sd=>{
+      const ns=V(-t.y*sd,t.x*sd);
+      let N=980/S.view.s*ns.y;
+      if(c){ const n=c>0?V(-t.y,t.x):V(t.y,-t.x); N+=v0*v0*Math.abs(c)*(n.x*ns.x+n.y*ns.y); }
+      return N;
+    };
+    return score(1)>=score(-1)?1:-1;
+  })();
+
   const data={surfs,p:start,state:"ride",d:margin,x:hit.p.x,y:hit.p.y,
-              speed:px(125),vx:0,vy:0,spin:0,last:0,jumps:0,landings:0,goal:null,crashed:false,
-              groundAng:start.ang,airAng:start.ang,sliding:false};
+              speed:u(125),vx:0,vy:0,spin:0,last:0,jumps:0,landings:0,goal:null,crashed:false,
+              groundAng:start.ang,airAng:start.ang,sliding:false,
+              s0,u,flow:1,peakFlow:1,bails:0,tier:0,slowmo:1,bigAir:false,
+              topSpeed:0,bestAir:0,bestDrop:0,airT:0,launchY:hit.p.y,dist:0,
+              body:null,board:null,bailT:0,bailReason:"",
+              cp:{q:start,d:margin,x:hit.p.x,y:hit.p.y,side:startSide},lastBailLandings:-1,stop:false,
+              endReason:"escaped",bailEchoAt:-1,warnGap:false,warnStill:false,lastBailAt:null,still:0,clock:0,lastStomp:-9,parked:false,lastJoint:null,lastJointT:-9,
+              rot:0,flip:0,halves:0,flips:0,spinRate:0,flipRate:0,grab:null,
+              tricks:0,trickName:"",trickT:0,trickOK:true,airHang:0,
+              side:startSide,noLand:0,offT:0,carveIdle:9,loopEvalR:0,loopRevs:0,wantEject:false,loopSigned:0,prevT:null,loopCommit:false,loopNeed:0,loopTurn:0,loopEntry:0,loopDir:0,loops:0,curveR:0,inLoop:false,
+              camS:s0,camX:S.view.cx,camY:S.view.cy};
+
   // Gravity is deliberately the strongest force in this toy. Rider input is only a small assist
   // on fairly level ground; on a serious slope the hill wins.
-  const g=px(980), pump=px(18), rolling=.040, maxV=px(760), landSlop=px(4), steepSlide=Math.sin(rad(34));
-  const airDrag=.006, landingCarry=.92, landingBoost=px(42), rampPopMax=px(120);
+  const g=u(980), pump=u(18), rolling=.016, landSlop=u(4), steepSlide=Math.sin(rad(34));
+  const airDrag=.006, landingCarry=.92, landingBoost=u(42), rampPopMax=u(120);
+  const vBase=u(760), airSteer=u(150);
+  /* THE exponential. Speed is not raised directly; the ceiling is. Every clean landing
+     multiplies the cap, every bail resets it to 1. Chain ten good landings and the rider
+     is running at roughly 5x, which is only reachable by building genuinely good terrain.
+     Capped at 6 so the substepper below never has to chew more than a bounded step count. */
+  /* Combo ceiling. Chaining is the whole reward loop, so the cap is high enough that a
+     long clean run keeps paying instead of flattening out a few landings in. The
+     substepper is sized off vBase*FLOW_MAX (see vAir and the substep count), so raising
+     this raises collision cost proportionally rather than breaking it. */
+  const FLOW_MAX=15, FLOW_GAIN=1.18;
+  const maxV=()=>vBase*data.flow;
+  const vAir=vBase*FLOW_MAX*1.35;
+  /* LOOP_GAIN is the speed multiple one full revolution is worth and how far a loop is
+     allowed to exceed the normal speed ceiling. LOOP_FLOW is what clearing one pays the combo. */
+  const LOOP_GAIN=1.85, LOOP_FLOW=1.6, gripR=u(700), pumpK=u(300);
+  /* Impact bail exists only as a backstop against physically absurd plummets. It was
+     briefly set low enough that an ordinary big drop bailed, which punished the exact
+     thing the combo is supposed to reward. Big drops pay out; the floor is the real
+     failure mode. */
+  const bailImpact=u(2400);
+
+  const tierOf=v=>v>2000?4:v>1350?3:v>850?2:v>420?1:0;
+  const TIER_COL=["#78b7f1","#8fd0ff","#ffd166","#ff9f43","#ff5ac8"];
+  const TIER_NAME=["","FAST","BLAZING","UNREASONABLE","LUDICROUS"];
+
   const launch=()=>{
     const t=data.p.dir, signed=data.speed;
     data.state="air";
     data.vx=signed*t.x;
     data.vy=signed*t.y;
     // Only a rider travelling FORWARD up a ramp gets a tiny ollie/pop. Reversing off a hill
-    // simply carries the downhill velocity into free flight.
-    if(signed>0 && t.y>0.08)data.vy+=Math.min(rampPopMax,Math.abs(signed)*t.y*.28+px(18));
-    else if(signed>0 && Math.abs(t.y)<.08)data.vy+=px(8);
-    data.airAng=Math.atan2(data.vy,data.vx||px(.01)); data.jumps++; data.launch=V(data.x,data.y);
+    // simply carries the downhill velocity into free flight. The pop scales with flow so a
+    // hot streak launches harder off the same lip.
+    if(signed>0 && t.y>0.08)data.vy+=Math.min(rampPopMax*data.flow,Math.abs(signed)*t.y*.28+u(18));
+    else if(signed>0 && Math.abs(t.y)<.08)data.vy+=u(8);
+    data.airAng=Math.atan2(data.vy,data.vx||u(.01)); data.jumps++; data.launch=V(data.x,data.y);
+    beginTrick();
     data.goal=signed>=0?xSurfNextAhead(surfs,data.p):null;
-    data.sliding=false;
+    data.sliding=false; data.airT=0; data.launchY=data.y;
+    /* Slow motion is reserved for jumps that actually deserve it. Anything with enough
+       upward velocity to hang gets the apex treated as an event rather than a frame. */
+    data.bigAir=data.vy>u(430);
     xBeep("pop");
   };
-  xfxRun("lineSurfer",26000,data,(t,now)=>{
-    const dt=data.last?Math.min(.032,(now-data.last)/1000):.016; data.last=now;
-    if(data.state==="ride"){
-      const q=data.p, tangent=q.dir;
-      // Signed velocity along the terrain. Positive = left-to-right, negative = right-to-left.
-      // Gravity projected onto the slope is the dominant acceleration.
-      const gravityAlong=-g*tangent.y;
-      const slopeAbs=Math.abs(tangent.y);
-      const riderPush=(slopeAbs<.22 && data.speed>=0 && data.speed<px(165))?pump:0;
-      const rollingDrag=-rolling*data.speed;
-      data.speed+=(gravityAlong+riderPush+rollingDrag)*dt;
-      data.speed=Math.max(-maxV,Math.min(maxV,data.speed));
-      // On steep hills, once momentum loses to gravity, visibly enter a downhill slide.
-      data.sliding=slopeAbs>steepSlide && Math.sign(data.speed||gravityAlong)===Math.sign(gravityAlong);
-      if(Math.abs(data.speed)<px(2) && Math.abs(gravityAlong)<px(8))data.speed=0;
 
-      data.d+=data.speed*dt;
-      data.groundAng=q.ang;
-      if(data.d>=0 && data.d<=q.L){
-        data.x=q.a.x+tangent.x*data.d; data.y=q.a.y+tangent.y*data.d;
-      }else if(data.d>q.L){
-        data.x=q.b.x;data.y=q.b.y;
-        const next=xSurfConnectedFrom(surfs,q);
-        if(next){
-          const turn=Math.acos(Math.max(-1,Math.min(1,q.dir.x*next.dir.x+q.dir.y*next.dir.y)));
-          data.speed*=Math.max(.72,1-turn*.18);
-          data.p=next;data.d=Math.min(px(1.5),next.L);data.groundAng=next.ang;
-        }else launch();
-      }else{
-        // He has rolled/slid backwards off the low end of this ramp.
-        data.x=q.a.x;data.y=q.a.y;
-        const prev=xSurfConnectedBack(surfs,q);
-        if(prev){
-          const turn=Math.acos(Math.max(-1,Math.min(1,q.dir.x*prev.dir.x+q.dir.y*prev.dir.y)));
-          data.speed*=Math.max(.72,1-turn*.18);
-          data.p=prev;data.d=Math.max(0,prev.L-px(1.5));data.groundAng=prev.ang;
-        }else launch();
-      }
-      data.goal=data.speed>=0?xSurfNextAhead(surfs,data.p):null;
+  /* ---- tricks -------------------------------------------------------------
+     Rotation is not accumulated at some fixed rate and hoped over; it is CHOSEN at
+     take-off as a whole number of half rotations that fits the predicted hangtime, so he
+     comes down facing the way he is travelling instead of arriving sideways. Big air
+     therefore earns a bigger trick on its own, without anything having to steer him. */
+  const GRABS=["Indy","Melon","Method","Stalefish","Nosegrab","Tailgrab"];
+  const beginTrick=()=>{
+    const hang=data.vy>0?Math.max(.18,2*data.vy/g):.22;
+    data.airHang=hang; data.rot=0; data.flip=0; data.grab=null;
+    const face=data.vx<0?-1:1;
+    let halves=hang<.34?0:Math.max(0,Math.min(5,Math.round(hang*2.4)));
+    data.halves=halves;
+    data.spinRate=halves?face*halves*Math.PI/hang:0;
+    const flips=hang>1.05?2:hang>.55?1:0;
+    data.flips=flips;
+    data.flipDir=Math.random()<.5?1:-1;
+    data.flipRate=flips?flips*TAU/hang*data.flipDir:0;
+    data.grab=(!halves&&!flips&&hang>.42)?GRABS[(Math.random()*GRABS.length)|0]:null;
+  };
+  const finishTrick=()=>{
+    const halves=data.halves||0,flips=data.flips||0,grab=data.grab,flipDir=data.flipDir||1;
+    data.halves=0;data.flips=0;data.grab=null;data.spinRate=0;data.flipRate=0;
+    if(!halves&&!flips&&!grab)return null;
+    /* Scored on what he actually COMPLETED, not what he set out to do. Half a 540 is a
+       360, and it should be named and paid as a 360 rather than as a failed 540. */
+    const done=Math.floor(Math.abs(data.rot)/Math.PI+.15);
+    const left=Math.abs(data.rot)-done*Math.PI;
+    const fdone=Math.floor(Math.abs(data.flip)/TAU+.12);
+    const fleft=Math.abs(data.flip)-fdone*TAU;
+    const deg=done*180;
+    const parts=[];
+    if(fdone>=2)parts.push("Double Kickflip");
+    else if(fdone===1)parts.push(flipDir<0?"Heelflip":"Kickflip");
+    if(deg>=180)parts.push(String(deg));
+    if(grab)parts.push(grab+" Grab");
+    const name=parts.join(" ")||(deg||fdone?"":"Ollie");
+    return {name:name||"Ollie",clean:left<.55&&fleft<1.0,halves:done,flips:fdone,grab,deg};
+  };
+
+  const bailOut=(reason)=>{
+    if(data.state==="bail")return;
+    data.state="bail"; data.bails++; data.flow=1; data.bailT=0; data.bailReason=reason;
+    /* Respawning is deterministic, so bailing twice in the SAME PLACE with no landing in
+       between means the checkpoint leads somewhere with nothing under it and retrying is a
+       loop, not a run. Judged on position, not just the landing count: bailing off a
+       different edge of the drawing is real progress and earns another go. */
+    const here=V(data.x,data.y);
+    if(data.lastBailAt && data.landings===data.lastBailLandings &&
+       dist(here,data.lastBailAt)<u(90)){ data.stop=true; }
+    data.lastBailLandings=data.landings; data.lastBailAt=here;
+    data.slowmo=1; data.crashed=true;
+    const vx=data.vx||data.speed*data.p.dir.x, vy=data.vy||data.speed*data.p.dir.y;
+    /* Rider and board separate and fall on their own. Two projectiles, not a death. */
+    data.body={x:data.x,y:data.y+u(10),vx:vx*.55+(Math.random()-.5)*u(60),
+               vy:Math.max(u(140),Math.abs(vy)*.28),spin:0,
+               sv:(Math.random()<.5?-1:1)*(5+Math.random()*6),rest:0};
+    data.board={x:data.x,y:data.y,vx:vx*.95,vy:Math.abs(vy)*.35+u(110),spin:0,
+                sv:(Math.random()<.5?-1:1)*(9+Math.random()*9),rest:0};
+    xBeep("thunk"); xUiQuake();
+    xBurstAt(V(data.x,data.y),"#ef8178",24,u(200));
+    if(data.bails<=3||data.landings!==data.bailEchoAt){
+      data.bailEchoAt=data.landings;
+      echo("LINE SURFER: BAIL. "+reason+" Combo reset, getting back up.","warn");
+    }
+  };
+
+  const respawn=()=>{
+    const cp=data.cp;
+    data.p=cp.q; data.d=cp.d; data.x=cp.x; data.y=cp.y;
+    data.speed=u(90); data.vx=data.vy=0; data.spin=0; data.state="ride";
+    data.crashed=false; data.sliding=false; data.parked=false; data.body=data.board=null;
+    data.groundAng=cp.q.ang; data.goal=null;
+    data.side=cp.side; data.inLoop=false; data.loopTurn=0; data.loopSigned=0; data.prevT=null;
+    xBeep("tick"); xBurstAt(V(data.x,data.y),"#4fd1a5",14,u(120));
+  };
+
+  /* Travel direction in world space, and the normal pointing out of the surface
+     toward the rider. Both flip correctly when he is running a span backwards. */
+  const travelDir=()=>{const g2=Math.sign(data.speed)||1;return V(data.p.dir.x*g2,data.p.dir.y*g2);};
+  const riderNormal=q=>V(-q.dir.y*data.side,q.dir.x*data.side);
+
+  /* Move onto a joined span, preserving world travel direction and which face the
+     rider is on. A loop only works because both survive the join: the top half of a
+     loop is the same stroke run right-to-left with the rider on its inner face. */
+  /* Put him in the air along a given travel direction. Shared by every exit from the
+     ground state so trick setup, the no-land window and the goal marker can never be
+     forgotten by one of them. */
+  const goAir=(t,sp,pop)=>{
+    data.state="air";
+    data.vx=t.x*sp; data.vy=t.y*sp;
+    if(pop)data.vy+=pop;
+    data.airAng=Math.atan2(data.vy,data.vx||u(.01));
+    data.jumps++; data.launch=V(data.x,data.y); data.launchY=data.y;
+    data.airT=0; data.bigAir=data.vy>u(430); data.sliding=false; data.parked=false;
+    data.inLoop=false; data.loopTurn=0; data.loopSigned=0;
+    data.noLand=.07;
+    data.goal=xSurfNextAhead(surfs,data.p);
+    beginTrick();
+    xBeep("pop");
+  };
+
+  /* Move onto a joined span, preserving world travel direction and which face the rider
+     is on. A loop only works because both survive the join: the top half of a loop is the
+     same stroke run right-to-left with the rider on its inner face.
+
+     Returns true if he left the ground instead of transferring.
+
+     The entry direction is anchored to the JOINT, not to the sign of a dot product. At a
+     right-angled corner that dot is exactly zero, the old code resolved it to +1, and a
+     rider arriving at the far end of a span was sent straight back out of the end he came
+     in by. He then ping-ponged across the joint inside the hop loop about 120 times a
+     second and stuck to the corner permanently - the edge glitch. */
+  const transfer=(lk,over,leaveSign)=>{
+    const q=data.p,next=lk.q,jp=lk.p;
+    const t=V(q.dir.x*leaveSign,q.dir.y*leaveSign);
+    const ns=riderNormal(q);
+    const atA=dist(jp,next.a)<=dist(jp,next.b);
+    const enter=atA?1:-1;
+    const into=V(next.dir.x*enter,next.dir.y*enter);
+    const proj=Math.max(-1,Math.min(1,t.x*into.x+t.y*into.y));
+    const turn=Math.acos(proj);
+    let mag=Math.abs(data.speed);
+
+    /* A corner only counts as a corner between two spans long enough to have one. A big
+       angle between two short spans is sampling noise on a hand-drawn line, and treating
+       that as geometry is what used to throw him off a line that looks straight. Same
+       length qualifier the builder uses for its kink test. */
+    const sharp=turn>.35 && Math.min(q.L,next.L)>=u(30);
+    if(sharp && into.x*ns.x+into.y*ns.y<-.15){
+      /* An EDGE: the next span heads away from the side he is riding on, so the surface
+         drops out from under him. Going over the lip of a box should launch him. */
+      goAir(t,mag); return true;
+    }
+    if(sharp && turn>1.3){
+      /* A WALL, near enough head-on. Inelastic: only the tangential component survives,
+         which is zero at ninety degrees, so he stops dead against it instead of smoothly
+         climbing a surface no skater could climb. Reserved for genuinely sharp corners -
+         applied from 0.35 up it cost a sixty-degree ramp lip half its speed and nothing
+         could clear a kicker any more. */
+      mag*=Math.max(0,proj);
     }else{
-      const prev=V(data.x,data.y),prevVy=data.vy;
-      // Free flight preserves and builds energy. Gravity is the engine of the run: the farther
-      // he falls, the faster his downward speed becomes. Horizontal speed is only lightly damped.
-      data.vx*=Math.max(.97,1-airDrag*dt*60);
-      data.x+=data.vx*dt; data.y+=data.vy*dt; data.vy-=g*dt;
-      data.airAng=Math.atan2(data.vy,data.vx||px(.01));
-      data.spin+=dt*(data.crashed?9:1.2)*(data.vx<0?-1:1);
-      if(prevVy<=px(14) || data.vy<=px(14)){
-        let landed=null,hit=null,bestT=Infinity;
-        const nowp=V(data.x,data.y),vel=V(data.vx,data.vy);
-        for(const q of surfs){
-          if(q===data.p && Math.min(dist(prev,q.a),dist(prev,q.b))<px(10))continue;
-          const h=xSurfSweepLanding(prev,nowp,vel,q,Math.max(landSlop,px(7)));
-          if(!h||h.t>=bestT)continue;
-          bestT=h.t;landed=q;hit=h.p;
-        }
-        if(landed){
-          data.p=landed;data.x=hit.x;data.y=hit.y;
-          data.d=dist(landed.a,hit);
-          // Keep the SIGN of the tangent projection. Landing while moving left means he keeps
-          // rolling left, and gravity decides what happens next.
-          const along=data.vx*landed.dir.x+data.vy*landed.dir.y;
-          const impact=Math.abs(data.vx*(-landed.dir.y)+data.vy*landed.dir.x);
-          const airSpeed=Math.hypot(data.vx,data.vy);
-          // Preserve almost all tangential momentum on a clean landing, then reward big drops by
-          // converting a slice of impact energy into forward board speed. This makes downhill gaps
-          // feed the next uphill ramp instead of feeling like a reset.
-          const dropBoost=Math.min(px(185),Math.max(0,-data.vy)*.34);
-          const impactPenalty=Math.min(.30,impact/Math.max(px(900),airSpeed*3));
-          const dirSign=Math.sign(along||data.vx||1);
-          data.speed=along*Math.max(.68,landingCarry-impactPenalty)+dirSign*(landingBoost+dropBoost);
-          if(Math.abs(data.speed)<px(2))data.speed=0;
-          data.vx=data.vy=0;data.state="ride";data.spin=0;data.groundAng=landed.ang;data.landings++;
-          data.sliding=false;
-          const landingSpeed=Math.abs(data.speed)*S.view.s;
-          xBeep("tick");xBurstAt(V(data.x,data.y),"#78b7f1",Math.min(26,8+Math.floor(landingSpeed/45)),px(110));
-          if(landingSpeed>330){
-            xBurstAt(V(data.x,data.y),"#ffd166",18,px(150));
-            echo("LINE SURFER: STOMP! "+Math.round(landingSpeed)+" speed carried into the next ramp.");
+      /* Everything else, including tessellation. Quadratic, so many small joins are
+         nearly free; a linear penalty here costs a 72-span loop 68% of its speed per
+         revolution and it can never reach the top. */
+      mag*=Math.max(.55,1-.16*turn*turn);
+    }
+
+    data.side=((-next.dir.y)*ns.x+next.dir.x*ns.y)>=0?1:-1;
+    data.p=next; data.groundAng=next.ang;
+    if(mag<u(1)){
+      /* Stopped against a wall. Parked suppresses the rider's own push so he does not
+         grind himself back into the same corner every substep; gravity can still free him. */
+      data.speed=0; data.d=atA?0:next.L; data.parked=true;
+      return false;
+    }
+    data.speed=mag*enter;
+    data.d=(atA?0:next.L)+over*enter;
+    return false;
+  };
+
+  /* Dwell guard. Any resting place that sits exactly on a joint - the floor of a V, the
+     base of a wall - leaves gravity pushing him across it from both sides, so he settles
+     into a legitimate but very fast oscillation and the transfer rate climbs as the
+     amplitude decays. Nothing is visibly wrong, but it burns substeps and reads as a
+     shimmer. Crossing the same joint twice inside this window means he has nowhere to
+     go, so he is set down on it instead. */
+  const jointBusy=(lk)=>{
+    /* Keyed on the joint, not the destination span. Both directions of a join share one
+       joint object, where the destination alternates every crossing and so never matches
+       itself on the way back. */
+    if(data.lastJoint===lk.p && data.clock-data.lastJointT<.05)return true;
+    data.lastJoint=lk.p; data.lastJointT=data.clock;
+    return false;
+  };
+
+  /* Local curvature in the direction of travel, read from the smoothed per-span value.
+     Sign flips when he runs a span backwards. Anything flatter than the deadband counts
+     as straight, so sample noise on a hand-drawn line cannot masquerade as a transition. */
+  const flatR=u(2200), tightR=u(14);
+  const curveHere=()=>{
+    const q=data.p;
+    if(!q.curv)return null;
+    const sgn=Math.sign(data.speed)||1, c=q.curv*sgn, t=travelDir();
+    let r=1/Math.abs(c);
+    if(r>flatR)return null;
+    if(r<tightR)r=tightR;
+    return {r,turn:c,n:c>0?V(-t.y,t.x):V(t.y,-t.x)};
+  };
+
+  /* ---- one substep of ground motion ---------------------------------------
+     Overshoot is CARRIED across joins instead of being thrown away. The old code
+     clamped d to px(1.5) into the next span, so a fast rider on freehand ink
+     (resampled into ~2px spans) could only cross one span per frame and stalled on
+     his own momentum. */
+  const stepRide=h=>{
+    const tangent=data.p.dir;
+    const gravityAlong=-g*tangent.y;
+    const slopeAbs=Math.abs(tangent.y);
+    if(data.parked && (Math.abs(gravityAlong)>u(8) || Math.abs(data.speed)>u(6)))data.parked=false;
+    const riderPush=(!data.parked && slopeAbs<.22 && data.speed>=0 && data.speed<u(165))?pump:0;
+    const rollingDrag=-rolling*data.speed;
+    data.speed+=(gravityAlong+riderPush+rollingDrag)*h;
+
+    /* ---- curvature: the loop logic lives here ---------------------------- */
+    const cv=curveHere();
+    data.curveR=cv?cv.r:0;
+    /* A loop is recognised by ACCUMULATED TURN, not by radius. Radius was the wrong test:
+       it needs a threshold, and any threshold silently refuses to treat a loop bigger
+       than itself as a loop. Turn is scale-free, so a 60-unit loop and a 2000-unit loop
+       are both a loop, and a straight run or a change of direction ends it. */
+    if(cv){
+      data.carveIdle=0;
+      const sgn=Math.sign(cv.turn);
+      if(data.loopDir!==sgn){data.loopDir=sgn;data.loopSigned=0;data.loopRevs=0;data.wantEject=false;}
+      /* Accumulate the ACTUAL signed rotation of the travel direction, not the smoothed
+         curvature integrated over time. Two reasons. The smoothed radius is measured over
+         a window, so at the entry and exit of a loop half that window lies on the straight
+         run-in and the reading is roughly halved: a rider who physically went all the way
+         round accumulated about 5.8 radians instead of 6.28 and the revolution was never
+         credited. And a signed sum is self-correcting on hand-drawn ink, because sampling
+         noise is zero-mean and cancels, where a sum of absolute values accrues it. */
+      const tn=travelDir();
+      if(data.prevT){
+        const cr=data.prevT.x*tn.y-data.prevT.y*tn.x;
+        const dp=Math.max(-1,Math.min(1,data.prevT.x*tn.x+data.prevT.y*tn.y));
+        data.loopSigned+=Math.atan2(cr,dp);
+      }
+      data.prevT=tn;
+      data.loopTurn=Math.abs(data.loopSigned);
+      /* Ratchet, measured against the best speed carried into this carve rather than
+         the speed at first contact. Reversing direction resets the turn accumulator but
+         NOT this, which is what lets him pump: each pass through a transition adds
+         energy, so a bowl or a closed loop he was far too slow to enter can still be
+         built up to over several swings. */
+      if(Math.abs(data.speed)>data.loopEntry)data.loopEntry=Math.abs(data.speed);
+    }else{
+      data.carveIdle+=h;
+      // Straight running bleeds the accumulator: one radian per 120 units travelled.
+      data.loopSigned*=Math.max(0,1-Math.abs(data.speed)*h/u(150));
+      data.loopTurn=Math.abs(data.loopSigned);
+      data.prevT=travelDir();
+      /* Only genuinely leaving the curve clears the carve, not a direction reversal
+         inside it. Clearing on reversal made pumping impossible. */
+      if(data.carveIdle>.5){
+        data.loopEntry=0;data.loopCommit=false;data.loopNeed=0;data.loopEvalR=0;
+        data.loopRevs=0;data.wantEject=false;data.loopSigned=0;data.loopTurn=0;
+      }
+    }
+    data.inLoop=data.loopTurn>Math.PI*.5;
+
+    /* THE COMMIT. A circular loop of radius r cannot be completed below sqrt(5*g*r) at
+       the bottom, and the ordinary ceiling is far under that for any loop bigger than
+       about 60 units, so every drawn loop was simply unmakeable. Once he is clearly
+       carving into one he commits: arrive with a credible fraction of what the loop
+       demands and he gets what it demands and then some. Arrive far too slow and he
+       does not commit, rolls back out, and that failure still means something.
+
+       Re-evaluated whenever the radius tightens sharply, because a gentle run-in curve
+       would otherwise consume the commit before he ever reached the loop itself. */
+    if(cv && data.loopTurn>Math.PI/12 &&
+       (!data.loopCommit || cv.r<data.loopEvalR*.6)){
+      data.loopCommit=true; data.loopEvalR=cv.r;
+      /* Judged on the speed carried INTO the carve, not the speed right now. By the time
+         the turn accumulator trips he is already part way up the wall and has traded
+         speed for height, so using the current value made him look slower than he
+         arrived and a loop he could actually have made was refused. */
+      const need=Math.sqrt(5*g*cv.r);
+      const have=Math.max(Math.abs(data.speed),data.loopEntry);
+      if(have>need*.38 && have<need*1.05){
+        data.loopNeed=need;
+        data.speed=Math.sign(data.speed||1)*need*1.12;
+        xBeep("sweep"); xBurstAt(V(data.x,data.y),"#ffd166",18,u(160));
+        echo("LINE SURFER: COMMITTED to a "+Math.round(cv.r*s0)+"px loop at "+
+             Math.round(Math.abs(data.speed)*s0)+" px/s.");
+      }else if(have>=need*1.05){ data.loopNeed=need; }
+      else { data.loopNeed=0; }
+    }
+
+    /* Boost gates lower than the commit so a short swing in a transition still pays.
+       That is what pumping is, and without it a closed loop entered too slowly is a
+       dead end rather than something he can work up to. */
+    if(cv && data.loopTurn>Math.PI/10){
+      const dTurn=Math.abs(data.speed)*h/cv.r;
+      data.speed+=Math.sign(data.speed||1)*data.loopEntry*(LOOP_GAIN-1)*(dTurn/TAU);
+    }
+    const ns=riderNormal(data.p);
+    const v2=data.speed*data.speed;
+    const into=cv?(cv.n.x*ns.x+cv.n.y*ns.y):0;
+
+    /* PUMP. A skater gains energy through a transition by extending out of the
+       compression, which is why running up and down a ramp does not bleed speed the way
+       coasting over a bump does. Modelled as thrust proportional to the g-force he is
+       pulling, so flat ground gives nothing, a mellow transition gives a little and a
+       tight one gives a lot. This plus the lowered rolling drag is what makes a halfpipe
+       something he builds on instead of something that slowly kills him. */
+    if(cv && into>0 && Math.abs(data.speed)>u(30)){
+      const gforce=(v2/cv.r)/g;
+      data.speed+=Math.sign(data.speed)*pumpK*Math.min(2.6,gforce)*h;
+    }
+
+    /* A loop breaks the normal ceiling. That is the whole point of it, and the ceiling
+       has to clear what the loop physically demands or the commit is undone next tick. */
+    const cap=(data.loopTurn>Math.PI/10||data.loopNeed)
+      ? Math.max(maxV()*LOOP_GAIN,(data.loopNeed||0)*1.35)
+      : maxV();
+    data.speed=Math.max(-cap,Math.min(cap,data.speed));
+    data.sliding=slopeAbs>steepSlide && Math.sign(data.speed||gravityAlong)===Math.sign(gravityAlong);
+    if(Math.abs(data.speed)<u(2) && Math.abs(gravityAlong)<u(8) && !data.inLoop)data.speed=0;
+
+    /* ---- can the track still hold him? -----------------------------------
+       One rule covers flat ground, ceilings and the top of a loop. The track can only
+       push outward along the rider-side normal ns, so the required normal force is
+         N = v^2/r * (centre . ns) + g * ns.y
+       On flat ground r is infinite and N = g*ns.y, so an upper face holds and an
+       underside does not. At the top of a loop ns points down and the centre is on
+       the rider's side, giving N = v^2/r - g: the classic v^2 >= g*r. Fall below it
+       and he leaves the loop, which is exactly what should happen. */
+    let N=g*ns.y;
+    if(cv)N+=(v2/cv.r)*into;
+    /* Grip. A free body leaves the inside of a loop the instant v^2/r drops below g, so
+       a strict N>=0 test threw him off partway up every time: correct for a projectile,
+       wrong for something with trucks that is meant to rollercoaster around and follow
+       the line. A concave transition therefore holds him, scaled by how tight it is, so
+       a genuine loop grips hard and a barely-curved ceiling still drops him. Crests get
+       no grip at all (into < 0), because launching off those is the point. */
+    const grip=(cv&&into>0)?g*3*Math.min(1,gripR/cv.r):0;
+    /* Hysteresis. One bad substep is noise; detaching needs it to persist. */
+    if(N<-grip-u(6))data.offT+=h; else data.offT=0;
+    if(data.offT>.045){
+      data.offT=0;
+      const t=travelDir(),sp=Math.abs(data.speed);
+      data.state="air"; data.vx=t.x*sp; data.vy=t.y*sp;
+      data.airAng=Math.atan2(data.vy,data.vx||u(.01));
+      data.jumps++; data.launch=V(data.x,data.y); data.launchY=data.y;
+      data.airT=0; data.bigAir=data.vy>u(430); data.sliding=false; beginTrick();
+      /* The swept landing test has a u(7) tolerance, so for a few substeps after
+         detaching he is still inside it and gets instantly re-caught. Left alone this
+         chatters thousands of times a second. Hold landing off briefly and let the
+         ballistic path carry him clear. */
+      data.noLand=.09;
+      const wasLoop=data.inLoop; data.inLoop=false; data.loopTurn=0; data.loopSigned=0;
+      data.goal=xSurfNextAhead(surfs,data.p);
+      xBeep("pop");
+      if(wasLoop)echo("LINE SURFER: dropped out of the loop, not enough speed to hold the top.","warn");
+      return;
+    }
+
+    /* ---- completed a revolution -------------------------------------------
+       A loop drawn as an open stroke lets him out by itself: the stroke continues past
+       the loop and he simply rides on. So a revolution is CREDITED here, not exited
+       here. The earlier version forced an air launch and demanded an upward tangent to
+       do it, which a loop that rejoins horizontally never provides, so no loop was ever
+       credited even when he rode it perfectly. A closed loop is the only case with no
+       way out, and that gets the ejection after a second lap. */
+    if(data.loopTurn>TAU*.98){
+      data.loops++; data.loopRevs=(data.loopRevs||0)+1;
+      data.loopSigned-=Math.sign(data.loopSigned)*TAU;data.loopTurn=Math.abs(data.loopSigned);
+      data.flow=Math.min(FLOW_MAX,data.flow*LOOP_FLOW);
+      if(data.flow>data.peakFlow)data.peakFlow=data.flow;
+      xBeep("sweep"); xUiQuake();
+      xBurstAt(V(data.x,data.y),"#ff5ac8",30,u(260));
+      echo("LINE SURFER: LOOP CLEARED at "+Math.round(Math.abs(data.speed)*s0)+
+           " px/s. Combo x"+data.flow.toFixed(2)+".");
+      if(data.loopRevs>=2)data.wantEject=true;
+    }
+
+    /* Closed loop: the track never ends, so after a second lap he throws himself off it
+       at the first tangent that is not pointing into the ground, carrying everything the
+       boost gave him. Forced after another half lap if no such tangent turns up. */
+    if(data.wantEject){
+      const t=travelDir();
+      if(t.y>.1 || data.loopTurn>Math.PI){
+        const sp=Math.abs(data.speed);
+        data.state="air"; data.vx=t.x*sp; data.vy=t.y*sp;
+        data.airAng=Math.atan2(data.vy,data.vx||u(.01));
+        data.jumps++; data.launch=V(data.x,data.y); data.launchY=data.y;
+        data.airT=0; data.bigAir=data.vy>u(430); beginTrick();
+        data.inLoop=false; data.loopTurn=0; data.loopSigned=0; data.loopRevs=0; data.wantEject=false;
+        data.sliding=false; data.noLand=.09;
+        data.goal=xSurfNextAhead(surfs,data.p);
+        xBeep("sweep");
+        xBurstAt(V(data.x,data.y),"#ffd166",26,u(240));
+        echo("LINE SURFER: launched out of the loop at "+Math.round(sp*s0)+" px/s.");
+        return;
+      }
+    }
+
+    data.d+=data.speed*h;
+    data.dist+=Math.abs(data.speed)*h;
+
+    let hops=0;
+    while(hops++<64){
+      const q=data.p;
+      if(data.d>q.L){
+        const over=data.d-q.L;
+        if(!q.linkF){data.x=q.b.x;data.y=q.b.y;launch();return;}
+        data.x=q.b.x;data.y=q.b.y;
+        if(jointBusy(q.linkF)){data.d=q.L;data.speed=0;data.parked=true;break;}
+        if(transfer(q.linkF,over,1))return;
+      }else if(data.d<0){
+        const over=-data.d;
+        if(!q.linkB){data.x=q.a.x;data.y=q.a.y;launch();return;}
+        data.x=q.a.x;data.y=q.a.y;
+        if(jointBusy(q.linkB)){data.d=0;data.speed=0;data.parked=true;break;}
+        if(transfer(q.linkB,over,-1))return;
+      }else break;
+    }
+    const q=data.p,t2=q.dir,dd=Math.max(0,Math.min(q.L,data.d));
+    data.x=q.a.x+t2.x*dd; data.y=q.a.y+t2.y*dd; data.groundAng=q.ang;
+  };
+
+  /* ---- one substep of free flight ---------------------------------------- */
+  const stepAir=h=>{
+    const prev=V(data.x,data.y),prevVy=data.vy;
+    // Free flight preserves and builds energy. Gravity is the engine of the run: the farther
+    // he falls, the faster his downward speed becomes. Horizontal speed is only lightly damped.
+    data.vx*=Math.max(.97,1-airDrag*h*60);
+    data.x+=data.vx*h; data.y+=data.vy*h; data.vy-=g*h;
+    /* Terminal velocity. Gravity in the air is otherwise unbounded, and an unbounded
+       speed means an unbounded substep count for the collision sweep. */
+    const av=Math.hypot(data.vx,data.vy);
+    if(av>vAir){const k=vAir/av;data.vx*=k;data.vy*=k;}
+    data.airT+=h;
+    /* A small horizontal steer toward the flagged landing while descending. Bounded and
+       horizontal only, so gravity still decides everything vertical; this just stops a
+       near-miss from reading as a bug. */
+    if(data.goal && data.vy<0){
+      const gx=(data.goal.x0+data.goal.x1)/2;
+      data.vx+=Math.sign(gx-data.x)*Math.min(airSteer,Math.abs(gx-data.x)*1.4)*h;
+    }
+    data.airAng=Math.atan2(data.vy,data.vx||u(.01));
+    /* Rotate to the target and then HOLD. Spinning at a fixed rate for the whole flight
+       meant any gap between predicted and actual hangtime - which is every jump that
+       lands on something other than the height it left - caught him mid-rotation and
+       every trick scored as sketchy. A skater completes the spin and waits for the
+       ground, so once the target is reached the rotation stops and the landing is clean
+       by construction. Coming down early still catches him short, which is the risk. */
+    if(data.spinRate){
+      data.rot+=data.spinRate*h;
+      const tgt=(data.halves||0)*Math.PI;
+      if(tgt&&Math.abs(data.rot)>=tgt){data.rot=Math.sign(data.rot)*tgt;data.spinRate=0;}
+    }
+    if(data.flipRate){
+      data.flip+=data.flipRate*h;
+      const ftg=(data.flips||0)*TAU;
+      if(ftg&&Math.abs(data.flip)>=ftg){data.flip=Math.sign(data.flip)*ftg;data.flipRate=0;}
+    }
+    data.spin+=h*1.2*(data.vx<0?-1:1);
+    const drop=data.launchY-data.y;
+    if(drop>data.bestDrop)data.bestDrop=drop;
+
+    data.noLand-=h;
+    if(data.noLand<=0 && (prevVy<=u(14) || data.vy<=u(14))){
+      let landed=null,hit=null,bestT=Infinity;
+      const nowp=V(data.x,data.y),vel=V(data.vx,data.vy);
+      for(const q of nearSpans(prev,nowp,u(12))){
+        /* The closest-approach test means the span he just left is within tolerance for
+           a moment after take-off, so proximity to its endpoints is no longer enough to
+           exclude it. Skip it outright until the no-land window closes. */
+        if(q===data.p && (data.noLand>-.04 || Math.min(dist(prev,q.a),dist(prev,q.b))<u(10)))continue;
+        const h2=xSurfSweepLanding(prev,nowp,vel,q,Math.max(landSlop,u(7)));
+        if(!h2||h2.t>=bestT)continue;
+        bestT=h2.t;landed=q;hit=h2.p;
+      }
+      if(landed){
+        const along=data.vx*landed.dir.x+data.vy*landed.dir.y;
+        const impact=Math.abs(data.vx*(-landed.dir.y)+data.vy*landed.dir.x);
+        /* He lands on whichever face he arrived from. Landing under an overhang used to
+           be impossible because every span was assumed to be ground; with loops it is
+           routine, and the stick test in stepRide decides whether he keeps hold. */
+        data.side=((-landed.dir.y)*data.vx+landed.dir.x*data.vy)<0?1:-1;
+        data.inLoop=false; data.loopTurn=0; data.loopSigned=0;
+        const airSpeed=Math.hypot(data.vx,data.vy);
+        data.p=landed;data.x=hit.x;data.y=hit.y;data.d=dist(landed.a,hit);
+        if(data.airT>data.bestAir)data.bestAir=data.airT;
+        /* A landing squarely onto the deck at absurd normal velocity is a bail, not a
+           free speed boost. This is the only routine way to lose the combo, so the
+           threshold sits high enough that ordinary big drops still pay out. */
+        if(impact>bailImpact){ bailOut("Slammed in at "+Math.round(impact*s0)+" px/s."); return true; }
+        // Preserve almost all tangential momentum on a clean landing, then reward big drops by
+        // converting a slice of impact energy into forward board speed.
+        const dropBoost=Math.min(u(185),Math.max(0,-data.vy)*.34);
+        const impactPenalty=Math.min(.30,impact/Math.max(u(900),airSpeed*3));
+        const dirSign=Math.sign(along||data.vx||1);
+        data.speed=along*Math.max(.68,landingCarry-impactPenalty)+dirSign*(landingBoost+dropBoost);
+        if(Math.abs(data.speed)<u(2))data.speed=0;
+        data.vx=data.vy=0;data.state="ride";data.spin=0;data.parked=false;data.groundAng=landed.ang;data.landings++;
+        data.sliding=false;data.bigAir=false;data.slowmo=1;
+        data.flow=Math.min(FLOW_MAX,data.flow*FLOW_GAIN);
+        const tk=finishTrick();
+        if(tk){
+          if(tk.clean){
+            data.tricks++;
+            data.flow*=1+.045*tk.halves+.075*tk.flips+(tk.grab?.03:0);
+            data.trickName=tk.name; data.trickT=1.5; data.trickOK=true;
+            xBurstAt(V(data.x,data.y),"#b8ff73",20,u(180));
+            echo("LINE SURFER: "+tk.name.toUpperCase()+" landed.");
+          }else{
+            /* Rotation was timed to the hangtime, so an error this large means he came
+               down on something he was not aiming at. Scrub speed, keep him upright. */
+            data.speed*=.62;
+            data.trickName="Sketchy "+tk.name; data.trickT=1.3; data.trickOK=false;
+            echo("LINE SURFER: sketchy landing on the "+tk.name+".","warn");
           }
         }
+        data.flow=Math.min(FLOW_MAX,data.flow);
+        if(data.flow>data.peakFlow)data.peakFlow=data.flow;
+        data.cp={q:landed,d:data.d,x:data.x,y:data.y,side:data.side};
+        const landingSpeed=Math.abs(data.speed)*s0;
+        if(landingSpeed>data.topSpeed)data.topSpeed=landingSpeed;
+        xBeep("tick");xBurstAt(V(data.x,data.y),"#78b7f1",Math.min(26,8+Math.floor(landingSpeed/45)),u(110));
+        if(landingSpeed>330){
+          xBurstAt(V(data.x,data.y),"#ffd166",18,u(150));
+          /* Overlapping linework can hand him dozens of landings a second. Narrating each
+             one buries everything else in the echo bar, so this stays on a cooldown. */
+          if(data.clock-data.lastStomp>1.2){
+            data.lastStomp=data.clock;
+            echo("LINE SURFER: STOMP! "+Math.round(landingSpeed)+" speed carried, combo x"+data.flow.toFixed(2)+".");
+          }
+        }
+        return true;
       }
-      if(data.y < Math.min(...surfs.map(q=>Math.min(q.a.y,q.b.y)))-px(55))data.crashed=true;
     }
-    const sx=X(data.x),sy=Y(data.y);
-    if(sx<-150||sx>W+150||sy<-190||sy>H+240)XFX.until=now;
-    if(Math.random()<.15){
+    /* The floor. Previously falling past the lowest ramp only set a flag that made him
+       spin faster while he fell forever, and the run was killed by the off-screen test.
+       Now the world has a bottom and hitting it is a bail he recovers from. */
+    if(data.y<floorY){ bailOut("Off the bottom of the world."); return true; }
+    return false;
+  };
+
+  /* ---- one substep of a wipeout ------------------------------------------ */
+  const stepBail=h=>{
+    data.bailT+=h;
+    for(const o of [data.body,data.board]){
+      if(!o)continue;
+      if(o.rest>0){o.rest+=h;continue;}
+      const prev=V(o.x,o.y);
+      o.vy-=g*h; o.vx*=Math.max(.96,1-.02*h*60);
+      o.x+=o.vx*h; o.y+=o.vy*h; o.spin+=o.sv*h;
+      if(o.vy<0){
+        const nowp=V(o.x,o.y),vel=V(o.vx,o.vy);
+        for(const q of nearSpans(prev,nowp,u(12))){
+          const h2=xSurfSweepLanding(prev,nowp,vel,q,u(8));
+          if(!h2)continue;
+          o.x=h2.p.x;o.y=h2.p.y;
+          const along=o.vx*q.dir.x+o.vy*q.dir.y;
+          o.vx=along*q.dir.x*.55; o.vy=along*q.dir.y*.55+Math.abs(o.vy)*.30;
+          o.sv*=.55;
+          if(Math.abs(o.vy)<u(40)&&Math.abs(o.vx)<u(30)){o.rest=1e-6;o.vx=o.vy=0;o.sv=0;}
+          xPart(o.x,o.y,(Math.random()-.5)*u(120),u(40+Math.random()*80),320,"#ffd166",1.3);
+          break;
+        }
+      }
+      if(o.y<floorY-u(60)){o.rest=1e-6;o.vx=o.vy=0;}
+    }
+    if(data.bailT>1.15)respawn();
+  };
+
+  /* ---- chase camera ------------------------------------------------------
+     Replaces the old off-screen kill test, which was the real reason a good run
+     "ended": the rider left a static viewport in under a second and the effect
+     terminated itself. */
+  const camera=h=>{
+    const spd=data.state==="ride"?Math.abs(data.speed)
+             :data.state==="air"?Math.hypot(data.vx,data.vy)
+             :Math.hypot((data.body&&data.body.vx)||0,(data.body&&data.body.vy)||0);
+    const spdPx=spd*s0;
+    const want=s0/(1+Math.min(1.7,spdPx/950));
+    data.camS+=(want-data.camS)*Math.min(1,h*2.0);
+    S.view.s=data.camS;
+    const fx=data.state==="bail"&&data.body?data.body.x:data.x;
+    const fy=data.state==="bail"&&data.body?data.body.y:data.y;
+    const sign=data.state==="ride"?(data.speed<0?-1:1):(data.vx<0?-1:1);
+    const lead=sign*Math.min(W*.20,spdPx*.16)/Math.max(1e-6,S.view.s);
+    const k=Math.min(1,h*5.5);
+    data.camX+=((fx+lead)-data.camX)*k;
+    data.camY+=((fy+(30/Math.max(1e-6,S.view.s)))-data.camY)*k;
+    S.view.cx=data.camX; S.view.cy=data.camY;
+  };
+
+  let finished=false;
+  const finish=()=>{
+    if(finished)return; finished=true;
+    S.view.cx=view0.cx; S.view.cy=view0.cy; S.view.s=view0.s;
+    const bits=["LINE SURFER: "+data.jumps+" launch"+(data.jumps===1?"":"es"),
+                data.landings+" landing"+(data.landings===1?"":"s"),
+                "top "+Math.round(data.topSpeed)+" px/s",
+                "best air "+data.bestAir.toFixed(2)+"s",
+                "peak combo x"+data.peakFlow.toFixed(2)];
+    if(data.tricks)bits.push(data.tricks+" trick"+(data.tricks===1?"":"s")+" landed");
+    if(data.loops)bits.push(data.loops+" loop"+(data.loops===1?"":"s")+" cleared");
+    if(data.bails)bits.push(data.bails+" bail"+(data.bails===1?"":"s"));
+    echo(bits.join("  |  ")+".");
+    if(data.endReason==="error")
+      echo("LINE SURFER: ended on an internal error: "+(data.errMsg||"unknown")+
+           ". That is a bug, not your drawing.","warn");
+    draw();
+  };
+
+  xfxRun("lineSurfer",60000,data,(t,now)=>{
+    const raw=data.last?Math.min(.032,(now-data.last)/1000):.016; data.last=now;
+    /* No time limit. The run ends when the user ends it, so the deadline is pushed out
+       every frame; XCAP.MS still bounds any single window if this loop ever stops
+       running. Escape reaches xfxStop, which now runs the cleanup below. */
+    XFX.until=now+60000;
+    data.clock+=raw;
+    try{
+
+    /* Apex slow motion. Only armed on a launch with real vertical, and only while the
+       rider is near the top of the arc, so it reads as a punctuation mark rather than
+       a general speed setting. */
+    const nearApex=data.state==="air"&&data.bigAir&&Math.abs(data.vy)<u(270);
+    const wantSlow=nearApex?.34:1;
+    data.slowmo+=(wantSlow-data.slowmo)*Math.min(1,raw*(nearApex?9:5));
+    const dt=raw*data.slowmo;
+
+    /* xSurfNextAhead is an O(n) scan and nothing is filtered out of the terrain any
+       more, so calling it per substep was up to 64 full scans a frame. Once a frame. */
+    if(data.state==="ride")data.goal=data.speed>=0?xSurfNextAhead(surfs,data.p):null;
+
+    /* xSurfNextAhead calls px(), which divides by the LIVE zoom.
+       With a moving camera their join tolerances would widen as the view pulled back and
+       start welding lines that are not actually touching. Restore the launch scale for
+       the duration of the step; the camera puts its own scale back immediately after,
+       and xfxRun draws after onTick, so the view the user sees is unaffected. */
+    S.view.s=s0;
+
+    /* Fixed-length substeps. Collision fidelity is now independent of speed: the
+       swept landing test only has a u(7) tolerance, so a rider covering 120 world
+       units in one 32ms frame used to glance straight through ramps. */
+    const v=data.state==="ride"?Math.abs(data.speed):Math.hypot(data.vx,data.vy);
+    const n=Math.max(1,Math.min(160,Math.ceil(v*dt/u(6))));
+    const h=dt/n;
+    if(data.state==="bail"){
+      stepBail(dt);
+    }else{
+      for(let i=0;i<n;i++){
+        if(data.state==="bail")break;
+        if(data.state==="ride")stepRide(h);
+        else if(stepAir(h))break;
+      }
+    }
+
+    if(data.state!=="bail"){
+      const spdPx=(data.state==="ride"?Math.abs(data.speed):Math.hypot(data.vx,data.vy))*s0;
+      if(spdPx>data.topSpeed)data.topSpeed=spdPx;
+      const nt=tierOf(spdPx);
+      if(nt>data.tier){
+        xBurstAt(V(data.x,data.y),TIER_COL[nt],10+nt*5,u(90+nt*45));
+        if(nt>=3){xUiQuake();xBeep("sweep");}else xBeep("pop");
+        if(nt>=2)echo("LINE SURFER: "+TIER_NAME[nt]+" at "+Math.round(spdPx)+" px/s, combo x"+data.flow.toFixed(2)+".");
+      }
+      data.tier=nt;
+    }
+
+    /* These used to end the run. They are now one-shot hints: the user decides when it
+       is over, so being stuck is something to be told about, not cut off for. */
+    if(data.state==="ride" && Math.abs(data.speed)*s0<6)data.still+=raw; else data.still=0;
+    if(data.stop && !data.warnGap){
+      data.warnGap=true;
+      echo("LINE SURFER: he keeps bailing in the same spot. That gap needs something under it.","warn");
+    }
+    if(data.still>3 && !data.warnStill){
+      data.warnStill=true;
+      echo("LINE SURFER: out of momentum on level ground. Esc to end the run.","warn");
+    }
+    if(data.still<.1)data.warnStill=false;
+
+    camera(raw);
+
+    // Trail. Density and colour escalate with the speed tier.
+    const rate=.15+data.tier*.16;
+    if(Math.random()<rate){
       const trailV=data.state==="ride"?Math.abs(data.speed):(Math.hypot(data.vx,data.vy));
       const trailDir=data.state==="ride"?(data.speed<0?1:-1):(data.vx<0?1:-1);
-      xPart(data.x,data.y,trailDir*Math.max(px(30),trailV*.28),(Math.random()-.5)*px(34),430,"#78b7f1",1.4);
+      xPart(data.x,data.y,trailDir*Math.max(u(30),trailV*.28),(Math.random()-.5)*u(34),430,
+            TIER_COL[data.tier],1.4+data.tier*.35);
     }
+    if(data.trickT>0)data.trickT-=raw;
     xKickParticles(dt);
-  },()=>echo("LINE SURFER: run ended after "+data.jumps+" launch"+(data.jumps===1?"":"es")+" and "+data.landings+" landing"+(data.landings===1?"":"s")+"."));
-  xBeep("sweep");echo("LINE SURFER: chase speed. Big drops build huge momentum, ramps turn that speed into airtime, and clean landings feed the next jump.");
+    }catch(err){
+      /* xfxRun's own catch calls xfxStop() and returns WITHOUT running onDone, so an
+         exception in here used to kill the run with no scorecard and leave the borrowed
+         view where the chase camera left it. Catch it first, name it, and let the run
+         end through the normal path so the view still gets handed back. */
+      console.error(err);
+      data.endReason="error"; data.errMsg=(err&&err.message)||String(err);
+      xfxStop();
+    }
+  },finish,finish);
+  xBeep("sweep");echo("LINE SURFER: pump the transitions, land tricks, clear loops. Runs until you press Esc.");
 }
 function xPacEater(){
   const list=xSelectedOrEverything().filter(e=>xPathFromEnt(e).length>1);
@@ -10287,64 +11178,173 @@ function xPaint(){
   }
   if(XFX.kind==="fightFail"&&XFX.data){ctx.fillStyle="#ef8178";ctx.font="900 28px Arial";ctx.textAlign="center";ctx.fillText("NO ARENA LINE",X(XFX.data.c.x),Y(XFX.data.c.y));}
   if(XFX.kind==="lineSurfer" && XFX.data){
-    const d=XFX.data,sx=X(d.x),sy=Y(d.y),a=d.state==="ride"?(d.groundAng||0):((d.airAng||0)+d.spin*.18);
-    const airborne=d.state==="air",speedPx=Math.abs((d.speed||0)*S.view.s),SC=.50;
-    const crouch=airborne?1.8:Math.min(4.5,speedPx/125);
+    const d=XFX.data;
+    /* Physics froze the scale at launch (d.s0). Read speeds through that, not through
+       the live S.view.s, or the readout and the rider's crouch would change purely
+       because the chase camera zoomed out. */
+    const vs=d.s0||S.view.s;
+    const bailing=d.state==="bail";
+    /* Airborne rotation is the TRICK rotation, not a slow drift. rot is driven at a rate
+       chosen at take-off, so what is drawn is the trick he is actually being scored on. */
+    const sx=X(d.x),sy=Y(d.y),a=d.state==="ride"?(d.groundAng||0):((d.airAng||0)+(d.rot||0));
+    const clk=d.clock||0;
+    const airborne=d.state==="air",speedPx=Math.abs((d.speed||0)*vs),SC=.50;
+    const crouch=airborne||bailing?1.8:Math.min(4.5,speedPx/125);
     const limbPoly=(a,b,w0,w1,fill,stroke="#070a0e")=>{const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy)||1,nx=-dy/L,ny=dx/L;ctx.fillStyle=fill;ctx.strokeStyle=stroke;ctx.lineWidth=1.05;ctx.beginPath();ctx.moveTo(a.x+nx*w0,a.y+ny*w0);ctx.lineTo(b.x+nx*w1,b.y+ny*w1);ctx.lineTo(b.x-nx*w1,b.y-ny*w1);ctx.lineTo(a.x-nx*w0,a.y-ny*w0);ctx.closePath();ctx.fill();ctx.stroke();};
     const shoe=(p,forward)=>{ctx.fillStyle="#11151a";ctx.strokeStyle="#05070a";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(p.x-4,p.y-3);ctx.lineTo(p.x+3,p.y-3);ctx.lineTo(p.x+8*forward,p.y);ctx.quadraticCurveTo(p.x+8*forward,p.y+2,p.x+5*forward,p.y+2.5);ctx.lineTo(p.x-4*forward,p.y+2.5);ctx.closePath();ctx.fill();ctx.stroke();ctx.strokeStyle="#d7d7d7";ctx.beginPath();ctx.moveTo(p.x-2*forward,p.y+.5);ctx.lineTo(p.x+6*forward,p.y+.5);ctx.stroke();};
-    ctx.save();ctx.translate(sx,sy);ctx.rotate(a);ctx.scale(SC,SC);
 
-    // Late-90s pro-skater board: wider deck, grip, nose/tail kick, trucks and wheels.
-    const deck=ctx.createLinearGradient(-26,0,26,0);deck.addColorStop(0,"#6c4020");deck.addColorStop(.45,"#c58b3c");deck.addColorStop(1,"#5f351a");
-    ctx.fillStyle="#11151a";ctx.strokeStyle="#05070a";ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(-27,-1);ctx.quadraticCurveTo(-24,-5,-19,-4);ctx.lineTo(19,-4);ctx.quadraticCurveTo(24,-5,27,-1);ctx.lineTo(24,2);ctx.quadraticCurveTo(0,5,-24,2);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.strokeStyle=deck;ctx.lineWidth=2.4;ctx.beginPath();ctx.moveTo(-25,1);ctx.quadraticCurveTo(0,4,25,1);ctx.stroke();
-    ctx.strokeStyle="#9aa2aa";ctx.lineWidth=1.6;ctx.beginPath();ctx.moveTo(-15,2);ctx.lineTo(-15,7);ctx.moveTo(15,2);ctx.lineTo(15,7);ctx.stroke();
-    for(const wx of [-18,-12,12,18]){ctx.fillStyle="#090b0e";ctx.beginPath();ctx.arc(wx,8,3.2,0,TAU);ctx.fill();ctx.fillStyle="#b5bdc6";ctx.beginPath();ctx.arc(wx,8,1.15,0,TAU);ctx.fill();}
+    /* Board and rider are separate draws now. Welded together they can only ever be a
+       skater; apart they can also be a wipeout, with the deck bouncing off on its own. */
+    const drawBoard=(flip)=>{
+      // A kickflip is the deck rotating about its own long axis: foreshortening it and
+      // darkening the grip as it passes edge-on reads as a flip without a 3D model.
+      if(flip){
+        const c=Math.cos(flip);
+        ctx.scale(1,Math.abs(c)<.08?.08:Math.abs(c));
+        if(c<0){ctx.globalAlpha=.92;}
+      }
+      const deck=ctx.createLinearGradient(-26,0,26,0);deck.addColorStop(0,"#6c4020");deck.addColorStop(.45,"#c58b3c");deck.addColorStop(1,"#5f351a");
+      ctx.fillStyle="#11151a";ctx.strokeStyle="#05070a";ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(-27,-1);ctx.quadraticCurveTo(-24,-5,-19,-4);ctx.lineTo(19,-4);ctx.quadraticCurveTo(24,-5,27,-1);ctx.lineTo(24,2);ctx.quadraticCurveTo(0,5,-24,2);ctx.closePath();ctx.fill();ctx.stroke();
+      ctx.strokeStyle=deck;ctx.lineWidth=2.4;ctx.beginPath();ctx.moveTo(-25,1);ctx.quadraticCurveTo(0,4,25,1);ctx.stroke();
+      ctx.strokeStyle="#9aa2aa";ctx.lineWidth=1.6;ctx.beginPath();ctx.moveTo(-15,2);ctx.lineTo(-15,7);ctx.moveTo(15,2);ctx.lineTo(15,7);ctx.stroke();
+      for(const wx of [-18,-12,12,18]){ctx.fillStyle="#090b0e";ctx.beginPath();ctx.arc(wx,8,3.2,0,TAU);ctx.fill();ctx.fillStyle="#b5bdc6";ctx.beginPath();ctx.arc(wx,8,1.15,0,TAU);ctx.fill();}
+    };
 
     // Fixed-length skater anatomy. Baggy pants, oversized tee, cap, real shoes, no rubber limbs.
-    const skin="#d3a17b",skinHi="#efc39f",pants="#30343c",pantsHi="#454b56",tee="#7b2f3d",teeHi="#a44756",outline="#070a0e";
-    const hipL={x:-4,y:-20-crouch},hipR={x:4,y:-20-crouch};
-    const kneeL=airborne?{x:-10,y:-11}:{x:-11,y:-10};
-    const kneeR=airborne?{x:9,y:-9}:{x:11,y:-11};
-    const ankL=airborne?{x:-17,y:-3}:{x:-16,y:-2};
-    const ankR=airborne?{x:16,y:-2}:{x:16,y:-2};
-    limbPoly(hipL,kneeL,4.5,4.0,pantsHi,outline);limbPoly(kneeL,ankL,4.0,3.3,pants,outline);
-    limbPoly(hipR,kneeR,4.5,4.0,pantsHi,outline);limbPoly(kneeR,ankR,4.0,3.3,pants,outline);
-    shoe(ankL,1);shoe(ankR,1);
-    ctx.fillStyle=pants;ctx.strokeStyle=outline;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(-8,-24-crouch);ctx.lineTo(8,-24-crouch);ctx.lineTo(9,-18-crouch);ctx.lineTo(-9,-18-crouch);ctx.closePath();ctx.fill();ctx.stroke();
+    const drawRider=(pose)=>{
+      const loose=pose==="bail";
+      const skin="#d3a17b",skinHi="#efc39f",pants="#30343c",pantsHi="#454b56",tee="#7b2f3d",teeHi="#a44756",outline="#070a0e";
+      const hipL={x:-4,y:-20-crouch},hipR={x:4,y:-20-crouch};
+      const kneeL=loose?{x:-14,y:-16}:airborne?{x:-10,y:-11}:{x:-11,y:-10};
+      const kneeR=loose?{x:13,y:-6}:airborne?{x:9,y:-9}:{x:11,y:-11};
+      const ankL=loose?{x:-22,y:-8}:airborne?{x:-17,y:-3}:{x:-16,y:-2};
+      const ankR=loose?{x:20,y:2}:airborne?{x:16,y:-2}:{x:16,y:-2};
+      limbPoly(hipL,kneeL,4.5,4.0,pantsHi,outline);limbPoly(kneeL,ankL,4.0,3.3,pants,outline);
+      limbPoly(hipR,kneeR,4.5,4.0,pantsHi,outline);limbPoly(kneeR,ankR,4.0,3.3,pants,outline);
+      shoe(ankL,1);shoe(ankR,1);
+      ctx.fillStyle=pants;ctx.strokeStyle=outline;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(-8,-24-crouch);ctx.lineTo(8,-24-crouch);ctx.lineTo(9,-18-crouch);ctx.lineTo(-9,-18-crouch);ctx.closePath();ctx.fill();ctx.stroke();
 
-    // Oversized tee / hoodie-like silhouette inspired by classic skate-game characters.
-    const sg=ctx.createLinearGradient(-12,-48,12,-22);sg.addColorStop(0,"#32151d");sg.addColorStop(.42,teeHi);sg.addColorStop(.75,tee);sg.addColorStop(1,"#241016");ctx.fillStyle=sg;ctx.strokeStyle=outline;ctx.lineWidth=1.4;
-    ctx.beginPath();ctx.moveTo(-12,-47-crouch);ctx.quadraticCurveTo(0,-51-crouch,12,-46-crouch);ctx.lineTo(11,-25-crouch);ctx.quadraticCurveTo(0,-21-crouch,-11,-25-crouch);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.fillStyle="#e7e7e7";ctx.font="900 7px Arial";ctx.textAlign="center";ctx.fillText("SK8",0,-34-crouch);
-    ctx.strokeStyle="rgba(255,255,255,.16)";ctx.beginPath();ctx.moveTo(-8,-41-crouch);ctx.lineTo(7,-44-crouch);ctx.stroke();
+      // Oversized tee / hoodie-like silhouette inspired by classic skate-game characters.
+      const sg=ctx.createLinearGradient(-12,-48,12,-22);sg.addColorStop(0,"#32151d");sg.addColorStop(.42,teeHi);sg.addColorStop(.75,tee);sg.addColorStop(1,"#241016");ctx.fillStyle=sg;ctx.strokeStyle=outline;ctx.lineWidth=1.4;
+      ctx.beginPath();ctx.moveTo(-12,-47-crouch);ctx.quadraticCurveTo(0,-51-crouch,12,-46-crouch);ctx.lineTo(11,-25-crouch);ctx.quadraticCurveTo(0,-21-crouch,-11,-25-crouch);ctx.closePath();ctx.fill();ctx.stroke();
+      ctx.fillStyle="#e7e7e7";ctx.font="900 7px Arial";ctx.textAlign="center";ctx.fillText("SK8",0,-34-crouch);
+      ctx.strokeStyle="rgba(255,255,255,.16)";ctx.beginPath();ctx.moveTo(-8,-41-crouch);ctx.lineTo(7,-44-crouch);ctx.stroke();
 
-    // Fixed arm bones in a low skating stance. Airborne pose spreads for balance.
-    const shL={x:-9,y:-43-crouch},shR={x:9,y:-43-crouch};
-    const elL=airborne?{x:-19,y:-39-crouch}:{x:-17,y:-34-crouch};
-    const wrL=airborne?{x:-27,y:-43-crouch}:{x:-12,y:-27-crouch};
-    const elR=airborne?{x:19,y:-37-crouch}:{x:17,y:-33-crouch};
-    const wrR=airborne?{x:27,y:-40-crouch}:{x:13,y:-26-crouch};
-    limbPoly(shL,elL,3.1,2.5,skin,outline);limbPoly(elL,wrL,2.5,2.0,skin,outline);limbPoly(shR,elR,3.1,2.5,skin,outline);limbPoly(elR,wrR,2.5,2.0,skin,outline);
-    ctx.fillStyle=skinHi;ctx.strokeStyle=outline;ctx.lineWidth=1;for(const w of [wrL,wrR]){ctx.beginPath();ctx.arc(w.x,w.y,2.6,0,TAU);ctx.fill();ctx.stroke();}
+      // Fixed arm bones in a low skating stance. Airborne pose spreads for balance.
+      const shL={x:-9,y:-43-crouch},shR={x:9,y:-43-crouch};
+      const elL=loose?{x:-22,y:-49-crouch}:airborne?{x:-19,y:-39-crouch}:{x:-17,y:-34-crouch};
+      const wrL=loose?{x:-30,y:-56-crouch}:airborne?{x:-27,y:-43-crouch}:{x:-12,y:-27-crouch};
+      const elR=loose?{x:21,y:-48-crouch}:airborne?{x:19,y:-37-crouch}:{x:17,y:-33-crouch};
+      const wrR=loose?{x:31,y:-54-crouch}:airborne?{x:27,y:-40-crouch}:{x:13,y:-26-crouch};
+      limbPoly(shL,elL,3.1,2.5,skin,outline);limbPoly(elL,wrL,2.5,2.0,skin,outline);limbPoly(shR,elR,3.1,2.5,skin,outline);limbPoly(elR,wrR,2.5,2.0,skin,outline);
+      ctx.fillStyle=skinHi;ctx.strokeStyle=outline;ctx.lineWidth=1;for(const w of [wrL,wrR]){ctx.beginPath();ctx.arc(w.x,w.y,2.6,0,TAU);ctx.fill();ctx.stroke();}
 
-    // Neck + detailed skater head, backwards cap and small facial features.
-    ctx.fillStyle=skin;ctx.fillRect(-2.6,-55-crouch,5.2,6);
-    const hg=ctx.createRadialGradient(-2,-63-crouch,1,0,-62-crouch,9);hg.addColorStop(0,skinHi);hg.addColorStop(.7,skin);hg.addColorStop(1,"#925f43");ctx.fillStyle=hg;ctx.strokeStyle=outline;ctx.lineWidth=1.2;
-    ctx.beginPath();ctx.moveTo(-6.5,-69-crouch);ctx.quadraticCurveTo(0,-74-crouch,7,-68-crouch);ctx.lineTo(7,-61-crouch);ctx.lineTo(4,-56-crouch);ctx.lineTo(-1,-55-crouch);ctx.lineTo(-6,-59-crouch);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.fillStyle="#202833";ctx.strokeStyle=outline;ctx.beginPath();ctx.arc(-1,-68-crouch,7,Math.PI,TAU);ctx.fill();ctx.stroke();ctx.fillRect(-8,-69-crouch,13,2.7);ctx.fillRect(-13,-68-crouch,6,2);
-    ctx.strokeStyle="#26170f";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(1,-65-crouch);ctx.lineTo(4,-65-crouch);ctx.moveTo(4,-63-crouch);ctx.lineTo(6,-61-crouch);ctx.moveTo(1,-58-crouch);ctx.lineTo(4,-58.5-crouch);ctx.stroke();ctx.fillStyle="#24160f";ctx.beginPath();ctx.arc(3.4,-64.3-crouch,.7,0,TAU);ctx.fill();
+      // Neck + detailed skater head, backwards cap and small facial features.
+      ctx.fillStyle=skin;ctx.fillRect(-2.6,-55-crouch,5.2,6);
+      const hg=ctx.createRadialGradient(-2,-63-crouch,1,0,-62-crouch,9);hg.addColorStop(0,skinHi);hg.addColorStop(.7,skin);hg.addColorStop(1,"#925f43");ctx.fillStyle=hg;ctx.strokeStyle=outline;ctx.lineWidth=1.2;
+      ctx.beginPath();ctx.moveTo(-6.5,-69-crouch);ctx.quadraticCurveTo(0,-74-crouch,7,-68-crouch);ctx.lineTo(7,-61-crouch);ctx.lineTo(4,-56-crouch);ctx.lineTo(-1,-55-crouch);ctx.lineTo(-6,-59-crouch);ctx.closePath();ctx.fill();ctx.stroke();
+      ctx.fillStyle="#202833";ctx.strokeStyle=outline;ctx.beginPath();ctx.arc(-1,-68-crouch,7,Math.PI,TAU);ctx.fill();ctx.stroke();ctx.fillRect(-8,-69-crouch,13,2.7);ctx.fillRect(-13,-68-crouch,6,2);
+      ctx.strokeStyle="#26170f";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(1,-65-crouch);ctx.lineTo(4,-65-crouch);ctx.moveTo(4,-63-crouch);ctx.lineTo(6,-61-crouch);
+      if(loose){ctx.moveTo(1,-57-crouch);ctx.lineTo(4,-58.5-crouch);}else{ctx.moveTo(1,-58-crouch);ctx.lineTo(4,-58.5-crouch);}
+      ctx.stroke();ctx.fillStyle="#24160f";ctx.beginPath();ctx.arc(3.4,-64.3-crouch,.7,0,TAU);ctx.fill();
+    };
 
-    if(!airborne){ctx.strokeStyle="rgba(180,220,255,.45)";ctx.lineWidth=1.15;for(let k=0;k<3;k++){ctx.beginPath();ctx.moveTo(-29-k*5,2+k*2);ctx.lineTo(-39-k*8,2+k*2);ctx.stroke();}}
-    else {
-      const vmag=Math.hypot(d.vx||0,d.vy||0)*S.view.s;
-      if(vmag>260){ctx.save();ctx.rotate(-ang);ctx.fillStyle=vmag>430?"#ffd166":"#dceeff";ctx.font="900 13px Arial";ctx.textAlign="center";ctx.fillText(vmag>430?"SICK AIR!":"AIR!",0,-62);ctx.restore();}
+    if(bailing){
+      const bd=d.board,bb=d.body;
+      if(bd){ctx.save();ctx.translate(X(bd.x),Y(bd.y));ctx.rotate(bd.spin||0);ctx.scale(SC,SC);drawBoard(0);ctx.restore();}
+      if(bb){ctx.save();ctx.translate(X(bb.x),Y(bb.y));ctx.rotate(bb.spin||0);ctx.scale(SC,SC);drawRider("bail");ctx.restore();}
+      const hx=bb?X(bb.x):sx,hy=bb?Y(bb.y):sy;
+      ctx.fillStyle="rgba(239,129,120,.95)";ctx.font="900 15px Arial";ctx.textAlign="center";ctx.fillText("BAIL!",hx,hy-46);
+      ctx.fillStyle="rgba(239,129,120,.7)";ctx.font="700 10px Arial";ctx.fillText(d.bailReason||"",hx,hy-33);
+    }else{
+      ctx.save();ctx.translate(sx,sy);ctx.rotate(a);ctx.scale(SC,SC);
+      ctx.save();drawBoard(airborne?(d.flip||0):0);ctx.restore();
+      drawRider(airborne?"air":"ride");
+      if(!airborne){ctx.strokeStyle="rgba(180,220,255,.45)";ctx.lineWidth=1.15;for(let k=0;k<3;k++){ctx.beginPath();ctx.moveTo(-29-k*5,2+k*2);ctx.lineTo(-39-k*8,2+k*2);ctx.stroke();}}
+      else {
+        const vmag=Math.hypot(d.vx||0,d.vy||0)*vs;
+        // Was ctx.rotate(-ang): "ang" is the global angle-between-points helper, so this
+        // silently passed a function to rotate() and never counter-rotated at all.
+        if(vmag>260){ctx.save();ctx.rotate(-a);ctx.fillStyle=vmag>430?"#ffd166":"#dceeff";ctx.font="900 13px Arial";ctx.textAlign="center";ctx.fillText(vmag>430?"SICK AIR!":"AIR!",0,-62);ctx.restore();}
+      }
+      ctx.restore();
     }
-    ctx.restore();
+
+    // Speed-tier streaks. Drawn in screen space behind the rider so they read at any zoom.
+    if(!bailing && (d.tier||0)>=2){
+      const tcol=["#78b7f1","#8fd0ff","#ffd166","#ff9f43","#ff5ac8"][d.tier];
+      const back=d.state==="ride"?(d.speed<0?1:-1):((d.vx||0)<0?1:-1);
+      ctx.save();ctx.strokeStyle=tcol;ctx.globalAlpha=.5;ctx.lineWidth=1.6;
+      for(let k=0;k<4+d.tier*2;k++){
+        const oy=(Math.random()-.5)*34,L=26+Math.random()*(30+d.tier*26);
+        ctx.beginPath();ctx.moveTo(sx+back*18,sy+oy);ctx.lineTo(sx+back*(18+L),sy+oy);ctx.stroke();
+      }
+      ctx.restore();
+      if(d.tier>=4){ctx.save();ctx.strokeStyle="rgba(255,90,200,.35)";ctx.lineWidth=2;ctx.beginPath();ctx.arc(sx,sy,26+((clk*900)%60),0,TAU);ctx.stroke();ctx.restore();}
+    }
+
+    /* Loop progress. The rider is upside down and moving fast; a plain number is the
+       only thing readable at that point. */
+    if(d.loopTurn>Math.PI*.5 && d.state==="ride"){
+      const pctv=Math.min(100,Math.round(d.loopTurn/TAU*100));
+      ctx.save();
+      ctx.strokeStyle="rgba(255,90,200,.85)";ctx.lineWidth=3;
+      ctx.beginPath();ctx.arc(sx,sy-58,15,-Math.PI/2,-Math.PI/2+TAU*Math.min(1,d.loopTurn/TAU));ctx.stroke();
+      ctx.fillStyle="#ff5ac8";ctx.font="900 11px Arial";ctx.textAlign="center";
+      ctx.fillText(pctv+"%",sx,sy-54);
+      ctx.fillText("LOOP",sx,sy-78);
+      ctx.restore();
+    }
+
+    /* Trick readout: what he is attempting while airborne, then the verdict on landing. */
+    if(airborne && (d.halves||d.flips||d.grab)){
+      const bits=[];
+      if(d.flips>=2)bits.push("DOUBLE KICKFLIP");else if(d.flips===1)bits.push(d.flipDir<0?"HEELFLIP":"KICKFLIP");
+      if(d.halves)bits.push(String(d.halves*180));
+      if(d.grab)bits.push(d.grab.toUpperCase());
+      ctx.save();ctx.fillStyle="#b8ff73";ctx.font="900 13px Arial";ctx.textAlign="center";
+      ctx.fillText(bits.join(" "),sx,sy-92);ctx.restore();
+    }
+    if(d.trickT>0 && d.trickName){
+      ctx.save();
+      ctx.globalAlpha=Math.min(1,d.trickT);
+      ctx.fillStyle=d.trickOK?"#b8ff73":"#ff9f43";
+      ctx.font="900 20px Arial";ctx.textAlign="center";
+      ctx.fillText(d.trickName.toUpperCase(),W/2,74);
+      ctx.restore();
+    }
+
+    if(d.slowmo!==undefined && d.slowmo<.75){
+      ctx.save();ctx.fillStyle="rgba(255,209,102,.9)";ctx.font="900 12px Arial";ctx.textAlign="center";
+      ctx.fillText("HANG TIME",sx,sy-72);ctx.restore();
+    }
 
     if(d.goal){ctx.save();ctx.strokeStyle="rgba(120,183,241,.28)";ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(X(d.goal.x0),Y(d.goal.y)-16);ctx.lineTo(X(d.goal.x1),Y(d.goal.y)-16);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle="rgba(120,183,241,.75)";ctx.font="700 10px Arial";ctx.textAlign="center";ctx.fillText("LAND HERE",(X(d.goal.x0)+X(d.goal.x1))/2,Y(d.goal.y)-22);ctx.restore();}
-    if(d.state==="air"){ctx.fillStyle=d.crashed?"rgba(239,129,120,.95)":"rgba(255,209,102,.9)";ctx.font="900 14px Arial";ctx.textAlign="center";ctx.fillText(d.crashed?"OH NO":"AIR!",sx,sy-42);}
-    else{ctx.fillStyle="rgba(120,183,241,.7)";for(let k=0;k<4;k++){ctx.beginPath();ctx.arc(sx-10-k*7,sy+4+Math.sin(xt*30+k)*1.5,1.5,0,TAU);ctx.fill();}ctx.fillStyle="rgba(255,255,255,.75)";ctx.font="700 10px Arial";ctx.textAlign="left";ctx.fillText((d.sliding?"SLIDING  ":"")+Math.round(speedPx)+" px/s",sx+14,sy-17);}
+    if(!bailing){
+      if(d.state==="air"){ctx.fillStyle="rgba(255,209,102,.9)";ctx.font="900 14px Arial";ctx.textAlign="center";ctx.fillText("AIR!",sx,sy-42);}
+      else{ctx.fillStyle="rgba(120,183,241,.7)";for(let k=0;k<4;k++){ctx.beginPath();ctx.arc(sx-10-k*7,sy+4+Math.sin(clk*30+k)*1.5,1.5,0,TAU);ctx.fill();}ctx.fillStyle="rgba(255,255,255,.75)";ctx.font="700 10px Arial";ctx.textAlign="left";ctx.fillText((d.sliding?"SLIDING  ":"")+Math.round(speedPx)+" px/s",sx+14,sy-17);}
+    }
+
+    // Run HUD. The combo multiplier is the whole game, so it gets to be readable.
+    ctx.save();
+    const flow=d.flow||1,tier=d.tier||0,FLOW_CAP_UI=15;
+    const barW=132,bx=18,by=H-52;
+    ctx.fillStyle="rgba(10,13,17,.62)";ctx.fillRect(bx-8,by-26,barW+16,46);
+    ctx.fillStyle="rgba(255,255,255,.55)";ctx.font="700 9px Arial";ctx.textAlign="left";
+    ctx.fillText("COMBO",bx,by-14);
+    ctx.fillStyle=flow>6?"#ff5ac8":flow>2.5?"#ffd166":"#78b7f1";
+    ctx.font="900 15px Arial";ctx.fillText("x"+flow.toFixed(2),bx+44,by-11);
+    ctx.fillStyle="rgba(255,255,255,.10)";ctx.fillRect(bx,by-4,barW,5);
+    ctx.fillStyle=flow>6?"#ff5ac8":flow>2.5?"#ffd166":"#78b7f1";
+    ctx.fillRect(bx,by-4,barW*Math.min(1,(flow-1)/(FLOW_CAP_UI-1)),5);
+    ctx.fillStyle="rgba(255,255,255,.55)";ctx.font="700 9px Arial";
+    ctx.fillText(["","FAST","BLAZING","UNREASONABLE","LUDICROUS"][tier]||"",bx,by+13);
+    ctx.textAlign="right";
+    ctx.fillText("TOP "+Math.round(d.topSpeed||0)+"   AIR "+(d.bestAir||0).toFixed(2)+"s"+
+                 (d.loops?"   LOOPS "+d.loops:""),bx+barW,by+13);
+    ctx.textAlign="left";ctx.fillStyle="rgba(255,255,255,.35)";ctx.font="700 9px Arial";
+    ctx.fillText((d.tricks?d.tricks+" TRICKS   ":"")+"ESC TO END",bx,by+26);
+    ctx.restore();
   }
   if(XFX.kind==="surferFail"&&XFX.data){ctx.fillStyle="#ffd166";ctx.font="900 42px Arial";ctx.textAlign="center";ctx.fillText("¯\\_(ツ)_/¯",X(XFX.data.c.x),Y(XFX.data.c.y));}
   if(XFX.kind==="pacEater" && XFX.data && XFX.data.P){
@@ -11587,7 +12587,31 @@ function workspaceWidget(){
     const sel=document.createElement("select"); sel.style.cssText="width:118px;max-width:118px;height:21px;margin-top:2px";
     sel.title="Whiteboard surface\n\nChanges only the Whiteboard material. Drafting/model space stays dark.";
     for(const [id,p] of Object.entries(BOARD_PRESETS)){ const o=document.createElement("option"); o.value=id; o.textContent=p.label; o.selected=id===S.boardSurface; sel.append(o); }
-    sel.onchange=()=>setBoardSurface(sel.value); wrap.append(sel);
+    sel.onchange=()=>{ setBoardSurface(sel.value); paintRibbon(); }; wrap.append(sel);
+
+    /* Board opacity over a reference. Only offered when a reference is loaded, because
+       with nothing underneath there is nothing to see through to. */
+    if(S.refs&&S.refs.length){
+      const row=document.createElement("div");
+      row.style.cssText="display:flex;align-items:center;gap:4px;margin-top:2px;width:118px";
+      const sl=document.createElement("input");
+      sl.type="range"; sl.min="0"; sl.max="100"; sl.step="1";
+      sl.value=String(Math.round((S.boardOpacity==null?1:S.boardOpacity)*100));
+      sl.style.cssText="flex:1;min-width:0;height:14px;margin:0";
+      sl.title="Board opacity over reference\n\nThins the Whiteboard material where it covers a reference image, so you can trace or mark up against a photo or plan. 0% hides the board entirely and shows the reference clean. Affects display only: drawing data, model space and export are unchanged.";
+      const val=document.createElement("span");
+      val.style.cssText="font-size:9px;color:var(--ink-faint);width:26px;text-align:right";
+      const show=v=>{ val.textContent=v+"%"; };
+      show(sl.value);
+      // input redraws live while dragging; change commits and echoes once on release
+      sl.oninput=()=>{ show(sl.value); setBoardOpacity(parseInt(sl.value,10)/100,true); };
+      sl.onchange=()=>setBoardOpacity(parseInt(sl.value,10)/100);
+      sl.ondblclick=()=>{ sl.value="100"; show("100"); setBoardOpacity(1); };
+      row.append(sl,val); wrap.append(row);
+      const cap=document.createElement("div");
+      cap.style.cssText="font-size:9px;color:var(--ink-faint);text-align:center";
+      cap.textContent="board over ref"; wrap.append(cap);
+    }
   }
   return wrap;
 }
